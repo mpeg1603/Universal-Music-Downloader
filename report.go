@@ -196,8 +196,8 @@ func writeReports(rep *Report, dir string) ([]string, error) {
 	for i, d := range rep.Downloaded {
 		t, r := d.Track, d.Rec
 		label := sourceLabels[r.Source]
-		if r.Source == "torrent" && r.SourceTitle != "" {
-			label = "Torrent: " + r.SourceTitle
+		if r.Source == "torrent" && r.SourceAlbum != "" {
+			label = "Torrent: " + r.SourceAlbum
 		}
 		fmt.Fprintf(&b, "| %d | %s | %s | %s | %s | `%s` |\n", i+1, mdEscape(t.ArtistStr()), mdLink(t.Title, t.SpotifyURL),
 			mdEscape(t.Album), mdLink(label, r.SourceURL), strings.ReplaceAll(r.Path, "`", "'"))

@@ -1,7 +1,8 @@
 # spotify-downloader
 
 Makes a local copy of your Spotify library: your playlists and Liked Songs. It never downloads
-from Spotify; it finds each song elsewhere, in this order:
+from Spotify; it finds each song elsewhere. By default it tries these sources in this order, and
+`--sources` picks any of them in any order:
 
 | Source | What it uses |
 |---|---|
@@ -10,7 +11,7 @@ from Spotify; it finds each song elsewhere, in this order:
 | **YouTube Music** | Official "song" uploads, found by ISRC and by artist + title. |
 | **SoundCloud** | Public tracks. 30-second preview streams are detected and rejected. |
 | **YouTube** | Regular uploads. |
-| **Torrents** *(optional, last resort)* | Searched album by album through your own Jackett or Prowlarr. Only the files needed are downloaded. |
+| **Torrent** *(optional)* | Searched through your own Jackett or Prowlarr, downloaded with aria2c, fetching only the file needed. Added at the end of the default order once set up; see **[TORRENTS.md](TORRENTS.md)**. |
 
 Every result is checked before it's used:
 
@@ -35,7 +36,9 @@ Also in `~/Music/Spotify/Playlists/`: one `.m3u8` file per playlist, which any m
 - **ffmpeg**. Most Linux systems have it; otherwise `sudo pacman -S ffmpeg` / `sudo apt install ffmpeg`.
 - **yt-dlp** is downloaded automatically on first use (the official build, checksum-verified, refreshed weekly) into `~/.cache/spotify-downloader/`.
 - **For YouTube**, a JavaScript runtime: `node` (which you have) or `deno`.
-- **For torrents only**: `aria2c` (`sudo pacman -S aria2`) and a Jackett or Prowlarr install.
+- **For torrents only**: the **`aria2`** package, which provides the `aria2c` command
+  (`sudo pacman -S aria2` / `sudo apt install aria2`; there is no package called `aria2c`),
+  plus Jackett or Prowlarr. [TORRENTS.md](TORRENTS.md) walks through it.
 
 ## Step 1: get your track list (no Premium needed)
 
@@ -84,7 +87,7 @@ are retried automatically. Tracks with no match are retried only with `--retry-f
 | `--out DIR` | Music folder (default `~/Music/Spotify`). |
 | `--format mp3\|opus\|m4a\|flac\|original` | Default `mp3` (VBR V0). YouTube audio is Opus at about 130–160 kbps, so `opus` or `original` avoid re-encoding it. Free Bandcamp downloads come in lossless. |
 | `--playlist NAME` / `--exclude-playlist NAME` / `--no-liked` | Choose which playlists to download (repeatable). |
-| `--sources LIST` | Which sources to use, in order (default `bandcamp,archive,youtube_music,soundcloud,youtube`). |
+| `--sources LIST` | Which sources to use, in order: any of `bandcamp,archive,youtube_music,soundcloud,youtube,torrent`. Default: all but `torrent`, plus `torrent` at the end once torrents are set up. Examples: `--sources torrent`, `--sources torrent,youtube_music`. |
 | `--workers N` | Tracks processed in parallel (default 3; more makes YouTube bot checks likelier). |
 | `--limit N` | Only process N tracks. |
 | `--retry-failed` | Try "no match" tracks again. |
@@ -93,27 +96,26 @@ are retried automatically. Tracks with no match are retried only with `--retry-f
 | `--report-only` | Just rewrite the reports and playlists. |
 | `-v` | Show what's happening in detail. |
 
-## Torrents (last resort)
+## Torrents
 
-Tracks that no other source had are grouped by album, then:
+`torrent` is a source like the others. Set it up once:
 
-1. each album is searched for through a **Torznab** feed, the standard API of
-   [Jackett](https://github.com/Jackett/Jackett) and [Prowlarr](https://prowlarr.com), which
-   query the torrent indexers *you* add to them;
-2. the best-seeded result that actually contains your tracks is picked;
-3. aria2c downloads **only those files** and stops seeding as soon as they're done
-   (`--seed-time=0`).
-
-Set it up like this:
-
-1. Install Jackett or Prowlarr and add the indexers you want.
-2. Copy the **Torznab feed URL** and **API key** from its web page.
-3. Install aria2 and run:
+1. Install the **aria2** package.
+2. Install Jackett or Prowlarr and add the indexers you want.
+3. Point the tool at it:
 
 ```sh
-./spotify-downloader --torznab "http://127.0.0.1:9117/api/v2.0/indexers/all/results/torznab/" --torznab-key YOUR_KEY
-# or: export TORZNAB_URL=... TORZNAB_KEY=...
+./spotify-downloader --torznab http://127.0.0.1:9117 --torznab-key YOUR_KEY --check-torrents   # Jackett
+./spotify-downloader --torznab http://127.0.0.1:9696 --torznab-key YOUR_KEY --check-torrents   # Prowlarr
 ```
+
+`--check-torrents` tests every step (aria2c, connection, API key, a sample search, a sample
+torrent's file list) and says what to fix. The settings are remembered. From then on, torrents
+are tried after the other sources, or wherever you put `torrent` in `--sources`.
+
+**[TORRENTS.md](TORRENTS.md)** is the full guide: installing Jackett/Prowlarr (AUR, Docker),
+adding indexers, FlareSolverr for Cloudflare-protected sites, choosing the order, how torrents
+and files are picked, tuning, and troubleshooting every message.
 
 BitTorrent uploads to other peers *while* downloading, and many public torrents of commercial
 music are unauthorized copies. What you download this way, and whether it's legal where you live,

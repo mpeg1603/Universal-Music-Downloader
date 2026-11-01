@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -87,7 +88,9 @@ Output:
                          fields: {artist} {artists} {album_artist} {album} {title} {tracknum} {year}
 
 Downloading:
-  --sources LIST         tried in this order (default bandcamp,archive,youtube_music,soundcloud,youtube)
+  --sources LIST         tried in this order (default bandcamp,archive,youtube_music,soundcloud,youtube,
+                         plus torrent at the end once torrents are set up); any subset, any order,
+                         e.g. --sources torrent or --sources torrent,youtube_music
   --workers N            tracks processed in parallel (default 3)
   --limit N              only process N tracks (handy for a first test)
   --retry-failed         also retry tracks that found no match last time
@@ -96,10 +99,14 @@ Downloading:
   --cookies-from-browser BROWSER   let yt-dlp use your browser's YouTube login (helps with bot checks)
   --yt-dlp PATH          use this yt-dlp instead of the automatically downloaded one
 
-Torrents (last resort, for tracks nothing else had; needs aria2c):
-  --torznab URL          Torznab feed of your Jackett or Prowlarr (or set TORZNAB_URL)
-  --torznab-key KEY      its API key (or set TORZNAB_KEY)
-  --torrent-timeout D    give up on a torrent after this long (default 30m)
+Torrents (the "torrent" source; needs Jackett or Prowlarr and the aria2 package; see TORRENTS.md):
+  --torznab URL          your Jackett (http://127.0.0.1:9117) or Prowlarr (http://127.0.0.1:9696)
+                         address, or a Torznab feed URL; repeatable. Remembered for later runs
+                         (--torznab none forgets it). Also read from TORZNAB_URL.
+  --torznab-key KEY      their API key (remembered too; or set TORZNAB_KEY)
+  --check-torrents       test the torrent setup step by step, then exit
+  --torrent-query Q      what --check-torrents searches for (default: an album from your library)
+  --torrent-timeout D    give up on a single torrent download after this long (default 30m)
 
 Other:
   --report-only          only rewrite the reports and playlists
@@ -132,13 +139,18 @@ func run(args []string) int {
 	cookies := fs.String("cookies", "", "")
 	cookiesFromBrowser := fs.String("cookies-from-browser", "", "")
 	ytdlpPath := fs.String("yt-dlp", "", "")
-	torznabURL := fs.String("torznab", os.Getenv("TORZNAB_URL"), "")
-	torznabKey := fs.String("torznab-key", os.Getenv("TORZNAB_KEY"), "")
+	var torznab listFlag
+	fs.Var(&torznab, "torznab", "")
+	torznabKey := fs.String("torznab-key", "", "")
+	checkTorrentsFlag := fs.Bool("check-torrents", false, "")
+	torrentQuery := fs.String("torrent-query", "", "")
 	torrentTimeout := fs.Duration("torrent-timeout", 30*time.Minute, "")
 	fs.BoolVar(&verbose, "v", false, "")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	explicitSources := false
+	fs.Visit(func(f *flag.Flag) { explicitSources = explicitSources || f.Name == "sources" })
 	if fs.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "unexpected argument %q (did you mean --from %s?)\n", fs.Arg(0), fs.Arg(0))
 		return 2
@@ -186,8 +198,24 @@ func run(args []string) int {
 		return 1
 	}
 
-	// The track list.
+	tcfg, err := torrentSettings(torznab, *torznabKey)
+	if err != nil {
+		return fail(err)
+	}
 	libPath := filepath.Join(stateDir, "library.json")
+	if *checkTorrentsFlag {
+		aria2c, _ := exec.LookPath("aria2c")
+		query := *torrentQuery
+		if query == "" {
+			query = sampleAlbumQuery(libPath)
+		}
+		if checkTorrents(ctx, tcfg, aria2c, query) {
+			return 0
+		}
+		return 1
+	}
+
+	// The track list.
 	var full *Library
 	if len(from) > 0 {
 		lib := newLibrary()
@@ -262,21 +290,30 @@ func run(args []string) int {
 
 	// Tools and sources.
 	sourceNames := strings.Split(strings.ReplaceAll(*sourcesFlag, " ", ""), ",")
+	if !explicitSources && tcfg.configured() {
+		sourceNames = append(sourceNames, "torrent")
+	}
 	tools, err := findTools(ctx, *ytdlpPath, defaultCacheDir(), usesYtDlp(sourceNames), logf)
 	if err != nil {
 		return fail(err)
 	}
-	sources, err := buildSources(sourceNames, *format, filepath.Join(stateDir, "cache"), newYtDlp(tools, *cookies, *cookiesFromBrowser))
+	cacheDir := filepath.Join(stateDir, "cache")
+	var torrentSource Source
+	if contains(sourceNames, "torrent") {
+		src, err := setUpTorrents(ctx, tcfg, tools, cacheDir, *format, *torrentTimeout)
+		switch {
+		case err == nil:
+			torrentSource = src
+		case explicitSources:
+			return fail(err)
+		default: // added automatically: carry on without it
+			logf("Skipping torrents: %v", err)
+			sourceNames = remove(sourceNames, "torrent")
+		}
+	}
+	sources, err := buildSources(sourceNames, *format, cacheDir, newYtDlp(tools, *cookies, *cookiesFromBrowser), torrentSource)
 	if err != nil {
 		return fail(err)
-	}
-	var torrents *TorrentFetcher
-	if *torznabURL != "" {
-		if tools.Aria2c == "" {
-			logf("Torrents are configured but aria2c isn't installed (e.g. `sudo pacman -S aria2`); skipping torrents.")
-		} else {
-			torrents = newTorrentFetcher(*torznabURL, *torznabKey, tools, *torrentTimeout)
-		}
 	}
 	defer os.RemoveAll(filepath.Join(stateDir, "cache"))
 	defer os.RemoveAll(filepath.Join(stateDir, "tmp"))
@@ -310,16 +347,14 @@ func run(args []string) int {
 	for _, s := range sources {
 		labels = append(labels, s.Label())
 	}
-	if torrents != nil {
-		labels = append(labels, "Torrent (last resort)")
-	}
 	logf("Sources, in order: %s", strings.Join(labels, ", "))
 
 	n := 0
 	total := len(todo)
-	final := map[string]string{} // track key -> last outcome
-	var unresolved []*Track
-	show := func(o Outcome) {
+	counts := engine.run(ctx, stop, todo, func(o Outcome) {
+		if o.Status == "aborted" {
+			return
+		}
 		n++
 		prefix := fmt.Sprintf("[%*d/%d]", len(fmt.Sprint(total)), n, total)
 		if o.Status == "downloaded" {
@@ -331,35 +366,7 @@ func run(args []string) int {
 			detail = detail[:197] + "…"
 		}
 		fmt.Printf("%s %s %s %s\n", prefix, paint("31", "✗"), o.Track, paint("2", detail))
-	}
-	engine.run(ctx, stop, todo, func(o Outcome) {
-		if o.Status == "aborted" {
-			return
-		}
-		show(o)
-		final[o.Track.Key] = o.Status
-		if o.Status != "downloaded" {
-			unresolved = append(unresolved, o.Track)
-		}
 	})
-	if torrents != nil && len(unresolved) > 0 && ctx.Err() == nil {
-		select {
-		case <-stop:
-		default:
-			logf("\nTrying torrents for %d tracks…", len(unresolved))
-			n, total = 0, len(unresolved)
-			engine.runTorrents(ctx, stop, torrents, unresolved, func(o Outcome) {
-				show(o)
-				if o.Status == "downloaded" {
-					final[o.Track.Key] = o.Status
-				}
-			})
-		}
-	}
-	counts := map[string]int{}
-	for _, st := range final {
-		counts[st]++
-	}
 	if total > 0 {
 		fmt.Printf("\n%s, %s\n", paint("32", fmt.Sprintf("%d downloaded", counts["downloaded"])),
 			paint("31", fmt.Sprintf("%d not downloaded", counts["failed"]+counts["error"])))
@@ -371,4 +378,93 @@ func run(args []string) int {
 	writeAll()
 	fmt.Printf("  Log:        %s\n", logPath)
 	return 0
+}
+
+// torrentSettings combines --torznab/--torznab-key, the TORZNAB_* variables and the saved
+// settings. Settings given as flags are saved for later runs.
+func torrentSettings(feeds []string, key string) (TorrentConfig, error) {
+	saved := loadTorrentConfig()
+	cfg := saved
+	switch {
+	case len(feeds) == 1 && strings.EqualFold(feeds[0], "none"):
+		cfg = TorrentConfig{}
+	case len(feeds) > 0:
+		cfg = TorrentConfig{Feeds: feeds, Key: firstNonEmpty(key, saved.Key)}
+	case os.Getenv("TORZNAB_URL") != "":
+		return TorrentConfig{Feeds: splitList(os.Getenv("TORZNAB_URL")), Key: firstNonEmpty(key, os.Getenv("TORZNAB_KEY"))}, nil
+	case key != "":
+		cfg.Key = key
+	}
+	if strings.Join(cfg.Feeds, " ") == strings.Join(saved.Feeds, " ") && cfg.Key == saved.Key {
+		return cfg, nil
+	}
+	if err := saveTorrentConfig(cfg); err != nil {
+		return cfg, fmt.Errorf("couldn't save the torrent settings: %w", err)
+	}
+	if cfg.configured() {
+		logf("Saved the torrent settings to %s", torrentConfigPath())
+	} else {
+		logf("Forgot the saved torrent settings")
+	}
+	return cfg, nil
+}
+
+func setUpTorrents(ctx context.Context, cfg TorrentConfig, tools *Tools, cacheDir, format string, timeout time.Duration) (Source, error) {
+	if !cfg.configured() {
+		return nil, fmt.Errorf("the torrent source needs Jackett or Prowlarr: pass --torznab URL --torznab-key KEY (see TORRENTS.md)")
+	}
+	if tools.Aria2c == "" {
+		return nil, fmt.Errorf("the aria2c command wasn't found; install the aria2 package (sudo pacman -S aria2 or sudo apt install aria2)")
+	}
+	feeds, err := resolveFeeds(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%w (run with --check-torrents for help)", err)
+	}
+	// Check each feed once now, rather than failing on every track.
+	var working []*Torznab
+	for _, f := range feeds {
+		if err := f.caps(ctx); err != nil {
+			if len(feeds) == 1 {
+				return nil, fmt.Errorf("%w (run with --check-torrents for help)", err)
+			}
+			logf("Leaving out %v (run with --check-torrents for help)", err)
+			continue
+		}
+		working = append(working, f)
+	}
+	if len(working) == 0 {
+		return nil, fmt.Errorf("none of the torrent feeds answered (run with --check-torrents for help)")
+	}
+	return newTorrentSource(working, tools.Aria2c, cacheDir, format, timeout), nil
+}
+
+// sampleAlbumQuery picks an album from the saved library for --check-torrents to search for.
+func sampleAlbumQuery(libPath string) string {
+	if lib, err := loadLibrary(libPath); err == nil {
+		for _, t := range lib.ordered() {
+			if t.Album != "" && !strings.EqualFold(t.Album, t.Title) {
+				return t.AlbumArtistStr() + " " + t.Album
+			}
+		}
+	}
+	return "Kevin MacLeod"
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func remove(list []string, s string) []string {
+	var out []string
+	for _, v := range list {
+		if v != s {
+			out = append(out, v)
+		}
+	}
+	return out
 }

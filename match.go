@@ -27,6 +27,7 @@ type Candidate struct {
 	// ArtistIsCredit is true when Artist is the performer credit (Bandcamp band, YouTube Music
 	// credits). Then the artist's name in the title doesn't count: that's how covers are named.
 	ArtistIsCredit bool
+	Ref            string // source-specific data needed to download it
 }
 
 var accentFolder = strings.NewReplacer(

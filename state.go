@@ -21,6 +21,7 @@ type Record struct {
 	SourceTitle     string  `json:"source_title,omitempty"`
 	SourceArtist    string  `json:"source_artist,omitempty"`
 	SourceArtistURL string  `json:"source_artist_url,omitempty"`
+	SourceAlbum     string  `json:"source_album,omitempty"` // for torrents: the torrent's name
 	Score           float64 `json:"score,omitempty"`
 	Reason          string  `json:"reason,omitempty"`
 	Attempts        int     `json:"attempts"`

@@ -38,7 +38,7 @@ func usesYtDlp(names []string) bool {
 	return false
 }
 
-func buildSources(names []string, format string, cacheDir string, ytdlp *YtDlp) ([]Source, error) {
+func buildSources(names []string, format string, cacheDir string, ytdlp *YtDlp, torrent Source) ([]Source, error) {
 	var out []Source
 	for _, n := range names {
 		switch n {
@@ -52,8 +52,13 @@ func buildSources(names []string, format string, cacheDir string, ytdlp *YtDlp) 
 			out = append(out, &SoundCloud{ytdlp: ytdlp})
 		case "youtube":
 			out = append(out, &YouTube{ytdlp: ytdlp, http: newHTTP("YouTube", 0)})
+		case "torrent":
+			if torrent == nil {
+				return nil, fmt.Errorf("the torrent source isn't set up (see TORRENTS.md)")
+			}
+			out = append(out, torrent)
 		default:
-			return nil, fmt.Errorf("unknown source %q; choose from %s", n, strings.Join(defaultSources, ", "))
+			return nil, fmt.Errorf("unknown source %q; choose from %s, torrent", n, strings.Join(defaultSources, ", "))
 		}
 	}
 	return out, nil

@@ -18,7 +18,7 @@ import (
 )
 
 // External programs: ffmpeg/ffprobe (required), yt-dlp (downloaded automatically) and
-// aria2c (optional, only for torrents).
+// aria2c from the aria2 package (optional, only for torrents).
 
 type Tools struct {
 	FFmpeg, FFprobe, YtDlp, Aria2c string

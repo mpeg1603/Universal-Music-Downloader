@@ -229,7 +229,7 @@ func (e *Engine) finalize(ctx context.Context, raw string, t *Track, c Candidate
 		return err
 	}
 	e.state.put(Record{Key: t.Key, Status: "downloaded", Path: rel, Source: c.Source, SourceURL: c.URL,
-		SourceTitle: c.Title, SourceArtist: c.Artist, SourceArtistURL: c.ArtistURL, Score: score})
+		SourceTitle: c.Title, SourceArtist: c.Artist, SourceArtistURL: c.ArtistURL, SourceAlbum: c.Album, Score: score})
 	return nil
 }
 
