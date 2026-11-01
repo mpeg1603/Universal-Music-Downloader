@@ -76,6 +76,10 @@ You can combine several: `--from a.zip --from b.csv`.
 ./spotify-downloader --exclude-playlist "Discover Weekly"
 ```
 
+While it runs, finished tracks scroll by (✓ downloaded, ✗ not, and why), and a panel at the
+bottom shows each track in progress (with a progress bar while it downloads), the overall
+progress, the download speed and how much disk space is left.
+
 You can stop it with Ctrl-C at any time. It finishes the tracks in progress, writes the reports,
 and continues where it left off on the next run. Tracks that failed because a site was unreachable
 are retried automatically. Tracks with no match are retried only with `--retry-failed`.
@@ -88,7 +92,7 @@ are retried automatically. Tracks with no match are retried only with `--retry-f
 | `--format mp3\|opus\|m4a\|flac\|original` | Default `mp3` (VBR V0). YouTube audio is Opus at about 130–160 kbps, so `opus` or `original` avoid re-encoding it. Free Bandcamp downloads come in lossless. |
 | `--playlist NAME` / `--exclude-playlist NAME` / `--no-liked` | Choose which playlists to download (repeatable). |
 | `--sources LIST` | Which sources to use, in order: any of `bandcamp,archive,youtube_music,soundcloud,youtube,torrent`. Default: all but `torrent`, plus `torrent` at the end once torrents are set up. Examples: `--sources torrent`, `--sources torrent,youtube_music`. |
-| `--workers N` | Tracks processed in parallel (default 3; more makes YouTube bot checks likelier). |
+| `--workers N` | Tracks searched/converted in parallel (default 3; more makes YouTube bot checks likelier). Tracks waiting for a torrent don't count. |
 | `--limit N` | Only process N tracks. |
 | `--retry-failed` | Try "no match" tracks again. |
 | `--cookies-from-browser firefox` | Let yt-dlp use your browser's YouTube login (see Troubleshooting). |

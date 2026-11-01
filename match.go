@@ -74,7 +74,8 @@ var (
 	reBrackets    = regexp.MustCompile(`[(\[{【]([^)\]}】]*)[)\]}】]`)
 	// Bracketed parts containing these words are packaging, not part of the song title.
 	reNoise = regexp.MustCompile(`(?i)\b(?:official|video|audio|lyrics?|visuali[sz]er|hd|hq|4k|remaster(?:ed)?|` +
-		`explicit|clean|mv|m/v|music video|full song|color coded|out now|premiere|album version|single version|original mix)\b`)
+		`explicit|clean|mv|m/v|music video|full song|color coded|out now|premiere|album version|single version|original mix|` +
+		`b[- ]?sides?|bonus(?: track)?)\b`)
 	// The same words trailing an un-bracketed upload title ("song official video"), on normalized text.
 	reNoiseTail    = regexp.MustCompile(`(?: (?:official(?: music)?(?: video| audio)?|lyric video|lyrics|audio|video|hd|hq|4k|visuali[sz]er))+$`)
 	reChannelNoise = regexp.MustCompile(`(?i)\s*-\s*topic$|vevo$|\s+official$|\s+music$|\s+records?$`)

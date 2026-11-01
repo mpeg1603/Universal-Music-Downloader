@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -125,8 +125,13 @@ func (y *YtDlp) run(ctx context.Context, extra ...string) ([]byte, error) {
 		return nil, unavailablef("yt-dlp is not available")
 	}
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, y.bin, append(append([]string{}, y.args...), extra...)...)
+	cmd := command(ctx, y.bin, append(append([]string{}, y.args...), extra...)...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if task := taskFrom(ctx); task != nil {
+		// Download progress comes as lines we asked for with --progress-template (see download).
+		cmd.Stdout = &progressLines{out: &stdout, task: task}
+		cmd.Stderr = &progressLines{out: &stderr, task: task}
+	}
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -135,6 +140,39 @@ func (y *YtDlp) run(ctx context.Context, extra ...string) ([]byte, error) {
 		return nil, ytdlpError(stderr.String(), err)
 	}
 	return stdout.Bytes(), nil
+}
+
+const progressMarker = "@sdl-progress "
+
+// progressLines passes a child's output through to out, except progress lines
+// ("@sdl-progress DONE TOTAL ESTIMATE"), which go to the task.
+type progressLines struct {
+	out     *bytes.Buffer
+	task    *Task
+	partial []byte
+}
+
+func (p *progressLines) Write(b []byte) (int, error) {
+	p.partial = append(p.partial, b...)
+	for {
+		i := bytes.IndexAny(p.partial, "\r\n")
+		if i < 0 {
+			return len(b), nil
+		}
+		line := string(p.partial[:i+1])
+		p.partial = p.partial[i+1:]
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), strings.TrimSpace(progressMarker)); ok {
+			var nums [3]int64
+			for j, f := range strings.Fields(rest) {
+				if v, err := strconv.ParseFloat(f, 64); err == nil && j < 3 {
+					nums[j] = int64(v)
+				}
+			}
+			p.task.setProgress(nums[0], max(nums[1], nums[2]))
+			continue
+		}
+		p.out.WriteString(line)
+	}
 }
 
 type flatEntry struct {
@@ -166,6 +204,8 @@ func (y *YtDlp) search(ctx context.Context, query string) ([]flatEntry, error) {
 
 func (y *YtDlp) download(ctx context.Context, u, workdir string) (string, error) {
 	out, err := y.run(ctx, "-f", "bestaudio/best", "--no-playlist", "-o", filepath.Join(workdir, "ytdlp.%(ext)s"),
+		"--progress", "--newline", "--progress-template", "download:"+progressMarker+
+			"%(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s",
 		"--print", "after_move:filepath", u)
 	if err != nil {
 		return "", err

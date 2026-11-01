@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The engine runs each track through the sources in order, then converts, tags and files
@@ -44,6 +45,8 @@ type Engine struct {
 
 	outageMu sync.Mutex
 	outages  map[string]int
+
+	board *Board // tracks in progress, for the live display (optional)
 }
 
 func newEngine(set Settings, sources []Source, state *State, tools *Tools, workDir string) *Engine {
@@ -79,34 +82,39 @@ func (e *Engine) pending(lib *Library) []*Track {
 	return todo
 }
 
-// run processes tracks with a worker pool. Closing stop stops handing out new tracks;
+// run processes tracks, at most Workers at a time. A track that only waits for a torrent swarm
+// gives up its slot meanwhile (see Task.park). Closing stop stops starting new tracks;
 // cancelling ctx also kills the ones in progress (those aren't recorded).
 func (e *Engine) run(ctx context.Context, stop <-chan struct{}, tracks []*Track, onDone func(Outcome)) map[string]int {
-	jobs := make(chan *Track)
-	results := make(chan Outcome)
-	var wg sync.WaitGroup
-	for i := 0; i < max(1, e.set.Workers); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for t := range jobs {
-				results <- e.safeProcess(ctx, t)
-			}
-		}()
-	}
+	workers := max(1, e.set.Workers)
+	pool := newSlotPool(workers, max(32, 4*workers))
+	feed, cancelFeed := context.WithCancel(ctx)
+	defer cancelFeed()
 	go func() {
-		defer close(jobs)
-		for _, t := range tracks {
-			select {
-			case jobs <- t:
-			case <-stop:
-				return
-			case <-ctx.Done():
-				return
-			}
+		select {
+		case <-stop:
+			cancelFeed()
+		case <-feed.Done():
 		}
 	}()
-	go func() { wg.Wait(); close(results) }()
+	results := make(chan Outcome)
+	go func() {
+		var wg sync.WaitGroup
+		defer func() { wg.Wait(); close(results) }()
+		for _, t := range tracks {
+			if pool.acquire(feed, false) != nil {
+				return
+			}
+			wg.Add(1)
+			go func(t *Track) {
+				defer wg.Done()
+				slot := &slotHandle{pool: pool, held: true}
+				o := e.safeProcess(ctx, t, slot)
+				slot.done()
+				results <- o
+			}(t)
+		}
+	}()
 	counts := map[string]int{}
 	for o := range results {
 		counts[o.Status]++
@@ -115,7 +123,10 @@ func (e *Engine) run(ctx context.Context, stop <-chan struct{}, tracks []*Track,
 	return counts
 }
 
-func (e *Engine) safeProcess(ctx context.Context, t *Track) (out Outcome) {
+func (e *Engine) safeProcess(ctx context.Context, t *Track, slot *slotHandle) (out Outcome) {
+	task := &Task{Track: t, started: time.Now(), slot: slot}
+	e.board.add(task)
+	defer e.board.remove(task)
 	defer func() {
 		if r := recover(); r != nil {
 			debugf("panic while processing %s: %v", t, r)
@@ -124,7 +135,7 @@ func (e *Engine) safeProcess(ctx context.Context, t *Track) (out Outcome) {
 			out = Outcome{t, "error", reason}
 		}
 	}()
-	return e.process(ctx, t)
+	return e.process(withTask(ctx, task), t)
 }
 
 func (e *Engine) process(ctx context.Context, t *Track) Outcome {
@@ -135,6 +146,7 @@ func (e *Engine) process(ctx context.Context, t *Track) Outcome {
 	}
 	defer os.RemoveAll(workdir)
 
+	task := taskFrom(ctx)
 	var reasons []string
 	transient := false
 	note := func(s Source, err error) {
@@ -149,6 +161,7 @@ func (e *Engine) process(ctx context.Context, t *Track) Outcome {
 			transient = true
 			continue
 		}
+		task.setStage("searching " + src.Label())
 		cands, err := src.Search(ctx, t)
 		if ctx.Err() != nil {
 			return Outcome{t, "aborted", ""}
@@ -166,8 +179,10 @@ func (e *Engine) process(ctx context.Context, t *Track) Outcome {
 			continue
 		}
 		for _, m := range accepted[:min(len(accepted), max(1, e.set.TriesPerSource))] {
+			task.setStage("downloading from " + src.Label())
 			raw, err := src.Download(ctx, m.Cand, t, workdir)
 			if err == nil {
+				task.setStage("converting")
 				err = e.finalize(ctx, raw, t, m.Cand, m.Score, workdir)
 			}
 			if ctx.Err() != nil {

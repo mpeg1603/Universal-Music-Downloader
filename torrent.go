@@ -160,11 +160,25 @@ func (z *Torznab) caps(ctx context.Context) error {
 
 type torrentResult struct {
 	Title, Link, Magnet, Details string
+	InfoHash                     string
 	Seeders                      int // -1 when the indexer doesn't say
 	Size                         int64
+	Categories                   []int
 }
 
-func (r torrentResult) id() string { return firstNonEmpty(r.Link, r.Magnet) + "|" + r.Title }
+var reBTIH = regexp.MustCompile(`(?i)xt=urn:btih:([0-9a-z]+)`)
+
+// id tells torrents apart across searches and indexers. Download links don't: Jackett's
+// contain a token that changes with every search.
+func (r torrentResult) id() string {
+	switch {
+	case r.InfoHash != "":
+		return "btih:" + strings.ToLower(r.InfoHash)
+	case r.Details != "":
+		return r.Details
+	}
+	return firstNonEmpty(r.Link, r.Magnet) + "|" + r.Title
+}
 
 func (z *Torznab) search(ctx context.Context, query string) ([]torrentResult, error) {
 	body, err := z.get(ctx, url.Values{"t": {"search"}, "q": {query}, "cat": {"3000"}, "limit": {"100"}})
@@ -180,12 +194,13 @@ func parseTorznab(body []byte) ([]torrentResult, error) {
 	}
 	var rss struct {
 		Items []struct {
-			Title     string `xml:"title"`
-			GUID      string `xml:"guid"`
-			Link      string `xml:"link"`
-			Comments  string `xml:"comments"`
-			Size      int64  `xml:"size"`
-			Enclosure struct {
+			Title      string   `xml:"title"`
+			GUID       string   `xml:"guid"`
+			Link       string   `xml:"link"`
+			Comments   string   `xml:"comments"`
+			Size       int64    `xml:"size"`
+			Categories []string `xml:"category"`
+			Enclosure  struct {
 				URL string `xml:"url,attr"`
 			} `xml:"enclosure"`
 			Attrs []struct {
@@ -205,12 +220,24 @@ func parseTorznab(body []byte) ([]torrentResult, error) {
 				r.Details = d
 			}
 		}
+		addCategory := func(v string) {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				r.Categories = append(r.Categories, n)
+			}
+		}
+		for _, c := range it.Categories {
+			addCategory(c)
+		}
 		for _, a := range it.Attrs {
 			switch a.Name {
 			case "seeders":
 				r.Seeders, _ = strconv.Atoi(a.Value)
 			case "magneturl":
 				r.Magnet = a.Value
+			case "infohash":
+				r.InfoHash = a.Value
+			case "category":
+				addCategory(a.Value)
 			case "size":
 				if r.Size == 0 {
 					r.Size, _ = strconv.ParseInt(a.Value, 10, 64)
@@ -220,9 +247,83 @@ func parseTorznab(body []byte) ([]torrentResult, error) {
 		if strings.HasPrefix(r.Link, "magnet:") {
 			r.Magnet, r.Link = r.Link, ""
 		}
+		if m := reBTIH.FindStringSubmatch(r.Magnet); m != nil && r.InfoHash == "" {
+			r.InfoHash = m[1]
+		}
+		if notMusic(r.Categories) {
+			continue
+		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// notMusic is true for results filed only as audiobooks or outside Audio altogether
+// (indexer-specific categories, 100000 and up, are given the benefit of the doubt).
+func notMusic(cats []int) bool {
+	if len(cats) == 0 {
+		return false
+	}
+	for _, c := range cats {
+		if (c >= 3000 && c < 4000 && c != 3030) || c >= 100000 {
+			return false
+		}
+	}
+	return true
+}
+
+// jackettIndexers lists the indexers configured in Jackett that carry music, each as its
+// own feed: unlike Jackett's all-indexers feed, a single indexer's feed reports its errors
+// instead of quietly returning nothing.
+func jackettIndexers(ctx context.Context, all *Torznab) ([]*Torznab, error) {
+	body, err := all.get(ctx, url.Values{"t": {"indexers"}, "configured": {"true"}})
+	if err != nil {
+		return nil, err
+	}
+	type category struct {
+		ID      int `xml:"id,attr"`
+		Subcats []struct {
+			ID int `xml:"id,attr"`
+		} `xml:"subcat"`
+	}
+	var doc struct {
+		XMLName  xml.Name
+		Indexers []struct {
+			ID         string     `xml:"id,attr"`
+			Title      string     `xml:"title"`
+			Categories []category `xml:"caps>categories>category"`
+		} `xml:"indexer"`
+	}
+	if xml.Unmarshal(body, &doc) != nil || doc.XMLName.Local != "indexers" {
+		return nil, errors.New("not an indexer list")
+	}
+	hasAudio := func(cats []category) bool {
+		for _, c := range cats {
+			if c.ID >= 3000 && c.ID < 4000 {
+				return true
+			}
+			for _, sc := range c.Subcats {
+				if sc.ID >= 3000 && sc.ID < 4000 {
+					return true
+				}
+			}
+		}
+		return len(cats) == 0 // unknown: try it
+	}
+	base := strings.TrimSuffix(all.feed, "/all/results/torznab/api")
+	var feeds []*Torznab
+	for _, ix := range doc.Indexers {
+		if ix.ID == "" {
+			continue
+		}
+		if !hasAudio(ix.Categories) {
+			debugf("Jackett: leaving out %s, which has no music categories", ix.Title)
+			continue
+		}
+		feeds = append(feeds, newTorznabFeed("Jackett: "+firstNonEmpty(ix.Title, ix.ID),
+			base+"/"+url.PathEscape(ix.ID)+"/results/torznab/api", all.key))
+	}
+	return feeds, nil
 }
 
 // resolveFeeds turns the configured URLs into Torznab feeds. A bare Jackett address becomes
@@ -269,8 +370,15 @@ func resolveFeeds(ctx context.Context, cfg TorrentConfig) ([]*Torznab, error) {
 			}
 			continue
 		}
-		// Otherwise assume Jackett and use its feed that searches all configured indexers.
-		feeds = append(feeds, newTorznabFeed("Jackett (all indexers)", base+"/api/v2.0/indexers/all/results/torznab/api", cfg.Key))
+		// Otherwise assume Jackett: one feed per configured indexer, or if it can't list them,
+		// its feed that searches all indexers at once.
+		all := newTorznabFeed("Jackett (all indexers)", base+"/api/v2.0/indexers/all/results/torznab/api", cfg.Key)
+		if list, err := jackettIndexers(ctx, all); err == nil && len(list) > 0 {
+			feeds = append(feeds, list...)
+		} else {
+			debugf("Jackett at %s didn't list its indexers (%v); using its all-indexers feed", base, err)
+			feeds = append(feeds, all)
+		}
 	}
 	return feeds, nil
 }
@@ -384,146 +492,193 @@ func firstOf(values ...any) any {
 	return nil
 }
 
-var reLeadingNumber = regexp.MustCompile(`^\s*(?:\d{1,2}[-.])?(\d{1,3})[\s.\-_)]+`)
+// A leading track number ("01 - ", "1-01. ", "07_"), or a vinyl side position ("A1. ", "B2 - ").
+var reLeadingNumber = regexp.MustCompile(`^\s*(?:(?:\d{1,2}[-.])?(\d{1,3})|[A-Ha-h]\d{1,2})[\s.\-_)]+`)
 
-// bestFile picks the audio file in a torrent that best fits the track, by file name.
+// bestFile picks the audio file in a torrent that best fits the track, by file name, and
+// returns it with the title to give its candidate. A matching track number counts, and so
+// does a folder named after the track's album (for discographies, where the same song can
+// be on several albums).
 func bestFile(t *Track, files []string) (int, string) {
 	best, bestScore, bestStem := -1, 0.0, ""
+	album := normalize(baseAlbum(t.Album))
+	// Shortened file names are only recognised for plain titles: in "Leif Erikson (Third
+	// Demo)", the words after "Leif Erikson" say which version it is.
+	title := cleanTitle(baseTitle(t.Title), false)
+	plain := title == cleanTitle(searchTitle(t.Title), false)
 	for i, f := range files {
 		if !audioExts[strings.ToLower(path.Ext(f))] {
 			continue
 		}
-		stem := strings.TrimSuffix(path.Base(f), path.Ext(f))
-		num := 0
-		if m := reLeadingNumber.FindStringSubmatch(stem); m != nil {
+		full := strings.TrimSuffix(path.Base(f), path.Ext(f))
+		stem, num := full, 0
+		if m := reLeadingNumber.FindStringSubmatch(full); m != nil && len(m[0]) < len(full) {
 			num, _ = strconv.Atoi(m[1])
-			stem = stem[len(m[0]):]
+			stem = full[len(m[0]):]
 		}
 		c := Candidate{Title: stem}
 		if versionConflict(t, &c) != "" {
 			continue
 		}
 		s := titleScore(t, &c)
+		if stem != full { // "22 Acacia Avenue" is a title, not track 22
+			s = max(s, titleScore(t, &Candidate{Title: full}))
+		}
+		name := stem
+		// Shortened names, like "05 - Say Hello.flac" for "Say Hello to the Angels": two or
+		// more words that the title starts with. (The length check after downloading still
+		// catches a wrong guess.)
+		if cs := cleanTitle(stem, true); s < minTitle && plain && len(strings.Fields(cs)) >= 2 && strings.HasPrefix(title+" ", cs+" ") {
+			s, name = minTitle, t.Title
+		}
 		if t.TrackNumber > 0 && num == t.TrackNumber {
 			s += 5
 		}
+		if album != "" && containsPhrase(normalize(path.Dir(f)), album) {
+			s += 3
+		}
 		if s > bestScore {
-			best, bestScore, bestStem = i, s, stem
+			best, bestScore, bestStem = i, s, name
 		}
 	}
-	if bestScore < 75 {
+	if bestScore < minTitle {
 		return -1, ""
 	}
 	return best, bestStem
 }
 
-// --- the source -------------------------------------------------------------------------------
+// --- searching ----------------------------------------------------------------------------------
 
-type once[T any] struct {
-	once sync.Once
-	val  T
-	err  error
-}
-
-// memo runs f once per key (concurrent callers wait for the first) and remembers the result.
-func memo[T any](mu *sync.Mutex, m map[string]*once[T], key string, f func() (T, error)) (T, error) {
-	mu.Lock()
-	o := m[key]
-	if o == nil {
-		o = &once[T]{}
-		m[key] = o
+// baseAlbum drops edition details that torrents rarely name the same way:
+// "Turn On The Bright Lights: The Tenth Anniversary Edition (Remastered)" -> "Turn On The Bright Lights".
+func baseAlbum(album string) string {
+	s := reBrackets.ReplaceAllString(album, " ")
+	if i := strings.Index(s, ": "); i > 0 {
+		s = s[:i]
 	}
-	mu.Unlock()
-	o.once.Do(func() { o.val, o.err = f() })
-	return o.val, o.err
-}
-
-type torrentMeta struct {
-	file  string // the .torrent on disk
-	files []string
-}
-
-type TorrentSource struct {
-	feeds    []*Torznab
-	aria2c   string
-	timeout  time.Duration
-	dir      string // cached .torrent files
-	lossless bool
-	client   *http.Client
-	slots    chan struct{} // limits simultaneous aria2c downloads
-
-	mu       sync.Mutex
-	searches map[string]*once[[]torrentResult]
-	metas    map[string]*once[*torrentMeta]
-}
-
-func newTorrentSource(feeds []*Torznab, aria2c, cacheDir, format string, timeout time.Duration) *TorrentSource {
-	return &TorrentSource{
-		feeds: feeds, aria2c: aria2c, timeout: timeout, dir: filepath.Join(cacheDir, "torrents"),
-		lossless: format == "flac" || format == "original",
-		client: &http.Client{Timeout: time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.URL.Scheme == "magnet" {
-				return http.ErrUseLastResponse // some indexers redirect to a magnet link
-			}
-			return nil
-		}},
-		slots:    make(chan struct{}, 2),
-		searches: map[string]*once[[]torrentResult]{},
-		metas:    map[string]*once[*torrentMeta]{},
+	s = strings.Join(strings.Fields(reSpacedDash.Split(s, 2)[0]), " ")
+	if s == "" {
+		return strings.TrimSpace(album)
 	}
+	return s
 }
 
-func (s *TorrentSource) Name() string  { return "torrent" }
-func (s *TorrentSource) Label() string { return "Torrent" }
+// Indexers' search engines want plain words; brackets, colons, slashes and the like make
+// many of them find nothing.
+var queryPunct = strings.NewReplacer(":", " ", ";", " ", ",", " ", "(", " ", ")", " ", "[", " ", "]", " ",
+	"{", " ", "}", " ", "/", " ", `\`, " ", "|", " ", `"`, " ", "“", " ", "”", " ", "«", " ", "»", " ",
+	"!", " ", "?", " ", "*", " ", "#", " ", "+", " ", " - ", " ", " – ", " ", " — ", " ", "’", "'", "‘", "'")
 
-// searchAll queries every feed and merges the results (each query only once per run).
-func (s *TorrentSource) searchAll(ctx context.Context, query string) ([]torrentResult, error) {
-	return memo(&s.mu, s.searches, strings.ToLower(query), func() ([]torrentResult, error) {
-		var out []torrentResult
-		var firstErr error
-		failed := 0
-		seen := map[string]bool{}
-		for _, f := range s.feeds {
-			results, err := f.search(ctx, query)
-			if err != nil {
-				debugf("%s search %q: %v", f.Name, query, err)
-				failed++
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
-			}
-			for _, r := range results {
-				if !seen[r.id()] {
-					seen[r.id()] = true
-					out = append(out, r)
-				}
-			}
-		}
-		if failed == len(s.feeds) {
-			return nil, firstErr
-		}
-		return out, nil
-	})
+func queryText(s string) string {
+	return strings.Join(strings.Fields(queryPunct.Replace(" "+s+" ")), " ")
 }
 
-// rankTorrents orders results by how well their name fits artist and target (album or song),
-// preferring the wanted format and well-seeded torrents. Dead torrents are dropped.
-func rankTorrents(results []torrentResult, artist, target string, lossless bool) []torrentResult {
+type torrentQuery struct {
+	text    string
+	targets []string // names the torrent should resemble besides the artist (album, title)
+	edition string   // the full album name; its extra words ("Anniversary", "Deluxe") are a plus
+	inspect int      // how many of the best results to look into
+}
+
+// torrentQueries lists the searches to try for a track, from most to least specific: its
+// album (what most music torrents are), the song (singles), then the artist alone
+// (discographies, and albums the track list names differently from the indexer).
+func torrentQueries(t *Track) []torrentQuery {
+	var out []torrentQuery
+	seen := map[string]bool{}
+	add := func(q torrentQuery) {
+		q.text = queryText(q.text)
+		if key := strings.ToLower(q.text); q.text != "" && !seen[key] {
+			seen[key] = true
+			out = append(out, q)
+		}
+	}
+	title := searchTitle(t.Title)
+	hasAlbum := t.Album != "" && !strings.EqualFold(searchTitle(t.Album), title)
+	if hasAlbum {
+		add(torrentQuery{t.AlbumArtistStr() + " " + baseAlbum(t.Album), []string{baseAlbum(t.Album)}, t.Album, 5})
+	}
+	add(torrentQuery{t.Artists[0] + " " + title, []string{title, baseAlbum(t.Album)}, "", 5})
+	// All of the artist's torrents: look further down the list, since many of them fit the
+	// name equally well (they're mostly shared with the artist's other tracks anyway).
+	switch normalize(t.Artists[0]) {
+	case "unknown artist", "various artists", "various", "va":
+		return out
+	}
+	if hasAlbum { // release names don't mention album tracks, so only the album counts
+		add(torrentQuery{t.Artists[0], []string{baseAlbum(t.Album)}, t.Album, 10})
+	} else {
+		add(torrentQuery{t.Artists[0], []string{title}, "", 10})
+	}
+	return out
+}
+
+var (
+	reLosslessWords = wordRe(`flac|lossless|alac|ape|wavpack|wv|wav`)
+	reImageWords    = wordRe(`image|img`)                                  // one file per CD plus a .cue sheet
+	reHiResWords    = wordRe(`24 (?:96|88|176|192)|24 ?bit|hi ?res|vinyl`) // bigger and often a different master
+	reCollection    = wordRe(`discography|дискография|collection|anthology|complete`)
+	reVideo         = wordRe(`dvd|dvd5|dvd9|dvdrip|hdtv|720p|1080p|2160p|bdrip|blu ?ray|web ?dl|webrip|x264|x265|hevc|mkv`)
+	reLeadingGroups = regexp.MustCompile(`^(?:\s*[(\[][^)\]]*[)\]])+`)
+)
+
+// artistPart is the part of a torrent's name that names who made it: what comes before the
+// first " - ", once leading "(genre)" and "[format]" groups are left out. In "Nine Inch
+// Nails - Every Day Is Exactly The Same (Interpol Remixes)" that's Nine Inch Nails.
+func artistPart(title string) string {
+	s := strings.TrimSpace(reLeadingGroups.ReplaceAllString(title, ""))
+	if i := strings.Index(s, " - "); i > 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// rankTorrents orders results by how well their name fits the artist and query targets,
+// preferring the wanted format, track-per-file releases and well-seeded torrents. Dead
+// torrents and ones that fit neither the artist nor the target are dropped.
+func rankTorrents(results []torrentResult, artist string, q torrentQuery, lossless bool) []torrentResult {
 	type scored struct {
 		r     torrentResult
 		score float64
 	}
 	var list []scored
-	na, nt := normalize(artist), normalize(target)
+	na := normalize(artist)
 	for _, r := range results {
 		if r.Seeders == 0 {
 			continue
 		}
 		title := normalize(r.Title)
-		score := partialRatio(na, title) + partialRatio(nt, title)
-		if lossless == (strings.Contains(title, "flac") || strings.Contains(title, "lossless")) {
+		as := partialRatio(na, normalize(artistPart(r.Title)))
+		ts := 0.0
+		for _, target := range q.targets {
+			if nt := normalize(target); nt != "" {
+				ts = max(ts, partialRatio(nt, title))
+			}
+		}
+		if as < 70 && ts < 90 {
+			continue
+		}
+		score := as + ts
+		if ts >= 90 { // the right album: prefer the edition the track list names
+			score += editionBonus(q.edition, q.targets, title)
+		}
+		if lossless == reLosslessWords.MatchString(title) {
 			score += 10
+		}
+		if reImageWords.MatchString(title) {
+			score -= 25
+		}
+		if lossless && reHiResWords.MatchString(title) {
+			score -= 6
+		}
+		if reCollection.MatchString(title) {
+			score += 12
+		}
+		if reVideo.MatchString(title) {
+			score -= 40 // concert films and music videos
+		}
+		if r.Link != "" {
+			score += 5 // a .torrent file is quicker to look into than a magnet link
 		}
 		score += math.Min(float64(max(r.Seeders, 0)), 50) / 5
 		list = append(list, scored{r, score})
@@ -536,50 +691,271 @@ func rankTorrents(results []torrentResult, artist, target string, lossless bool)
 	return out
 }
 
-func (s *TorrentSource) Search(ctx context.Context, t *Track) ([]Candidate, error) {
-	type query struct{ text, target string }
-	var queries []query
-	if t.Album != "" && !strings.EqualFold(t.Album, t.Title) {
-		queries = append(queries, query{t.AlbumArtistStr() + " " + t.Album, t.Album}) // the album
+// editionBonus rewards torrents naming the edition the track list has: the words of the full
+// album name that the searched-for base name lacks ("tenth anniversary edition").
+func editionBonus(edition string, targets []string, title string) float64 {
+	if edition == "" {
+		return 0
 	}
-	queries = append(queries, query{t.Artists[0] + " " + searchTitle(t.Title), searchTitle(t.Title)}) // singles, discographies
-	var out []Candidate
-	found, inspected := 0, 0
-	for _, q := range queries {
-		results, err := s.searchAll(ctx, q.text)
-		if err != nil {
-			return nil, err
+	known := map[string]bool{}
+	for _, t := range targets {
+		for _, w := range strings.Fields(normalize(t)) {
+			known[w] = true
 		}
-		found += len(results)
-		ranked := rankTorrents(results, t.Artists[0], q.target, s.lossless)
-		for _, r := range ranked[:min(3, len(ranked))] {
-			meta, err := s.meta(ctx, r)
-			if err != nil {
-				debugf("torrent %q: %v", r.Title, err)
+	}
+	extra, hit := 0, 0
+	for _, w := range strings.Fields(normalize(edition)) {
+		if known[w] || len(w) < 4 {
+			continue
+		}
+		extra++
+		if containsPhrase(title, w) {
+			hit++
+		}
+	}
+	if extra == 0 {
+		return 0
+	}
+	return 15 * float64(hit) / float64(extra)
+}
+
+// --- the source -------------------------------------------------------------------------------
+
+// cache runs f once per key (concurrent callers wait for the first) and remembers the
+// result. Failures are tried again once they're older than retryAfter.
+type cache[T any] struct {
+	mu         sync.Mutex
+	entries    map[string]*cacheEntry[T]
+	retryAfter time.Duration
+}
+
+type cacheEntry[T any] struct {
+	done chan struct{}
+	val  T
+	err  error
+	at   time.Time
+}
+
+func (c *cache[T]) get(ctx context.Context, key string, f func() (T, error)) (T, error) {
+	c.mu.Lock()
+	if c.entries == nil {
+		c.entries = map[string]*cacheEntry[T]{}
+	}
+	e := c.entries[key]
+	if e != nil {
+		select {
+		case <-e.done:
+			if e.err != nil && time.Since(e.at) > c.retryAfter {
+				e = nil
+			}
+		default:
+		}
+	}
+	if e == nil {
+		e = &cacheEntry[T]{done: make(chan struct{}), err: errors.New("internal error")}
+		c.entries[key] = e
+		c.mu.Unlock()
+		defer func() { e.at = time.Now(); close(e.done) }()
+		e.val, e.err = f()
+		return e.val, e.err
+	}
+	c.mu.Unlock()
+	select {
+	case <-e.done:
+		return e.val, e.err
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	}
+}
+
+type torrentMeta struct {
+	file  string // the .torrent on disk
+	files []string
+}
+
+type TorrentSource struct {
+	feeds    []*Torznab
+	aria2c   string
+	dir      string // cached .torrent files
+	lossless bool
+	client   *http.Client
+	dl       torrentFetcher
+
+	searches cache[[]torrentResult]
+	metas    cache[*torrentMeta]
+}
+
+func newTorrentSource(feeds []*Torznab, aria2c, cacheDir, format string, timeout time.Duration) *TorrentSource {
+	dir := filepath.Join(cacheDir, "torrents")
+	return &TorrentSource{
+		feeds: feeds, aria2c: aria2c, dir: dir,
+		lossless: format == "flac" || format == "original",
+		client: &http.Client{Timeout: time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if req.URL.Scheme == "magnet" {
+				return http.ErrUseLastResponse // some indexers redirect to a magnet link
+			}
+			return nil
+		}},
+		dl:       newTorrentManager(newAria2(aria2c), filepath.Join(dir, "downloads"), timeout),
+		searches: cache[[]torrentResult]{retryAfter: time.Minute},
+		metas:    cache[*torrentMeta]{retryAfter: 10 * time.Minute},
+	}
+}
+
+func (s *TorrentSource) Name() string  { return "torrent" }
+func (s *TorrentSource) Label() string { return "Torrent" }
+
+// Close stops aria2c.
+func (s *TorrentSource) Close() { s.dl.close() }
+
+// searchAll queries every feed at once and merges the results. Each query is made once per
+// run (a failed one again after a minute).
+func (s *TorrentSource) searchAll(ctx context.Context, query string) ([]torrentResult, error) {
+	return s.searches.get(ctx, strings.ToLower(query), func() ([]torrentResult, error) {
+		type answer struct {
+			results []torrentResult
+			err     error
+		}
+		answers := make([]answer, len(s.feeds))
+		var wg sync.WaitGroup
+		for i, f := range s.feeds {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				res, err := f.search(ctx, query)
+				answers[i] = answer{res, err}
+			}()
+		}
+		wg.Wait()
+		var out []torrentResult
+		var firstErr error
+		failed := 0
+		seen := map[string]bool{}
+		for i, a := range answers {
+			if a.err != nil {
+				debugf("%s: search %q failed: %v", s.feeds[i].Name, query, a.err)
+				failed++
+				if firstErr == nil {
+					firstErr = a.err
+				}
 				continue
 			}
-			inspected++
-			if i, stem := bestFile(t, meta.files); i >= 0 {
-				out = append(out, Candidate{Source: "torrent", URL: r.Details, Title: stem, Artist: r.Title,
-					Album: r.Title, Ref: meta.file + "#" + strconv.Itoa(i)})
+			debugf("%s: %d results for %q", s.feeds[i].Name, len(a.results), query)
+			for _, r := range a.results {
+				if !seen[r.id()] {
+					seen[r.id()] = true
+					out = append(out, r)
+				}
 			}
 		}
-		if len(out) > 0 {
-			return out, nil
+		if failed > 0 && failed == len(s.feeds) {
+			return nil, firstErr
+		}
+		return out, nil
+	})
+}
+
+func (s *TorrentSource) Search(ctx context.Context, t *Track) ([]Candidate, error) {
+	seen, inspected := map[string]bool{}, map[string]bool{}
+	looked := 0
+	var searchErr error
+	for _, q := range torrentQueries(t) {
+		results, err := s.searchAll(ctx, q.text)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			searchErr = err
+			continue
+		}
+		for _, r := range results {
+			seen[r.id()] = true
+		}
+		var picks []torrentResult
+		for _, r := range rankTorrents(results, t.Artists[0], q, s.lossless) {
+			if len(picks) < q.inspect && !inspected[r.id()] {
+				inspected[r.id()] = true
+				picks = append(picks, r)
+			}
+		}
+		cands, n := s.inspect(ctx, t, picks)
+		looked += n
+		if len(cands) > 0 {
+			return cands, nil
 		}
 	}
 	switch {
-	case found == 0:
+	case searchErr != nil: // the track may well be there: try again next run
+		return nil, searchErr
+	case len(seen) == 0:
 		return nil, nil
-	case inspected == 0:
-		return nil, failf("%d torrents found, but none with seeders and a readable torrent file", found)
+	case looked == 0:
+		return nil, failf("%d torrents found, but none that fits, has seeders and a readable torrent file", len(seen))
 	}
-	return nil, failf("%d torrents found; the %d best-matching ones don't contain this track", found, inspected)
+	return nil, failf("%d torrents found; the %d best-matching ones don't contain this track", len(seen), looked)
+}
+
+// inspect gets the file lists of picks (in parallel) and returns a candidate for each torrent
+// with a file that fits the track, best-ranked torrent first, plus how many it could read.
+// Results with a .torrent link answer quickly, magnet-only ones can take a minute: once the
+// quick ones are in and one of them fits, it doesn't wait for the rest.
+func (s *TorrentSource) inspect(ctx context.Context, t *Track, picks []torrentResult) ([]Candidate, int) {
+	type answer struct {
+		i    int
+		meta *torrentMeta
+		err  error
+	}
+	answers := make(chan answer, len(picks))
+	quick := 0
+	for i, r := range picks {
+		if r.Link != "" {
+			quick++
+		}
+		go func() {
+			m, err := s.meta(ctx, r)
+			answers <- answer{i, m, err}
+		}()
+	}
+	found := make([]*Candidate, len(picks))
+	looked, fits := 0, false
+	for left := len(picks); left > 0 && !(fits && quick == 0); left-- {
+		var a answer
+		select {
+		case a = <-answers:
+		case <-ctx.Done():
+			return nil, looked
+		}
+		r := picks[a.i]
+		if r.Link != "" {
+			quick--
+		}
+		if a.err != nil {
+			debugf("torrent %q: %v", r.Title, a.err)
+			continue
+		}
+		looked++
+		i, stem := bestFile(t, a.meta.files)
+		if i < 0 {
+			debugf("torrent %q: no file fits %s among its %d files", r.Title, t, len(a.meta.files))
+			continue
+		}
+		found[a.i] = &Candidate{Source: "torrent", URL: r.Details, Title: stem, Artist: r.Title,
+			Album: r.Title, Ref: a.meta.file + "#" + strconv.Itoa(i)}
+		fits = true
+	}
+	var out []Candidate
+	for _, c := range found {
+		if c != nil {
+			out = append(out, *c)
+		}
+	}
+	return out, looked
 }
 
 // meta gets a result's .torrent (from its link, or a magnet's metadata via aria2c) and file list.
 func (s *TorrentSource) meta(ctx context.Context, r torrentResult) (*torrentMeta, error) {
-	return memo(&s.mu, s.metas, r.id(), func() (*torrentMeta, error) {
+	return s.metas.get(ctx, r.id(), func() (*torrentMeta, error) {
 		data, err := s.torrentBytes(ctx, r)
 		if err != nil {
 			return nil, err
@@ -605,7 +981,8 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 	if r.Link != "" {
 		req, _ := http.NewRequestWithContext(ctx, "GET", r.Link, nil)
 		req.Header.Set("User-Agent", userAgent)
-		if resp, err := s.client.Do(req); err == nil {
+		resp, err := s.client.Do(req)
+		if err == nil {
 			var buf bytes.Buffer
 			buf.ReadFrom(resp.Body)
 			resp.Body.Close()
@@ -613,7 +990,11 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 				magnet = loc
 			} else if resp.StatusCode == 200 && bytes.HasPrefix(buf.Bytes(), []byte("d")) {
 				return buf.Bytes(), nil
+			} else {
+				debugf("torrent %q: its link answered HTTP %d with %d bytes", r.Title, resp.StatusCode, buf.Len())
 			}
+		} else {
+			debugf("torrent %q: fetching its link: %v", r.Title, err)
 		}
 	}
 	if magnet == "" {
@@ -628,10 +1009,11 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	mctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	mctx, cancel := context.WithTimeout(ctx, 75*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(mctx, s.aria2c, "--dir="+tmp, "--bt-metadata-only=true", "--bt-save-metadata=true",
-		"--bt-stop-timeout=90", "--summary-interval=0", "--console-log-level=error", "--download-result=hide", magnet).CombinedOutput()
+	out, err := command(mctx, s.aria2c, "--dir="+tmp, "--bt-metadata-only=true", "--bt-save-metadata=true",
+		"--bt-stop-timeout=60", "--dht-entry-point=dht.transmissionbt.com:6881", "--bt-tracker-connect-timeout=15",
+		"--bt-tracker-timeout=30", "--summary-interval=0", "--console-log-level=error", "--download-result=hide", magnet).CombinedOutput()
 	matches, _ := filepath.Glob(filepath.Join(tmp, "*.torrent"))
 	if len(matches) == 0 {
 		debugf("aria2c metadata fetch for %q failed: %v %s", r.Title, err, out)
@@ -646,68 +1028,13 @@ func (s *TorrentSource) Download(ctx context.Context, c Candidate, t *Track, wor
 	if !ok || err != nil {
 		return "", failf("bad torrent reference")
 	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return "", err
+	task := taskFrom(ctx)
+	task.park() // waiting for the swarm needs no worker slot
+	got, err := s.dl.fetch(ctx, file, idx, filepath.Join(workdir, "torrent"), task)
+	if rerr := task.resume(ctx); err == nil {
+		err = rerr
 	}
-	files, err := torrentFiles(data)
-	if err != nil || idx >= len(files) {
-		return "", failf("bad torrent file")
-	}
-	select {
-	case s.slots <- struct{}{}:
-		defer func() { <-s.slots }()
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-	dir := filepath.Join(workdir, "torrent")
-	if err := runAria2c(ctx, s.aria2c, file, dir, idx, s.timeout); err != nil {
-		return "", err
-	}
-	got := findDownloaded(dir, files[idx])
-	if _, err := os.Stat(got); err != nil {
-		return "", failf("aria2c finished but %s isn't there", path.Base(files[idx]))
-	}
-	return got, nil
-}
-
-func runAria2c(ctx context.Context, bin, torrentFile, dir string, index int, timeout time.Duration) error {
-	dctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(dctx, bin, "--dir="+dir, "--select-file="+strconv.Itoa(index+1),
-		"--seed-time=0", "--bt-stop-timeout=300", "--bt-remove-unselected-file=true", "--file-allocation=none",
-		"--allow-overwrite=true", "--auto-file-renaming=false", "--summary-interval=0",
-		"--console-log-level=error", "--download-result=hide", torrentFile)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	debugf("aria2c failed: %v %s", err, out)
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if dctx.Err() != nil {
-		return failf("torrent download didn't finish within %s (raise --torrent-timeout?)", timeout)
-	}
-	return failf("aria2c couldn't download it (no seeder sent data for 5 minutes)")
-}
-
-// findDownloaded locates a torrent file on disk, falling back to a search by file name in
-// case aria2c adjusted the path.
-func findDownloaded(content, rel string) string {
-	want := filepath.Join(content, filepath.FromSlash(rel))
-	if _, err := os.Stat(want); err == nil {
-		return want
-	}
-	base := path.Base(rel)
-	filepath.WalkDir(content, func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && d.Name() == base {
-			want = p
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return want
+	return got, err
 }
 
 // --- setup check (--check-torrents) ------------------------------------------------------------
@@ -779,7 +1106,7 @@ func checkTorrents(ctx context.Context, cfg TorrentConfig, aria2c, query string)
 		hint("or try another search with --torrent-query \"Artist Album\"")
 		return false
 	}
-	ranked := rankTorrents(results, query, query, false)
+	ranked := rankTorrents(results, query, torrentQuery{targets: []string{query}}, false)
 	ok("searching for %q: %d results, %d with seeders", query, len(results), len(ranked))
 	for i, r := range ranked[:min(5, len(ranked))] {
 		seeders := "unknown"

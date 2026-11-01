@@ -9,9 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -122,11 +125,13 @@ func TestParseAndRankTorznab(t *testing.T) {
 	if err != nil || len(results) != 4 || results[0].Details != "https://tracker/details/1" || results[1].Magnet == "" || results[3].Magnet == "" {
 		t.Fatalf("parsed %+v (%v)", results, err)
 	}
-	ranked := rankTorrents(results, "Daft Punk", "Random Access Memories", true)
-	if len(ranked) != 3 || !strings.Contains(ranked[0].Title, "FLAC") || !strings.Contains(ranked[2].Title, "Disco") {
+	ram := torrentQuery{targets: []string{"Random Access Memories"}}
+	ranked := rankTorrents(results, "Daft Punk", ram, true)
+	// The dead torrent is dropped, and so is the one that fits neither artist nor album.
+	if len(ranked) != 2 || !strings.Contains(ranked[0].Title, "FLAC") || !strings.Contains(ranked[1].Title, "MP3") {
 		t.Errorf("lossless ranking: %+v", ranked)
 	}
-	if ranked := rankTorrents(results, "Daft Punk", "Random Access Memories", false); !strings.Contains(ranked[0].Title, "MP3") {
+	if ranked := rankTorrents(results, "Daft Punk", ram, false); !strings.Contains(ranked[0].Title, "MP3") {
 		t.Errorf("lossy ranking: %+v", ranked)
 	}
 	if _, err := parseTorznab([]byte(`<error code="100" description="Invalid API Key"/>`)); err == nil || !strings.Contains(err.Error(), "Invalid API Key") {
@@ -253,30 +258,13 @@ func TestTorrentSourceInEngine(t *testing.T) {
 	srv := fakeIndexer(t, name, files, [][]byte{tone, tone}, nil)
 	defer srv.Close()
 
-	seed := t.TempDir()
-	os.MkdirAll(filepath.Join(seed, name), 0o755)
-	for _, f := range files {
-		os.WriteFile(filepath.Join(seed, name, f), tone, 0o644)
-	}
-	fake := filepath.Join(t.TempDir(), "aria2c")
-	script := `#!/bin/sh
-dir=""; sel=""
-for a in "$@"; do case "$a" in --dir=*) dir="${a#--dir=}";; --select-file=*) sel="${a#--select-file=}";; esac; done
-i=0
-for f in "01 - Give Life Back to Music.mp3" "08 - Get Lucky.mp3"; do
-  i=$((i+1))
-  if [ "$sel" = "$i" ]; then mkdir -p "$dir/` + name + `"; cp "` + seed + `/` + name + `/$f" "$dir/` + name + `/$f"; fi
-done
-`
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	feeds, err := resolveFeeds(context.Background(), TorrentConfig{Feeds: []string{srv.URL}, Key: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := newTorrentSource(feeds, fake, t.TempDir(), "mp3", time.Minute)
+	src := newTorrentSource(feeds, "", t.TempDir(), "mp3", time.Minute)
+	fetcher := &fakeFetcher{content: tone}
+	src.dl = fetcher
 	lucky := getLucky()
 	lucky.DurationMs = 4000
 	contact := track("Contact", []string{"Daft Punk"}, "Random Access Memories", 4)
@@ -293,6 +281,9 @@ done
 	if _, err := os.Stat(filepath.Join(music, filepath.FromSlash(r.Path))); err != nil {
 		t.Error(err)
 	}
+	if fetcher.fetched != 1 {
+		t.Errorf("%d downloads, want 1", fetcher.fetched)
+	}
 	if rc := state.get(contact.Key); rc.Status != "failed" || !strings.Contains(rc.Reason, "don't contain this track") {
 		t.Errorf("Contact: %+v", rc)
 	}
@@ -304,40 +295,197 @@ done
 	}
 }
 
-// TestRealAria2cDownload uses the real aria2c (when installed) on a torrent served by a local
-// web seed, checking that only the selected file is fetched, correctly.
-func TestRealAria2cDownload(t *testing.T) {
+// fakeFetcher stands in for aria2c: it "downloads" a file by writing content.
+type fakeFetcher struct {
+	content []byte
+	mu      sync.Mutex
+	fetched int
+}
+
+func (f *fakeFetcher) fetch(ctx context.Context, torrentFile string, index int, dest string, task *Task) (string, error) {
+	data, err := os.ReadFile(torrentFile)
+	if err != nil {
+		return "", err
+	}
+	files, err := torrentFiles(data)
+	if err != nil {
+		return "", err
+	}
+	f.mu.Lock()
+	f.fetched++
+	f.mu.Unlock()
+	os.MkdirAll(dest, 0o755)
+	p := filepath.Join(dest, path.Base(files[index]))
+	return p, os.WriteFile(p, f.content, 0o644)
+}
+
+func (f *fakeFetcher) close() {}
+
+// throttled slows a web seed down so a download is still running when more files are added.
+type throttled struct {
+	http.ResponseWriter
+	served *atomic.Int64
+}
+
+func (t throttled) Write(p []byte) (int, error) {
+	n := 0
+	for len(p) > 0 {
+		k := min(len(p), 8192)
+		time.Sleep(50 * time.Millisecond)
+		m, err := t.ResponseWriter.Write(p[:k])
+		n += m
+		t.served.Add(int64(m))
+		if err != nil {
+			return n, err
+		}
+		p = p[k:]
+	}
+	return n, nil
+}
+
+// TestRealAria2cDownloads drives the real aria2c (when installed) over RPC, on a torrent
+// served by a slow local web seed: two files requested together share one download, a third
+// requested while it runs joins that download, and the file nobody wants isn't fetched.
+func TestRealAria2cDownloads(t *testing.T) {
 	aria2c, err := exec.LookPath("aria2c")
 	if err != nil {
 		t.Skip("aria2c not installed")
 	}
 	name := "Test Artist - Test Album"
-	files := []string{"01 - First Song.mp3", "02 - Second Song.mp3", "03 - Third Song.mp3"}
-	contents := [][]byte{bytes.Repeat([]byte("a"), 40000), bytes.Repeat([]byte("b"), 50000), bytes.Repeat([]byte("c"), 30000)}
+	files := []string{"01 - First Song.mp3", "02 - Second Song.mp3", "03 - Third Song.mp3", "04 - Fourth Song.mp3"}
+	var contents [][]byte
+	for i := range files {
+		contents = append(contents, bytes.Repeat([]byte{byte('a' + i)}, 200_000+i*1000))
+	}
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, name), 0o755)
 	for i, f := range files {
 		os.WriteFile(filepath.Join(root, name, f), contents[i], 0o644)
 	}
-	webseed := httptest.NewServer(http.FileServer(http.Dir(root)))
+	served := map[string]*atomic.Int64{}
+	for _, f := range files {
+		served[f] = &atomic.Int64{}
+	}
+	webseed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		counter := served[path.Base(r.URL.Path)]
+		if counter == nil {
+			counter = &atomic.Int64{}
+		}
+		http.FileServer(http.Dir(root)).ServeHTTP(throttled{w, counter}, r)
+	}))
 	defer webseed.Close()
 	torrentFile := filepath.Join(t.TempDir(), "album.torrent")
 	os.WriteFile(torrentFile, makeTorrent(name, files, contents, webseed.URL+"/"), 0o644)
 
-	src := newTorrentSource(nil, aria2c, t.TempDir(), "mp3", 2*time.Minute)
-	workdir := t.TempDir()
-	got, err := src.Download(context.Background(), Candidate{Ref: torrentFile + "#1"}, getLucky(), workdir)
+	downloads := t.TempDir()
+	m := newTorrentManager(newAria2(aria2c), downloads, 2*time.Minute)
+	m.gather = 300 * time.Millisecond
+	defer m.close()
+	type result struct {
+		i    int
+		path string
+		err  error
+	}
+	results := make(chan result, 3)
+	get := func(i int, dest string) {
+		p, err := m.fetch(context.Background(), torrentFile, i, dest, nil)
+		results <- result{i, p, err}
+	}
+	go get(0, t.TempDir())
+	go get(2, t.TempDir())
+	time.Sleep(1500 * time.Millisecond) // the download is running by now
+	go get(1, t.TempDir())
+	for range 3 {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("file %d: %v", r.i, r.err)
+		}
+		data, _ := os.ReadFile(r.path)
+		if !bytes.Equal(data, contents[r.i]) {
+			t.Errorf("file %d: got %d bytes, want %d", r.i, len(data), len(contents[r.i]))
+		}
+	}
+	m.mu.Lock()
+	started := m.started
+	m.mu.Unlock()
+	if started != 1 {
+		t.Errorf("%d aria2c downloads for one torrent, want 1", started)
+	}
+	if n := served[files[3]].Load(); n > 32768 {
+		t.Errorf("%d bytes of the unwanted file were downloaded", n)
+	}
+	time.Sleep(2 * time.Second) // the poller notices the download is complete
+	if left, _ := os.ReadDir(downloads); len(left) > 0 {
+		t.Errorf("download folder not cleaned up: %v", left)
+	}
+}
+
+// TestAria2cRestartKeepsFinishedFiles adds a file to a running download after another file
+// was finished and handed over: aria2c restarts the download, which must leave that file alone.
+func TestAria2cRestartKeepsFinishedFiles(t *testing.T) {
+	aria2c, err := exec.LookPath("aria2c")
+	if err != nil {
+		t.Skip("aria2c not installed")
+	}
+	name := "Test Artist - Other Album"
+	files := []string{"01 - Short.mp3", "02 - Long.mp3", "03 - Late.mp3"}
+	contents := [][]byte{bytes.Repeat([]byte("s"), 40_000), bytes.Repeat([]byte("l"), 700_000), bytes.Repeat([]byte("t"), 60_000)}
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, name), 0o755)
+	for i, f := range files {
+		os.WriteFile(filepath.Join(root, name, f), contents[i], 0o644)
+	}
+	var served atomic.Int64
+	webseed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.FileServer(http.Dir(root)).ServeHTTP(throttled{w, &served}, r)
+	}))
+	defer webseed.Close()
+	torrentFile := filepath.Join(t.TempDir(), "album.torrent")
+	os.WriteFile(torrentFile, makeTorrent(name, files, contents, webseed.URL+"/"), 0o644)
+
+	m := newTorrentManager(newAria2(aria2c), t.TempDir(), 2*time.Minute)
+	m.gather = 200 * time.Millisecond
+	defer m.close()
+	ctx := context.Background()
+	long := make(chan error, 1)
+	go func() {
+		p, err := m.fetch(ctx, torrentFile, 1, t.TempDir(), nil)
+		if err == nil {
+			if data, _ := os.ReadFile(p); !bytes.Equal(data, contents[1]) {
+				err = fmt.Errorf("long file: %d bytes", len(data))
+			}
+		}
+		long <- err
+	}()
+	short, err := m.fetch(ctx, torrentFile, 0, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _ := os.ReadFile(got)
-	if !bytes.Equal(data, contents[1]) {
-		t.Fatalf("got %d bytes from %s, want the second file", len(data), got)
+	before, _ := os.Stat(short)
+	select {
+	case err := <-long:
+		t.Fatalf("the long file finished before the test could add one (%v); slow the web seed down", err)
+	default:
 	}
-	for _, other := range []string{files[0], files[2]} {
-		if _, err := os.Stat(filepath.Join(workdir, "torrent", name, other)); err == nil {
-			t.Errorf("%s was kept although it wasn't selected", other)
-		}
+	late, err := m.fetch(ctx, torrentFile, 2, t.TempDir(), nil) // restarts the running download
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-long; err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(short)
+	data, _ := os.ReadFile(short)
+	if !bytes.Equal(data, contents[0]) || !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("the finished file was touched by the restart (%d bytes, modified %v -> %v)", len(data), before.ModTime(), after.ModTime())
+	}
+	if data, _ := os.ReadFile(late); !bytes.Equal(data, contents[2]) {
+		t.Errorf("late file: %d bytes", len(data))
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.started != 1 {
+		t.Errorf("%d downloads, want 1", m.started)
 	}
 }
 

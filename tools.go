@@ -149,3 +149,10 @@ func defaultCacheDir() string {
 	}
 	return filepath.Join(os.TempDir(), "spotify-downloader")
 }
+
+// command is exec.CommandContext for the external programs a track's processing runs.
+func command(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	ownProcessGroup(cmd)
+	return cmd
+}

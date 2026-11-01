@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -43,7 +42,7 @@ func targetExtension(format, codec string) string {
 
 // probe returns the audio codec and duration (seconds) of a media file.
 func probe(ctx context.Context, tools *Tools, path string) (string, float64, error) {
-	out, err := exec.CommandContext(ctx, tools.FFprobe, "-v", "error", "-select_streams", "a:0",
+	out, err := command(ctx, tools.FFprobe, "-v", "error", "-select_streams", "a:0",
 		"-show_entries", "stream=codec_name:format=duration", "-of", "json", path).Output()
 	if err != nil {
 		return "", 0, failf("ffprobe couldn't read the downloaded file")
@@ -157,7 +156,7 @@ func convertAndTag(ctx context.Context, tools *Tools, src, dest, codec string, t
 	}
 	args = append(args, dest)
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, tools.FFmpeg, args...)
+	cmd := command(ctx, tools.FFmpeg, args...)
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if cover != "" && ctx.Err() == nil {

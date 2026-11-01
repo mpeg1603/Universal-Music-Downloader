@@ -35,21 +35,20 @@ func debugf(format string, args ...any) {
 		debugLog.Printf(format, args...)
 	}
 	if verbose {
-		fmt.Fprintf(os.Stderr, "  · "+format+"\n", args...)
+		screen.printDebug(fmt.Sprintf("  · "+format, args...))
 	}
 }
 
 // logf prints a message for the user (and keeps it in the log file).
 func logf(format string, args ...any) {
-	fmt.Printf(format+"\n", args...)
+	screen.println(fmt.Sprintf(format, args...))
 	if debugLog != nil {
 		debugLog.Printf(format, args...)
 	}
 }
 
 func isTerminal(f *os.File) bool {
-	info, err := f.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0 && os.Getenv("NO_COLOR") == ""
+	return isCharDevice(f) && os.Getenv("NO_COLOR") == ""
 }
 
 func paint(code, s string) string {
@@ -91,7 +90,8 @@ Downloading:
   --sources LIST         tried in this order (default bandcamp,archive,youtube_music,soundcloud,youtube,
                          plus torrent at the end once torrents are set up); any subset, any order,
                          e.g. --sources torrent or --sources torrent,youtube_music
-  --workers N            tracks processed in parallel (default 3)
+  --workers N            tracks searched/converted in parallel (default 3); tracks waiting
+                         for a torrent swarm don't count, so torrents run alongside
   --limit N              only process N tracks (handy for a first test)
   --retry-failed         also retry tracks that found no match last time
   --no-enrich            don't look up missing lengths/covers on Deezer
@@ -106,7 +106,8 @@ Torrents (the "torrent" source; needs Jackett or Prowlarr and the aria2 package;
   --torznab-key KEY      their API key (remembered too; or set TORZNAB_KEY)
   --check-torrents       test the torrent setup step by step, then exit
   --torrent-query Q      what --check-torrents searches for (default: an album from your library)
-  --torrent-timeout D    give up on a single torrent download after this long (default 30m)
+  --torrent-timeout D    give up on a track's torrent file if it isn't done after downloading
+                         this long (default 30m; time queued behind other torrents doesn't count)
 
 Other:
   --report-only          only rewrite the reports and playlists
@@ -186,7 +187,8 @@ func run(args []string) int {
 	signal.Notify(signals, os.Interrupt)
 	go func() {
 		<-signals
-		fmt.Println(paint("33", "\nStopping after the tracks in progress (Ctrl-C again to stop immediately)…"))
+		screen.setStopping()
+		screen.println(paint("33", "Stopping after the tracks in progress (Ctrl-C again to stop immediately)…"))
 		close(stop)
 		<-signals
 		kill()
@@ -298,12 +300,15 @@ func run(args []string) int {
 		return fail(err)
 	}
 	cacheDir := filepath.Join(stateDir, "cache")
+	defer os.RemoveAll(cacheDir)
+	defer os.RemoveAll(filepath.Join(stateDir, "tmp"))
 	var torrentSource Source
 	if contains(sourceNames, "torrent") {
 		src, err := setUpTorrents(ctx, tcfg, tools, cacheDir, *format, *torrentTimeout)
 		switch {
 		case err == nil:
 			torrentSource = src
+			defer src.Close() // before the cache folder it downloads into is removed
 		case explicitSources:
 			return fail(err)
 		default: // added automatically: carry on without it
@@ -315,8 +320,6 @@ func run(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	defer os.RemoveAll(filepath.Join(stateDir, "cache"))
-	defer os.RemoveAll(filepath.Join(stateDir, "tmp"))
 
 	if !*noEnrich {
 		enrichLibrary(ctx, lib, logf)
@@ -327,6 +330,7 @@ func run(args []string) int {
 		MusicDir: musicDir, Format: *format, Template: *template, Workers: *workers, Limit: *limit,
 		RetryFailed: *retryFailed, TriesPerSource: 2, MaxOutages: 5,
 	}, sources, state, tools, filepath.Join(stateDir, "tmp"))
+	engine.board = &Board{}
 
 	todo := engine.pending(lib)
 	recs := state.all()
@@ -351,22 +355,29 @@ func run(args []string) int {
 
 	n := 0
 	total := len(todo)
+	screen.start(engine.board, total, musicDir)
 	counts := engine.run(ctx, stop, todo, func(o Outcome) {
 		if o.Status == "aborted" {
 			return
 		}
 		n++
+		screen.record(o.Status)
 		prefix := fmt.Sprintf("[%*d/%d]", len(fmt.Sprint(total)), n, total)
+		name := o.Track.String()
+		if a := o.Track.Album; a != "" && !strings.EqualFold(a, o.Track.Title) {
+			name += paint("2", " · "+a)
+		}
 		if o.Status == "downloaded" {
-			fmt.Printf("%s %s %s %s\n", prefix, paint("32", "✓"), o.Track, paint("2", "← "+o.Detail))
+			screen.println(fmt.Sprintf("%s %s %s %s", prefix, paint("32", "✓"), name, paint("2", "← "+o.Detail)))
 			return
 		}
 		detail := o.Detail
-		if len(detail) > 200 {
-			detail = detail[:197] + "…"
+		if r := []rune(detail); len(r) > 200 {
+			detail = string(r[:199]) + "…"
 		}
-		fmt.Printf("%s %s %s %s\n", prefix, paint("31", "✗"), o.Track, paint("2", detail))
+		screen.println(fmt.Sprintf("%s %s %s %s", prefix, paint("31", "✗"), name, paint("2", "— "+detail)))
 	})
+	screen.stop()
 	if total > 0 {
 		fmt.Printf("\n%s, %s\n", paint("32", fmt.Sprintf("%d downloaded", counts["downloaded"])),
 			paint("31", fmt.Sprintf("%d not downloaded", counts["failed"]+counts["error"])))
@@ -409,7 +420,7 @@ func torrentSettings(feeds []string, key string) (TorrentConfig, error) {
 	return cfg, nil
 }
 
-func setUpTorrents(ctx context.Context, cfg TorrentConfig, tools *Tools, cacheDir, format string, timeout time.Duration) (Source, error) {
+func setUpTorrents(ctx context.Context, cfg TorrentConfig, tools *Tools, cacheDir, format string, timeout time.Duration) (*TorrentSource, error) {
 	if !cfg.configured() {
 		return nil, fmt.Errorf("the torrent source needs Jackett or Prowlarr: pass --torznab URL --torznab-key KEY (see TORRENTS.md)")
 	}

@@ -244,7 +244,11 @@ func (h *HTTP) downloadOnce(ctx context.Context, u, dir, stem string) (string, e
 	if err != nil {
 		return "", err
 	}
-	_, err = io.Copy(f, resp.Body)
+	var body io.Reader = resp.Body
+	if task := taskFrom(ctx); task != nil {
+		body = &countingReader{r: resp.Body, task: task, total: max(resp.ContentLength, 0)}
+	}
+	_, err = io.Copy(f, body)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -253,6 +257,20 @@ func (h *HTTP) downloadOnce(ctx context.Context, u, dir, stem string) (string, e
 		return "", unavailablef("%s download broke off (%s)", h.Name, describeNetErr(err))
 	}
 	return dest, os.Rename(part, dest)
+}
+
+// countingReader reports download progress to a task.
+type countingReader struct {
+	r           io.Reader
+	task        *Task
+	done, total int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.done += int64(n)
+	c.task.setProgress(c.done, c.total)
+	return n, err
 }
 
 var reFilename = regexp.MustCompile(`filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?`)

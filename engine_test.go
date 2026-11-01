@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -44,14 +45,14 @@ type fakeSource struct {
 	ext         string
 	length      float64 // >0: downloaded file length regardless of the candidate
 	t           *testing.T
-	searched    int
+	searched    atomic.Int32
 }
 
 func (f *fakeSource) Name() string  { return f.name }
 func (f *fakeSource) Label() string { return f.name }
 
 func (f *fakeSource) Search(ctx context.Context, tr *Track) ([]Candidate, error) {
-	f.searched++
+	f.searched.Add(1)
 	if f.searchErr != nil {
 		return nil, f.searchErr
 	}
@@ -238,8 +239,8 @@ func TestUnreachableSourceRetriesAndCircuitBreaker(t *testing.T) {
 	e, state, music := testEngine(t, tools, []Source{down}, func(s *Settings) { s.Workers = 1 })
 	lib := testLibrary(tracks...)
 	runAll(e, lib)
-	if down.searched != 5 {
-		t.Errorf("searched %d times, want 5 before giving up on the source", down.searched)
+	if down.searched.Load() != 5 {
+		t.Errorf("searched %d times, want 5 before giving up on the source", down.searched.Load())
 	}
 	r := state.get("t7")
 	if r.Status != "error" || !strings.Contains(r.Reason, "skipped") {

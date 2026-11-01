@@ -167,7 +167,7 @@ The check goes through every step and says what to fix when something's wrong:
 ```
 Checking the torrent setup (TORRENTS.md explains each step):
   ✓ aria2 version 1.37.0 (/usr/bin/aria2c)
-  ✓ Jackett (all indexers) answers (http://127.0.0.1:9117/api/v2.0/indexers/all/results/torznab/api)
+  ✓ Jackett: RuTracker.org answers (http://127.0.0.1:9117/api/v2.0/indexers/rutracker/results/torznab/api)
   ✓ searching for "Daft Punk Random Access Memories": 37 results, 31 with seeders
       1. Daft Punk - Random Access Memories (2013) [FLAC]  (seeders: 52)
       …
@@ -188,7 +188,7 @@ Things to know about this step:
 
 | You pass | What happens |
 |---|---|
-| `--torznab http://127.0.0.1:9117` | Jackett, all configured indexers at once |
+| `--torznab http://127.0.0.1:9117` | Jackett: every configured indexer that carries music, each searched on its own (in parallel), so an indexer that fails shows its error instead of quietly returning nothing |
 | `--torznab http://127.0.0.1:9696` | Prowlarr: every enabled torrent indexer, found automatically |
 | `--torznab "http://127.0.0.1:9117/api/v2.0/indexers/NAME/results/torznab/"` | one specific Jackett indexer (copy it with **Copy Torznab Feed** on the dashboard) |
 | `--torznab URL1 --torznab URL2` | several feeds; results are merged |
@@ -218,34 +218,52 @@ To retry tracks that weren't found earlier, now that torrents are available, add
 
 For each track:
 
-1. **Search** for `Album Artist + Album` (albums are what most music torrents contain), and if
-   that finds nothing usable, for `Artist + Title` (singles, discographies, compilations). Each
-   search is done once per run and reused for the album's other tracks.
-2. **Rank** the results by how well their name fits the artist and album, preferring the format
-   you asked for (FLAC for `--format flac`/`original`, otherwise MP3) and more seeders. Torrents
-   with 0 seeders are dropped.
-3. **Look inside** the 3 best: fetch their `.torrent` file and pick the file whose name fits the
-   track best (track number counts too). Files whose names say *live*, *remix*, *instrumental*
-   etc. are skipped unless your track is that version.
-4. **Download only that file** with aria2c into a temporary folder. There's no seeding afterwards
-   (`--seed-time=0`), and the leftover pieces of neighbouring files are deleted.
+1. **Search**, from most to least specific, until something fits:
+   1. `Album Artist + Album`, with edition details left out (*Turn On The Bright Lights: The
+      Tenth Anniversary Edition (Remastered)* is searched as *Turn On The Bright Lights*), since
+      indexers only find torrents whose names contain every word you search for;
+   2. `Artist + Title`, for singles;
+   3. the artist alone, for discographies and albums named differently on the indexer.
+
+   Punctuation that trips up search engines (`: ( ) [ ] /` …) is left out. Each search is made
+   once per run and reused for the album's other tracks.
+2. **Rank** the results by how well their name fits the artist and album, preferring: the
+   format you asked for (lossless for `--format flac`/`original`, otherwise lossy), one file per
+   track over one-file-per-CD images (*image+.cue*, which can't be split here), CD-resolution
+   over 24-bit/vinyl rips (smaller, and usually the master streaming services use), the edition your track list
+   names (*Anniversary*, *Deluxe*…), discographies, and more seeders. Dropped: torrents with 0
+   seeders, audiobooks, and torrents that fit neither the artist nor the album.
+3. **Look inside** the best ones (5, or 10 for the artist-only search): fetch their `.torrent`
+   files and pick the file whose name fits the track best. A track number, a folder named after
+   the album, and shortened names (*05 - Say Hello.flac* for *Say Hello to the Angels*) count.
+   Files whose names say *live*, *remix*, *demo* etc. are skipped unless your track is that
+   version.
+4. **Download** with aria2c, only the files needed. One aria2c runs for the whole run, and all
+   tracks that need files from the same torrent share one download: the album's tracks are
+   collected for a moment and then fetched together, and tracks that come later are added to
+   the running download. Each track carries on as soon as *its* file is complete. There's no
+   seeding afterwards (`--seed-time=0`), and leftover pieces of neighbouring files are deleted.
 5. **Check, convert, tag:** like every other source, the file's real length must match the
    track, then it's converted to your format, tagged and filed. In the reports the source shows
    as *Torrent: «torrent name»*, linking to its page on the indexer.
 
+While a track waits for its torrent it doesn't take one of the `--workers` slots, so the other
+tracks keep being searched meanwhile, and several torrents download at once (up to 5; more
+wait in line).
+
 Results that only have a **magnet link** need aria2c to fetch the torrent's file list from other
-peers first, which can take up to 2 minutes.
+peers first, which can take up to a minute; results with a `.torrent` file are looked into first.
 
 ## Tuning
 
 | Setting | Effect |
 |---|---|
-| `--torrent-timeout 1h` | give a single torrent download more time (default 30 minutes) |
-| `--workers N` | tracks processed in parallel. At most 2 aria2c downloads run at once regardless, to go easy on your connection and the swarms. |
+| `--torrent-timeout 1h` | give a track's torrent file more time (default 30 minutes, counted while its torrent is downloading, not while it waits in line) |
+| `--workers N` | tracks searched and converted in parallel. Tracks waiting for a torrent don't count. |
 | `--format flac` / `original` | prefer lossless torrents |
 | Firewall | aria2c listens on TCP/UDP ports 6881–6999. Opening them (or forwarding them on your router) lets more peers connect, so it's faster. It works without that too. |
 
-A download that receives no data for 5 minutes is stopped as "no seeders".
+A torrent that receives no data for 3 minutes is given up on as dead.
 
 ## Troubleshooting
 
@@ -261,9 +279,10 @@ Run `./spotify-downloader --check-torrents` first. It tells you which step is br
 | `Prowlarr … has no enabled torrent indexers` | Add/enable indexers in Prowlarr (step 4). |
 | `search … found nothing` | No indexers, or none carry music: add music indexers and use **Test**. Try `--torrent-query "Artist Album"` with a well-known album. |
 | `couldn't get the torrent file` | The indexer refused the download: it's behind Cloudflare (step 5) or your login on that site expired (re-enter it in Jackett/Prowlarr). |
-| `N torrents found; the 3 best-matching ones don't contain this track` | Normal for rarer music: the album isn't on your indexers in a form that contains this track. More indexers help. |
+| `N torrents found; the M best-matching ones don't contain this track` | Normal for rarer music: the album isn't on your indexers in a form that contains this track. More indexers help. The log lists which torrents were looked into. |
+| `Jackett: NAME: error 900: …` | That indexer failed inside Jackett (login expired, Cloudflare, site down). Fix it in Jackett (**Test** shows the same error). These tracks are retried automatically on the next run. |
 | `no peers answered for the magnet link` | The torrent is dead or your network blocks BitTorrent. Other results are tried for the next track. |
-| `aria2c couldn't download it (no seeder sent data for 5 minutes)` | Dead torrent. Rerun later with `--retry-failed`. |
+| `no peer sent any data for 3 minutes (dead torrent?)` / `the torrent download stalled` | Dead or nearly dead torrent; the next-best one is tried right away. Rerun later with `--retry-failed`. |
 | `didn't finish within 30m` | Slow swarm: raise `--torrent-timeout`. |
 | `Torrent: skipped, it kept failing to respond earlier in this run` | Jackett/Prowlarr stopped answering five times in a row, so torrents were paused for the run. Check that it's still running; those tracks are retried next run. |
 | `Skipping torrents: …` at the start | Torrents are set up but the check failed, so the run continued without them. Run `--check-torrents`. |
