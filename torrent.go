@@ -890,6 +890,9 @@ type TorrentSource struct {
 	searches cache[[]torrentResult]
 	metas    cache[*torrentMeta]
 	cacheDir string // search results (kept for a while between runs)
+
+	hintMu sync.Mutex
+	hints  map[string]torrentHint // by track key: found in another track's torrent
 }
 
 // newTorrentSource makes the torrent source; extra[0] is the per-indexer search timeout.
@@ -1057,6 +1060,10 @@ func (s *TorrentSource) searchAll(ctx context.Context, query string) ([]torrentR
 }
 
 func (s *TorrentSource) Search(ctx context.Context, t *Track) ([]Candidate, error) {
+	if c, ok := s.takeHint(t.Key); ok {
+		debugf("%s: in “%s”, which another track's download found", t, c.Album)
+		return []Candidate{c}, nil
+	}
 	seen, inspected := map[string]bool{}, map[string]bool{}
 	looked := 0
 	var searchErr error
@@ -1140,12 +1147,8 @@ func (s *TorrentSource) inspect(ctx context.Context, t *Track, picks []torrentRe
 			debugf("torrent %q: no file fits %s among its %d files", r.Title, t, len(a.meta.files))
 			continue
 		}
-		var size int64
-		if i < len(a.meta.sizes) {
-			size = a.meta.sizes[i]
-		}
-		found[a.i] = &Candidate{Source: "torrent", URL: r.Details, Title: stem, Artist: r.Title,
-			Album: r.Title, Ref: a.meta.file + "#" + strconv.Itoa(i), Quality: fileQuality(a.meta.files[i], size, t.Duration())}
+		c := torrentCandidate(t, r.Title, r.Details, a.meta, i, stem)
+		found[a.i] = &c
 		fits = true
 	}
 	var out []Candidate
@@ -1155,6 +1158,175 @@ func (s *TorrentSource) inspect(ctx context.Context, t *Track, picks []torrentRe
 		}
 	}
 	return out, looked
+}
+
+// torrentCandidate is the candidate for file i (named stem) of the torrent called title.
+func torrentCandidate(t *Track, title, details string, meta *torrentMeta, i int, stem string) Candidate {
+	var size int64
+	if i < len(meta.sizes) {
+		size = meta.sizes[i]
+	}
+	return Candidate{Source: "torrent", URL: details, Title: stem, Artist: title, Album: title,
+		Ref: meta.file + "#" + strconv.Itoa(i), Quality: fileQuality(meta.files[i], size, t.Duration())}
+}
+
+// torrentRef splits a candidate's Ref into the .torrent file and the file's index in it.
+func torrentRef(ref string) (string, int, bool) {
+	file, idxText, ok := strings.Cut(ref, "#")
+	idx, err := strconv.Atoi(idxText)
+	return file, idx, ok && err == nil
+}
+
+// --- tracks fetched along ------------------------------------------------------------------------
+
+// A torrent usually holds a whole album, often an artist's discography. When one track's
+// torrent is about to be downloaded, the other tracks still to do that it also has are handed
+// that torrent (a hint): their next search here returns it right away, and the download waits
+// a little for them so that their files go into it too.
+
+type torrentHint struct {
+	cand Candidate
+	at   time.Time
+}
+
+const (
+	hintTTL = time.Hour
+	// Matching every track of an artist against a big discography takes seconds, and the
+	// first track's download waits for it: at most this many track-to-file comparisons per
+	// torrent (tracks that aren't checked find it with their own search).
+	alongBudget = 20000
+)
+
+// alongside returns, for each of tracks that c's torrent (found for track from) also has,
+// the candidate for its file. A track gets one only if its own search would consider the
+// torrent (see rankTorrents) and a file in it fits the track as well as a search's would.
+// The tracks of from's album are looked at first.
+func (s *TorrentSource) alongside(c Candidate, from *Track, tracks []*Track) map[string]Candidate {
+	file, _, ok := torrentRef(c.Ref)
+	if !ok {
+		return nil
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	files, sizes, err := torrentFileList(data)
+	if err != nil {
+		return nil
+	}
+	meta := &torrentMeta{file: file, files: files, sizes: sizes}
+	title := c.Album // a torrent candidate's album is the torrent's name
+	audio := 0
+	for _, f := range files {
+		if audioExts[strings.ToLower(path.Ext(f))] {
+			audio++
+		}
+	}
+	album := baseAlbum(from.Album)
+	sameAlbum := func(t *Track) bool { return t.Album != "" && strings.EqualFold(baseAlbum(t.Album), album) }
+	tracks = append([]*Track(nil), tracks...)
+	sort.SliceStable(tracks, func(i, j int) bool { return sameAlbum(tracks[i]) && !sameAlbum(tracks[j]) })
+	out := map[string]Candidate{}
+	budget := alongBudget
+	for _, t := range tracks {
+		if len(t.Artists) == 0 || !s.considers(t, title) {
+			continue
+		}
+		if budget -= audio; budget < 0 {
+			debugf("“%s” has %d audio files; not looking for more tracks in it", title, audio)
+			break
+		}
+		i, stem := bestFile(t, files)
+		if i < 0 {
+			continue
+		}
+		cand := torrentCandidate(t, title, c.URL, meta, i, stem)
+		// A track of another album may find a lossless copy of its own.
+		if s.lossless && !cand.Quality.Lossless && !sameAlbum(t) {
+			continue
+		}
+		if evaluate(t, cand).Reject != "" {
+			continue
+		}
+		cand.Unsearched = true
+		out[t.Key] = cand
+	}
+	return out
+}
+
+// considers is whether a search for t would look into a torrent with this name.
+func (s *TorrentSource) considers(t *Track, title string) bool {
+	r := []torrentResult{{Title: title, Seeders: -1}}
+	for _, q := range torrentQueries(t) {
+		if len(rankTorrents(r, t.Artists[0], q, s.lossless)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// hint hands track key the candidate c found along with another track (see alongside).
+func (s *TorrentSource) hint(key string, c Candidate) {
+	now := time.Now()
+	s.hintMu.Lock()
+	if s.hints == nil {
+		s.hints = map[string]torrentHint{}
+	}
+	for k, h := range s.hints {
+		if now.Sub(h.at) > hintTTL {
+			delete(s.hints, k)
+		}
+	}
+	s.hints[key] = torrentHint{c, now}
+	s.hintMu.Unlock()
+	s.expect(c, true)
+}
+
+func (s *TorrentSource) hinted(key string) bool {
+	s.hintMu.Lock()
+	defer s.hintMu.Unlock()
+	_, ok := s.hints[key]
+	return ok
+}
+
+// takeHint returns (once) the candidate handed to track key, if it has one.
+func (s *TorrentSource) takeHint(key string) (Candidate, bool) {
+	s.hintMu.Lock()
+	h, ok := s.hints[key]
+	delete(s.hints, key)
+	s.hintMu.Unlock()
+	if ok && time.Since(h.at) > hintTTL {
+		s.expect(h.cand, false)
+		return Candidate{}, false
+	}
+	return h.cand, ok
+}
+
+// dropHint forgets a hint its track didn't use (it was found elsewhere, or cancelled).
+func (s *TorrentSource) dropHint(key string) {
+	s.hintMu.Lock()
+	h, ok := s.hints[key]
+	delete(s.hints, key)
+	s.hintMu.Unlock()
+	if ok {
+		s.expect(h.cand, false)
+	}
+}
+
+// expect tells the downloader that a track is (or no longer is) on its way for c's file.
+func (s *TorrentSource) expect(c Candidate, coming bool) {
+	e, ok := s.dl.(interface {
+		expect(torrentFile string, index int)
+		unexpect(torrentFile string, index int)
+	})
+	file, idx, ok2 := torrentRef(c.Ref)
+	switch {
+	case !ok || !ok2:
+	case coming:
+		e.expect(file, idx)
+	default:
+		e.unexpect(file, idx)
+	}
 }
 
 // meta gets a result's .torrent (from its link, or a magnet's metadata via aria2c) and file list.
@@ -1232,9 +1404,8 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 }
 
 func (s *TorrentSource) Download(ctx context.Context, c Candidate, t *Track, workdir string) (string, error) {
-	file, idxText, ok := strings.Cut(c.Ref, "#")
-	idx, err := strconv.Atoi(idxText)
-	if !ok || err != nil {
+	file, idx, ok := torrentRef(c.Ref)
+	if !ok {
 		return "", failf("bad torrent reference")
 	}
 	task := taskFrom(ctx)

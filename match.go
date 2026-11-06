@@ -29,6 +29,9 @@ type Candidate struct {
 	ArtistIsCredit bool
 	Ref            string  // source-specific data needed to download it
 	Quality        Quality // what the download is expected to be, when the source says
+	// Unsearched: handed out without a search (found in another track's torrent). If it
+	// doesn't work out, the source is searched properly before it's given up on.
+	Unsearched bool
 }
 
 var accentFolder = strings.NewReplacer(

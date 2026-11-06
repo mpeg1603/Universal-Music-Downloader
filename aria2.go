@@ -25,9 +25,10 @@ import (
 
 // Torrent downloads go through one aria2c process for the whole run, driven over its JSON-RPC
 // interface. Tracks that need files from the same torrent share one download: the first
-// request starts it after a short pause that lets the album's other tracks join in, and later
-// requests are added to the running download. Each track gets its file as soon as that file
-// is complete, without waiting for the rest.
+// request starts it after a short pause that lets the album's other tracks join in (a little
+// longer for tracks known to be on their way), and later requests are added to the running
+// download. Each track gets its file as soon as that file is complete, without waiting for
+// the rest.
 
 // --- aria2c over JSON-RPC ----------------------------------------------------------------------
 
@@ -332,12 +333,14 @@ type torrentManager struct {
 	timeout   time.Duration // per file, counted while its torrent is actually downloading
 	gather    time.Duration // after a request, wait this long for more files of the same torrent…
 	maxGather time.Duration // …but no longer than this in total
+	along     time.Duration // and up to this long for the files of tracks on their way (expect)
 
 	mu      sync.Mutex
 	jobs    map[string]*torrentJob // by .torrent path
 	polling bool
 	closed  bool
 	started int     // aria2c downloads started, for the log and tests
+	added   int     // times files were added to a running download (which restarts it), for tests
 	limit   float64 // overall speed limit (bytes/s), applied when aria2c (re)starts
 }
 
@@ -354,6 +357,7 @@ type torrentJob struct {
 	complete map[int]string // its finished files
 	pending  map[int]bool   // requested files not yet handed to aria2c
 	waiters  []*fileWaiter
+	expected map[int]time.Time // files of tracks on their way, and until when to wait for them
 
 	timer       *time.Timer
 	gatherUntil time.Time
@@ -374,7 +378,7 @@ type fileWaiter struct {
 
 func newTorrentManager(a *aria2, dir string, timeout time.Duration) *torrentManager {
 	return &torrentManager{aria: a, dir: dir, timeout: timeout, gather: 2 * time.Second, maxGather: 8 * time.Second,
-		jobs: map[string]*torrentJob{}}
+		along: 20 * time.Second, jobs: map[string]*torrentJob{}}
 }
 
 func (m *torrentManager) fetch(ctx context.Context, torrentFile string, index int, dest string, task *Task) (string, error) {
@@ -403,6 +407,12 @@ func (m *torrentManager) fetch(ctx context.Context, torrentFile string, index in
 		m.mu.Unlock()
 		return "", failf("bad torrent file reference")
 	}
+	if _, ok := job.expected[index]; ok { // arrived
+		delete(job.expected, index)
+		if job.timer != nil {
+			m.schedule(job)
+		}
+	}
 	if p, ok := job.complete[index]; ok { // another track already got this file
 		m.mu.Unlock()
 		return linkInto(p, dest)
@@ -417,6 +427,9 @@ func (m *torrentManager) fetch(ctx context.Context, torrentFile string, index in
 	if !job.selected[index] && !job.pending[index] {
 		job.pending[index] = true
 		m.schedule(job)
+	}
+	if job.gid == "" && job.expecting(time.Now()) > 0 {
+		task.setStage("waiting for the torrent's other tracks")
 	}
 	if !m.polling {
 		m.polling = true
@@ -449,20 +462,83 @@ func (m *torrentManager) job(torrentFile string) (*torrentJob, error) {
 	}
 	sum := sha1.Sum(data)
 	job := &torrentJob{file: torrentFile, id: hex.EncodeToString(sum[:8]), data: data, names: names,
-		selected: map[int]bool{}, complete: map[int]string{}, pending: map[int]bool{}}
+		selected: map[int]bool{}, complete: map[int]string{}, pending: map[int]bool{}, expected: map[int]time.Time{}}
 	m.jobs[torrentFile] = job
 	return job, nil
 }
 
 // schedule hands the pending files to aria2c after a short pause, so that requests for the
-// other files of an album arriving meanwhile go in the same download.
+// other files of an album arriving meanwhile go in the same download. Files of tracks known
+// to be on their way (expect) are waited for a little longer: adding a file to a running
+// download restarts it, and peers take a while to come back.
 func (m *torrentManager) schedule(job *torrentJob) {
+	now := time.Now()
 	if job.timer == nil {
-		job.gatherUntil = time.Now().Add(m.maxGather)
-		job.timer = time.AfterFunc(m.gather, func() { m.apply(job) })
+		job.gatherUntil = now.Add(m.maxGather)
+	}
+	wait := max(0, min(m.gather, job.gatherUntil.Sub(now)))
+	for i, until := range job.expected {
+		if !until.After(now) {
+			delete(job.expected, i) // didn't come in time; it joins the download when it does
+			continue
+		}
+		wait = max(wait, until.Sub(now))
+	}
+	if job.timer == nil {
+		job.timer = time.AfterFunc(wait, func() { m.apply(job) })
 		return
 	}
-	job.timer.Reset(max(0, min(m.gather, time.Until(job.gatherUntil))))
+	job.timer.Reset(wait)
+}
+
+// expecting counts the files of tracks still on their way.
+func (job *torrentJob) expecting(now time.Time) int {
+	n := 0
+	for _, until := range job.expected {
+		if until.After(now) {
+			n++
+		}
+	}
+	return n
+}
+
+// expect says that a track is on its way for file index of torrentFile (it was found in
+// there while another track's download was starting), so that the download waits a little
+// for it.
+func (m *torrentManager) expect(torrentFile string, index int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	job, err := m.job(torrentFile)
+	if err != nil || index < 0 || index >= len(job.names) || job.selected[index] || job.pending[index] {
+		return
+	}
+	if _, ok := job.complete[index]; ok {
+		return
+	}
+	job.expected[index] = time.Now().Add(m.along)
+	if job.timer != nil {
+		m.schedule(job)
+	}
+}
+
+// unexpect takes that back: the track was found elsewhere, or cancelled.
+func (m *torrentManager) unexpect(torrentFile string, index int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.jobs[torrentFile]
+	if job == nil {
+		return
+	}
+	if _, ok := job.expected[index]; !ok {
+		return
+	}
+	delete(job.expected, index)
+	if job.timer != nil {
+		m.schedule(job)
+	}
 }
 
 func (m *torrentManager) apply(job *torrentJob) {
@@ -492,6 +568,7 @@ func (m *torrentManager) apply(job *torrentJob) {
 		return
 	}
 	debugf("torrent %s: now downloading files %s", job.id, indexList(all))
+	m.added++
 	job.selected = all
 	job.pending = map[int]bool{}
 }
@@ -523,9 +600,14 @@ func (m *torrentManager) pollLoop() {
 			m.mu.Unlock()
 			return
 		}
+		now := time.Now()
 		for _, job := range m.jobs {
-			if job.gid != "" {
+			switch {
+			case job.gid != "":
 				m.poll(job)
+			case len(job.waiters) == 0 && len(job.pending) == 0 && job.timer == nil && job.expecting(now) == 0 &&
+				(job.failed == nil || now.Sub(job.failedAt) > 10*time.Minute):
+				delete(m.jobs, job.file) // nothing to do (e.g. expected tracks that went elsewhere)
 			}
 		}
 		m.mu.Unlock()

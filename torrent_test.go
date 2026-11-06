@@ -305,8 +305,13 @@ func TestTorrentSourceInEngine(t *testing.T) {
 // fakeFetcher stands in for aria2c: it "downloads" a file by writing content.
 type fakeFetcher struct {
 	content []byte
-	mu      sync.Mutex
-	fetched int
+	fail    func(file string) error // the error for a file (path in the torrent), if any
+	onFetch func(file string)
+
+	mu       sync.Mutex
+	fetched  int
+	failures int
+	expected []string // files that tracks were said to be on their way for
 }
 
 func (f *fakeFetcher) fetch(ctx context.Context, torrentFile string, index int, dest string, task *Task) (string, error) {
@@ -318,6 +323,17 @@ func (f *fakeFetcher) fetch(ctx context.Context, torrentFile string, index int, 
 	if err != nil {
 		return "", err
 	}
+	if f.onFetch != nil {
+		f.onFetch(files[index])
+	}
+	if f.fail != nil {
+		if err := f.fail(files[index]); err != nil {
+			f.mu.Lock()
+			f.failures++
+			f.mu.Unlock()
+			return "", err
+		}
+	}
 	f.mu.Lock()
 	f.fetched++
 	f.mu.Unlock()
@@ -326,7 +342,284 @@ func (f *fakeFetcher) fetch(ctx context.Context, torrentFile string, index int, 
 	return p, os.WriteFile(p, f.content, 0o644)
 }
 
+func (f *fakeFetcher) expect(torrentFile string, index int) {
+	data, _ := os.ReadFile(torrentFile)
+	files, _ := torrentFiles(data)
+	f.mu.Lock()
+	f.expected = append(f.expected, files[index])
+	f.mu.Unlock()
+}
+
+func (f *fakeFetcher) unexpect(torrentFile string, index int) {}
+
 func (f *fakeFetcher) close() {}
+
+// --- tracks fetched along with another track's torrent ---------------------------------------------
+
+type testTorrent struct {
+	name    string
+	files   []string
+	seeders int
+}
+
+// albumIndexer serves a Torznab feed that answers the searches containing match with
+// torrents (every file's content being content), and notes every search.
+func albumIndexer(t *testing.T, match string, torrents []testTorrent, content []byte) (*httptest.Server, func() []string) {
+	var mu sync.Mutex
+	var queries []string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/torznab/api") && q.Get("t") == "search":
+			mu.Lock()
+			queries = append(queries, q.Get("q"))
+			mu.Unlock()
+			fmt.Fprint(w, "<rss><channel>")
+			if strings.Contains(q.Get("q"), match) {
+				for i, tt := range torrents {
+					fmt.Fprintf(w, `<item><title>%s</title><link>%s/dl/%d.torrent</link><guid>https://tracker/t/%d</guid><attr name="seeders" value="%d"/></item>`,
+						tt.name, srv.URL, i, i, tt.seeders)
+				}
+			}
+			fmt.Fprint(w, "</channel></rss>")
+		case strings.HasPrefix(r.URL.Path, "/dl/"):
+			var i int
+			fmt.Sscanf(path.Base(r.URL.Path), "%d.torrent", &i)
+			tt := torrents[i]
+			contents := make([][]byte, len(tt.files))
+			for k := range contents {
+				contents[k] = content
+			}
+			w.Write(makeTorrent(tt.name, tt.files, contents, ""))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), queries...)
+	}
+}
+
+// orderSource finds nothing; it notes the order tracks were searched in, and holds a track's
+// search until its hold channel is closed.
+type orderSource struct {
+	hold  map[string]chan struct{}
+	mu    sync.Mutex
+	order []string
+}
+
+func (o *orderSource) Name() string  { return "first" }
+func (o *orderSource) Label() string { return "First" }
+
+func (o *orderSource) Search(ctx context.Context, tr *Track) ([]Candidate, error) {
+	o.mu.Lock()
+	o.order = append(o.order, tr.Key)
+	o.mu.Unlock()
+	if ch := o.hold[tr.Key]; ch != nil {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, nil
+}
+
+func (o *orderSource) Download(ctx context.Context, c Candidate, tr *Track, workdir string) (string, error) {
+	return "", failf("nothing to download")
+}
+
+func (o *orderSource) searched() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.order...)
+}
+
+func numbered(title, artist, album string, n int) *Track {
+	tr := track(title, []string{artist}, album, 4)
+	tr.TrackNumber = n
+	return tr
+}
+
+func torrentSourceFor(t *testing.T, srv *httptest.Server, format string, f torrentFetcher) *TorrentSource {
+	feeds, err := resolveFeeds(context.Background(), TorrentConfig{Feeds: []string{srv.URL}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := newTorrentSource(feeds, "", t.TempDir(), format, time.Minute)
+	src.dl = f
+	return src
+}
+
+func TestTracksFoundAlongInATorrent(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, files []string) *torrentMeta {
+		p := filepath.Join(dir, fmt.Sprintf("%x.torrent", sha1.Sum([]byte(name))))
+		data := makeTorrent(name, files, nil, "")
+		os.WriteFile(p, data, 0o644)
+		names, sizes, err := torrentFileList(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &torrentMeta{file: p, files: names, sizes: sizes}
+	}
+	ram := "Daft Punk - Random Access Memories (2013) [FLAC]"
+	meta := write(ram, albumFiles)
+	lucky := getLucky()
+	c := torrentCandidate(lucky, ram, "https://tracker/t/1", meta, 3, "Get Lucky (feat. Pharrell Williams & Nile Rodgers)")
+	give := numbered("Give Life Back to Music", "Daft Punk", "Random Access Memories", 1)
+	dance := numbered("Lose Yourself to Dance", "Daft Punk", "Random Access Memories", 7)
+	contact := numbered("Contact", "Daft Punk", "Random Access Memories", 13)
+	cover := numbered("Get Lucky", "Someone Else", "Covers", 8)
+	src := newTorrentSource(nil, "", t.TempDir(), "flac", time.Minute)
+	got := src.alongside(c, lucky, []*Track{give, dance, contact, cover})
+	if len(got) != 2 || got[give.Key].Ref != meta.file+"#1" || got[dance.Key].Ref != meta.file+"#2" {
+		t.Fatalf("found along: %+v", got)
+	}
+	if g := got[give.Key]; !g.Unsearched || g.Album != ram || g.URL != "https://tracker/t/1" || !g.Quality.Lossless {
+		t.Errorf("candidate: %+v", g)
+	}
+
+	// From a lossy discography, a lossless search only takes the same album's tracks: the
+	// others may find a lossless copy of their own.
+	disco := "Daft Punk - Discography (1997-2013) [MP3]"
+	meta = write(disco, []string{"Random Access Memories/08 - Get Lucky.mp3", "Random Access Memories/01 - Give Life Back to Music.mp3", "Discovery/01 - One More Time.mp3"})
+	c = torrentCandidate(lucky, disco, "", meta, 0, "Get Lucky")
+	omt := numbered("One More Time", "Daft Punk", "Discovery", 1)
+	if got := src.alongside(c, lucky, []*Track{give, omt}); len(got) != 1 || got[give.Key].Ref != meta.file+"#1" {
+		t.Errorf("lossless: %+v", got)
+	}
+	mp3 := newTorrentSource(nil, "", t.TempDir(), "mp3", time.Minute)
+	if got := mp3.alongside(c, lucky, []*Track{give, omt}); len(got) != 2 || got[omt.Key].Ref != meta.file+"#2" {
+		t.Errorf("mp3: %+v", got)
+	}
+
+	// In a huge torrent only some tracks are looked for, those of the same album first.
+	big := []string{"Random Access Memories/01 - Give Life Back to Music.mp3", "Random Access Memories/08 - Get Lucky.mp3"}
+	var others []*Track
+	for i := range 4000 {
+		big = append(big, fmt.Sprintf("Album %d/%02d - Song %d.mp3", i/20, i%20+1, i))
+		if i < 20 {
+			others = append(others, numbered(fmt.Sprintf("Song %d", i), "Daft Punk", "Album 0", i+1))
+		}
+	}
+	meta = write("Daft Punk - Everything [MP3]", big)
+	c = torrentCandidate(lucky, "Daft Punk - Everything [MP3]", "", meta, 1, "Get Lucky")
+	got = mp3.alongside(c, lucky, append(others, give))
+	if _, ok := got[give.Key]; !ok || len(got) != alongBudget/len(big) {
+		t.Errorf("huge torrent: %d found (Give Life Back to Music: %v), want %d", len(got), ok, alongBudget/len(big))
+	}
+}
+
+// TestQueuedTracksGoAlong: when a torrent is about to be downloaded for one track, the other
+// tracks still to do that it has move to the front of the queue and skip the torrent search,
+// so they get there while it downloads. One More Time is only there that way: its own
+// searches find nothing on this indexer.
+func TestQueuedTracksGoAlong(t *testing.T) {
+	tools := needFFmpeg(t)
+	tone := toneBytes(t, 4)
+	name := "Daft Punk - Discography (1997-2013) [MP3]"
+	files := []string{"Random Access Memories/07 - Lose Yourself to Dance.mp3", "Random Access Memories/08 - Get Lucky.mp3", "Discovery/01 - One More Time.mp3"}
+	srv, queries := albumIndexer(t, "Random Access Memories", []testTorrent{{name, files, 5}}, tone)
+	fetcher := &fakeFetcher{content: tone}
+	src := torrentSourceFor(t, srv, "mp3", fetcher)
+	first := &orderSource{}
+
+	lucky := numbered("Get Lucky", "Daft Punk", "Random Access Memories", 8)
+	var fillers []*Track
+	for i := 1; i <= 4; i++ {
+		fillers = append(fillers, numbered(fmt.Sprintf("Filler %d", i), "Nobody", "Nothing", i))
+	}
+	contact := numbered("Contact", "Daft Punk", "Random Access Memories", 13)
+	dance := numbered("Lose Yourself to Dance", "Daft Punk", "Random Access Memories", 7)
+	omt := numbered("One More Time", "Daft Punk", "Discovery", 1)
+	lib := testLibrary(append(append([]*Track{lucky}, fillers...), contact, dance, omt)...)
+	m := testManager(t, tools, []Source{first, src}, lib, func(c *Config) { c.SearchWorkers = 1 })
+	state := m.state
+	out := runManager(t, m)
+
+	for _, tr := range []*Track{lucky, dance, omt} {
+		if r := state.get(tr.Key); out[tr.Key].State != JobDone || r.Source != "torrent" || r.SourceAlbum != name {
+			t.Errorf("%s: %+v / %+v", tr.Title, out[tr.Key], r)
+		}
+	}
+	if out[contact.Key].State != JobFailed {
+		t.Errorf("Contact isn't in the torrent: %+v", out[contact.Key])
+	}
+	for _, q := range queries() {
+		if strings.Contains(q, "Discovery") || strings.Contains(q, "One More Time") || strings.Contains(q, "Lose Yourself") {
+			t.Errorf("searched for %q", q)
+		}
+	}
+	pos := map[string]int{}
+	order := first.searched()
+	for i, k := range order {
+		pos[k] = i
+	}
+	last := fillers[len(fillers)-1].Key
+	if pos[dance.Key] > pos[last] || pos[omt.Key] > pos[last] {
+		t.Errorf("the tracks in the torrent didn't move up the queue: %v", order)
+	}
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+	sort.Strings(fetcher.expected)
+	if want := []string{name + "/" + files[2], name + "/" + files[0]}; fmt.Sprint(fetcher.expected) != fmt.Sprint(want) {
+		t.Errorf("the download was told to wait for %q, want %q", fetcher.expected, want)
+	}
+}
+
+// TestFailedShortcutSearchesProperly: a track handed another track's torrent whose file then
+// fails searches the torrent source properly instead of giving up on it.
+func TestFailedShortcutSearchesProperly(t *testing.T) {
+	tools := needFFmpeg(t)
+	tone := toneBytes(t, 4)
+	files := []string{"01 - Give Life Back to Music.mp3", "08 - Get Lucky.mp3"}
+	a := testTorrent{"Daft Punk - Random Access Memories (2013) [MP3]", files, 50}
+	b := testTorrent{"Daft Punk - Random Access Memories [MP3 320]", files, 5}
+	srv, _ := albumIndexer(t, "Random Access Memories", []testTorrent{a, b}, tone)
+	lucky := numbered("Get Lucky", "Daft Punk", "Random Access Memories", 8)
+	give := numbered("Give Life Back to Music", "Daft Punk", "Random Access Memories", 1)
+	// Give Life Back to Music waits in the first source until Get Lucky's download starts,
+	// so it's handed that torrent before it gets to search it.
+	release := make(chan struct{})
+	var once sync.Once
+	fetcher := &fakeFetcher{content: tone,
+		onFetch: func(string) { once.Do(func() { close(release) }) },
+		fail: func(file string) error {
+			if file == a.name+"/"+files[0] {
+				return failf("no peer sent any data for 3m (dead torrent?)")
+			}
+			return nil
+		}}
+	src := torrentSourceFor(t, srv, "mp3", fetcher)
+	first := &orderSource{hold: map[string]chan struct{}{give.Key: release}}
+	m := testManager(t, tools, []Source{first, src}, testLibrary(lucky, give), nil)
+	state := m.state
+	out := runManager(t, m)
+
+	if r := state.get(lucky.Key); r.SourceAlbum != a.name {
+		t.Errorf("Get Lucky: %+v", r)
+	}
+	r := state.get(give.Key)
+	if out[give.Key].State != JobDone || r.SourceAlbum != b.name {
+		t.Fatalf("Give Life Back to Music: %+v / %+v", out[give.Key], r)
+	}
+	if reasons := strings.Join(out[give.Key].Reasons, "; "); !strings.Contains(reasons, "dead torrent") {
+		t.Errorf("reasons: %s", reasons)
+	}
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+	if fmt.Sprint(fetcher.expected) != fmt.Sprint([]string{a.name + "/" + files[0]}) {
+		t.Errorf("Give Life Back to Music wasn't handed Get Lucky's torrent: %q", fetcher.expected)
+	}
+	if fetcher.failures != 1 {
+		t.Errorf("the failed file was tried %d times, want 1", fetcher.failures)
+	}
+}
 
 // throttled slows a web seed down so a download is still running when more files are added.
 type throttled struct {
@@ -493,6 +786,73 @@ func TestAria2cRestartKeepsFinishedFiles(t *testing.T) {
 	defer m.mu.Unlock()
 	if m.started != 1 {
 		t.Errorf("%d downloads, want 1", m.started)
+	}
+}
+
+// TestAria2cWaitsForTracksOnTheirWay: a download about to start waits for the files of tracks
+// known to be coming (expect), so they go into it instead of restarting it later, and stops
+// waiting as soon as the last of them arrives or drops out (unexpect).
+func TestAria2cWaitsForTracksOnTheirWay(t *testing.T) {
+	aria2c, err := exec.LookPath("aria2c")
+	if err != nil {
+		t.Skip("aria2c not installed")
+	}
+	name := "Test Artist - Third Album"
+	files := []string{"01 - One.mp3", "02 - Two.mp3", "03 - Three.mp3"}
+	var contents [][]byte
+	for i := range files {
+		contents = append(contents, bytes.Repeat([]byte{byte('a' + i)}, 100_000+i*1000))
+	}
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, name), 0o755)
+	for i, f := range files {
+		os.WriteFile(filepath.Join(root, name, f), contents[i], 0o644)
+	}
+	webseed := httptest.NewServer(http.FileServer(http.Dir(root)))
+	defer webseed.Close()
+	torrentFile := filepath.Join(t.TempDir(), "album.torrent")
+	os.WriteFile(torrentFile, makeTorrent(name, files, contents, webseed.URL+"/"), 0o644)
+
+	m := newTorrentManager(newAria2(aria2c), t.TempDir(), 2*time.Minute)
+	m.gather, m.maxGather, m.along = 200*time.Millisecond, 600*time.Millisecond, 40*time.Second
+	defer m.close()
+	m.expect(torrentFile, 1)
+	m.expect(torrentFile, 2)
+	start := time.Now()
+	type result struct {
+		i   int
+		err error
+	}
+	results := make(chan result, 2)
+	get := func(i int) {
+		p, err := m.fetch(context.Background(), torrentFile, i, t.TempDir(), nil)
+		if err == nil {
+			if data, _ := os.ReadFile(p); !bytes.Equal(data, contents[i]) {
+				err = fmt.Errorf("got %d bytes, want %d", len(data), len(contents[i]))
+			}
+		}
+		results <- result{i, err}
+	}
+	go get(0)
+	time.Sleep(1500 * time.Millisecond) // well past the usual pause
+	m.mu.Lock()
+	early := m.started
+	m.mu.Unlock()
+	go get(1)
+	time.Sleep(500 * time.Millisecond)
+	m.unexpect(torrentFile, 2) // found elsewhere
+	for range 2 {
+		if r := <-results; r.err != nil {
+			t.Fatalf("file %d: %v", r.i, r.err)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if early != 0 || m.started != 1 || m.added != 0 {
+		t.Errorf("started %d downloads before the expected track came, %d in all, added files %d times; want 0, 1, 0", early, m.started, m.added)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Errorf("took %s: still waited for the track that dropped out", took)
 	}
 }
 

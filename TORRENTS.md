@@ -250,6 +250,17 @@ For each track:
    collected for a moment and then fetched together, and tracks that come later are added to
    the running download. Each track carries on as soon as *its* file is complete. There's no
    seeding afterwards (`--seed-time=0`), and leftover pieces of neighbouring files are deleted.
+
+   Before a torrent's download starts, its file list is checked for **your other tracks still
+   to download**: the rest of the album, or the artist's other songs in a discography. Each one
+   found moves to the front of the queue and skips the torrent search (it still tries the
+   sources above Torrent first), and the download waits up to 20 seconds for them, so their
+   files go into it from the start. Files are matched the way a search matches them (artist,
+   title, track number). With the format set to `flac` or `original`, a lossy file is only
+   handed to tracks of the same album; the others may find a lossless copy with their own
+   search. In a very big torrent only some of your tracks are checked, the same album's
+   first; the rest find it with their own search. If a file handed over this way fails, that
+   track searches the indexers as usual.
 5. **Check, convert, tag:** like every other source, the file's real length must match the
    track, then it's converted to your format, tagged and filed. In the reports the source shows
    as *Torrent: «torrent name»*, linking to its page on the indexer.

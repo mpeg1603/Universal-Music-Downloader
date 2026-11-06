@@ -818,6 +818,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 	transient := false
 	var retryAt time.Time
 	skipped := map[string]bool{}
+	failed := map[string]bool{} // candidates that didn't work out, not to be tried again in this run
 	note := func(r string) {
 		reasons = append(reasons, r)
 		j.addReason(r)
@@ -881,8 +882,12 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 		m.srcMu.Lock()
 		m.healthOf(name).found++
 		m.srcMu.Unlock()
-		srcTransient := false
+		srcTransient, again := false, false
 		for _, mt := range accepted[:min(len(accepted), max(1, cfg.TriesPerSrc))] {
+			ck := mt.Cand.Source + "\x00" + mt.Cand.URL + "\x00" + mt.Cand.Ref
+			if failed[ck] {
+				continue
+			}
 			j.setState(gen, JobReady, name)
 			task.setStage("waiting for a download slot")
 			m.wake()
@@ -896,6 +901,9 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			task.mu.Unlock()
 			j.setState(gen, JobDownloading, name)
 			task.setStage("downloading from " + label)
+			if ts, ok := src.(*TorrentSource); ok {
+				m.fetchAlong(ts, j, mt.Cand)
+			}
 			raw, err := src.Download(ctx, mt.Cand, t, workdir)
 			release()
 			m.wake()
@@ -923,8 +931,15 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 				srcTransient, transient = true, true
 				break
 			}
+			failed[ck] = true
+			if mt.Cand.Unsearched { // a shortcut that didn't work out: search properly
+				again = true
+				break
+			}
 		}
-		m.markTried(j, name, !srcTransient)
+		if !again {
+			m.markTried(j, name, !srcTransient)
+		}
 	}
 	reason := strings.Join(reasons, "; ")
 	if reason == "" {
@@ -1030,11 +1045,109 @@ func (m *Manager) finish(j *Job, gen int, res result) {
 		j.mu.Unlock()
 		m.state.markFailed(key, res.reason, false)
 	}
+	m.dropTorrentHint(key)
 	m.dirty.Store(true)
 	if m.onFinish != nil && !res.aborted {
 		m.onFinish(j.view())
 	}
 	m.wake()
+}
+
+// fetchAlong looks for other tracks still to be downloaded in the torrent of c, which is about
+// to be downloaded for self. They're handed that torrent, so they skip the search and their
+// files go into the same download, and they move to the front of the queue to get there in
+// time. Only tracks of the same album or by the same artists are looked into: that's what
+// torrents hold.
+func (m *Manager) fetchAlong(ts *TorrentSource, self *Job, c Candidate) {
+	if c.Unsearched {
+		return // found along with another track, which looked already
+	}
+	self.mu.Lock()
+	from := self.Track
+	self.mu.Unlock()
+	type sibling struct {
+		j          *Job
+		t          *Track
+		needBetter bool
+		libQ       Quality
+	}
+	var sibs []sibling
+	m.jobsMu.Lock()
+	for _, j := range m.order {
+		if j == self {
+			continue
+		}
+		j.mu.Lock()
+		if !j.tried[ts.Name()] && related(j.Track, from) &&
+			(j.state == JobQueued || j.state == JobWaiting && j.pendingOn == "" || j.state == JobSearching && j.source != ts.Name()) {
+			s := sibling{j: j, t: j.Track, needBetter: j.needBetter && !j.force}
+			if len(j.lib) > 0 {
+				s.libQ = j.lib[0].Q
+			}
+			sibs = append(sibs, s)
+		}
+		j.mu.Unlock()
+	}
+	m.jobsMu.Unlock()
+	var tracks []*Track
+	for _, s := range sibs {
+		if !ts.hinted(s.t.Key) {
+			tracks = append(tracks, s.t)
+		}
+	}
+	if len(tracks) == 0 {
+		return
+	}
+	found := ts.alongside(c, from, tracks)
+	n := 0
+	for _, s := range sibs {
+		cand, ok := found[s.t.Key]
+		if !ok || s.needBetter && !mightBeBetter(cand.Quality, s.libQ) {
+			continue
+		}
+		ts.hint(s.t.Key, cand)
+		s.j.mu.Lock()
+		if s.j.state == JobQueued || s.j.state == JobWaiting && s.j.pendingOn == "" {
+			s.j.state, s.j.retryAt = JobQueued, time.Time{}
+			s.j.bump = m.bumpSeq.Add(1)
+		}
+		s.j.mu.Unlock()
+		debugf("%s: also in “%s” (%s)", s.t, c.Album, cand.Title)
+		n++
+	}
+	if n > 0 {
+		logf("Torrent “%s” also has %d other tracks to download; they go into the same download", c.Album, n)
+		m.dirty.Store(true)
+		m.wake()
+	}
+}
+
+// related is whether two tracks may well be in the same torrent: same album, or an artist in
+// common. (Plain comparisons: this runs over the whole queue.)
+func related(a, b *Track) bool {
+	if a.Album != "" && strings.EqualFold(a.Album, b.Album) {
+		return true
+	}
+	for _, x := range a.Artists {
+		for _, y := range b.Artists {
+			if strings.EqualFold(x, y) {
+				return true
+			}
+		}
+		if b.AlbumArtist != "" && strings.EqualFold(x, b.AlbumArtist) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropTorrentHint forgets the torrent a track was handed (fetchAlong) if it didn't use it.
+func (m *Manager) dropTorrentHint(key string) {
+	for _, src := range m.currentSources() {
+		if ts, ok := src.(*TorrentSource); ok {
+			ts.dropHint(key)
+		}
+	}
 }
 
 // bandcampLinkArrived lets the tracks waiting for one of Bandcamp's emailed links go on.
@@ -1327,6 +1440,7 @@ func (m *Manager) Cancel(key string) {
 		j.state, j.lastErr = JobCancelled, "cancelled by you"
 		j.mu.Unlock()
 		m.state.markCancelled(key)
+		m.dropTorrentHint(key)
 	default:
 		j.mu.Unlock()
 	}
