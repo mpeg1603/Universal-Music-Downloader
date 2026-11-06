@@ -209,6 +209,22 @@ func TestImportMergesRepeatedSongs(t *testing.T) {
 	if len(again.Tracks) != 6 || len(again.playlist("Sovietwave").Keys) != 6 {
 		t.Errorf("after reload: %d tracks, playlist %v", len(again.Tracks), again.playlist("Sovietwave").Keys)
 	}
+
+	// A listing without a length joins one version, and doesn't bridge it to another
+	// version of a different length, whichever order they come in.
+	long := &Track{Key: "ccccccccccccccccccccc1", Title: "Farewell", Artists: []string{"Boris"}, Album: "Pink", DurationMs: 453400}
+	short := &Track{Key: "ccccccccccccccccccccc2", Title: "Farewell", Artists: []string{"Boris"}, Album: "Split", DurationMs: 302199}
+	nolen := &Track{Key: trackKey("", "Boris", "Farewell"), Title: "Farewell", Artists: []string{"Boris"}}
+	for _, order := range [][]*Track{{long, nolen, short}, {nolen, long, short}} {
+		lib := newLibrary()
+		for _, tr := range order {
+			cp := *tr
+			lib.add("Boris", &cp)
+		}
+		if len(lib.Tracks) != 2 || lib.merged != 1 {
+			t.Errorf("%s first: %d tracks, %d merged", order[0].Key, len(lib.Tracks), lib.merged)
+		}
+	}
 }
 
 func TestParseDurations(t *testing.T) {

@@ -234,16 +234,20 @@ func (l *Library) sameSong(t *Track) *Track {
 		return nil
 	}
 	title, isrc := cleanTitle(t.Title, false), strings.ToUpper(strings.TrimSpace(t.ISRC))
-	near := func(o sighting, slack int) bool {
-		d := t.DurationMs - o.ms
-		return t.DurationMs > 0 && o.ms > 0 && d <= slack && -d <= slack
-	}
 	var byISRC *Track
 	for _, o := range l.songs[artist] {
+		// A listing without a length stands for the song it was merged into, so that it
+		// can't bridge two versions of different lengths.
+		ms := o.ms
+		if ms == 0 {
+			ms = l.Tracks[o.key].DurationMs
+		}
+		known := t.DurationMs > 0 && ms > 0
+		gap := max(t.DurationMs-ms, ms-t.DurationMs)
 		switch {
-		case title != "" && o.title == title && (t.DurationMs == 0 || o.ms == 0 || near(o, sameTitleSlackMs)):
+		case title != "" && o.title == title && (!known || gap <= sameTitleSlackMs):
 			return l.Tracks[o.key]
-		case byISRC == nil && isrc != "" && o.isrc == isrc && near(o, sameISRCSlackMs):
+		case byISRC == nil && isrc != "" && o.isrc == isrc && known && gap <= sameISRCSlackMs:
 			byISRC = l.Tracks[o.key]
 		}
 	}
