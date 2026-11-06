@@ -24,7 +24,14 @@ type Archive struct {
 	rank map[string]int // file format -> preference (lower is better)
 }
 
-func newArchive(format string) *Archive {
+var archiveQuality = map[string]Quality{
+	"Flac": {Codec: "flac", Lossless: true}, "24bit Flac": {Codec: "flac", Lossless: true, BitDepth: 24},
+	"VBR MP3": {Codec: "mp3", Kbps: 190}, "320Kbps MP3": {Codec: "mp3", Kbps: 320}, "256Kbps MP3": {Codec: "mp3", Kbps: 256},
+	"MP3": {Codec: "mp3", Kbps: 192}, "Ogg Vorbis": {Codec: "vorbis", Kbps: 160}, "128Kbps MP3": {Codec: "mp3", Kbps: 128},
+	"64Kbps MP3": {Codec: "mp3", Kbps: 64},
+}
+
+func newArchive(format, route string) *Archive {
 	order := append(append([]string{}, archiveLossy...), archiveLossless...)
 	if format == "flac" || format == "original" || format == "opus" {
 		order = append(append([]string{}, archiveLossless...), archiveLossy...)
@@ -33,11 +40,12 @@ func newArchive(format string) *Archive {
 	for i, f := range order {
 		rank[f] = i
 	}
-	return &Archive{http: newHTTP("Internet Archive", 300*time.Millisecond), rank: rank}
+	return &Archive{http: newRoutedHTTP("Internet Archive", 300*time.Millisecond, route), rank: rank}
 }
 
-func (a *Archive) Name() string  { return "archive" }
-func (a *Archive) Label() string { return "Internet Archive" }
+func (a *Archive) Name() string        { return "archive" }
+func (a *Archive) Label() string       { return "Internet Archive" }
+func (a *Archive) MaxQuality() Quality { return Quality{Codec: "flac", Lossless: true} }
 
 func lucenePhrase(s string) string {
 	return strings.TrimSpace(strings.NewReplacer(`\`, " ", `"`, " ").Replace(s))
@@ -155,6 +163,7 @@ func (a *Archive) itemCandidates(ctx context.Context, ident string) ([]Candidate
 			Duration:       length,
 			ArtistURL:      page,
 			ArtistIsCredit: true,
+			Quality:        archiveQuality[f.Format],
 		})
 	}
 	return out, nil

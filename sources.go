@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // A Source is a place to look for a track. Search returns candidates for the matcher to
@@ -22,57 +23,25 @@ type Source interface {
 	Download(ctx context.Context, c Candidate, t *Track, workdir string) (string, error)
 }
 
-var defaultSources = []string{"bandcamp", "archive", "youtube_music", "soundcloud", "youtube"}
-
-var sourceLabels = map[string]string{
-	"bandcamp": "Bandcamp", "archive": "Internet Archive", "youtube_music": "YouTube Music",
-	"soundcloud": "SoundCloud", "youtube": "YouTube", "torrent": "Torrent",
-}
-
-func usesYtDlp(names []string) bool {
-	for _, n := range names {
-		if n == "youtube_music" || n == "soundcloud" || n == "youtube" {
-			return true
-		}
-	}
-	return false
-}
-
-func buildSources(names []string, format string, cacheDir string, ytdlp *YtDlp, torrent Source) ([]Source, error) {
-	var out []Source
-	for _, n := range names {
-		switch n {
-		case "bandcamp":
-			out = append(out, newBandcamp(cacheDir, format))
-		case "archive":
-			out = append(out, newArchive(format))
-		case "youtube_music":
-			out = append(out, &YouTubeMusic{ytdlp: ytdlp, http: newHTTP("YouTube Music", 0)})
-		case "soundcloud":
-			out = append(out, &SoundCloud{ytdlp: ytdlp})
-		case "youtube":
-			out = append(out, &YouTube{ytdlp: ytdlp, http: newHTTP("YouTube", 0)})
-		case "torrent":
-			if torrent == nil {
-				return nil, fmt.Errorf("the torrent source isn't set up (see TORRENTS.md)")
-			}
-			out = append(out, torrent)
-		default:
-			return nil, fmt.Errorf("unknown source %q; choose from %s, torrent", n, strings.Join(defaultSources, ", "))
-		}
-	}
-	return out, nil
+// qualityCapper is implemented by sources that know the best quality they can offer, so a
+// track you have in lower quality isn't searched for where it can't get better.
+type qualityCapper interface {
+	MaxQuality() Quality
 }
 
 // --- yt-dlp --------------------------------------------------------------------------------
 
 type YtDlp struct {
-	bin  string
-	args []string
+	bin   string
+	args  []string
+	pacer *rateLimiter // spaces out requests to a site that flags busy clients (YouTube)
 }
 
-func newYtDlp(tools *Tools, cookies, cookiesFromBrowser string) *YtDlp {
-	args := []string{"--no-warnings", "--no-progress", "--socket-timeout", "30", "--retries", "3"}
+// youtubePacer is shared by YouTube and YouTube Music: they're one site as far as bot checks go.
+var youtubePacer = &rateLimiter{}
+
+func newYtDlp(tools *Tools, cookies, cookiesFromBrowser, proxy string) *YtDlp {
+	args := []string{"--no-warnings", "--no-progress", "--socket-timeout", "30", "--retries", "3", "--ignore-config"}
 	for _, rt := range tools.JSRuntimes {
 		args = append(args, "--js-runtimes", rt)
 	}
@@ -82,13 +51,30 @@ func newYtDlp(tools *Tools, cookies, cookiesFromBrowser string) *YtDlp {
 	if cookiesFromBrowser != "" {
 		args = append(args, "--cookies-from-browser", cookiesFromBrowser)
 	}
+	if proxy != "" {
+		args = append(args, "--proxy", proxy)
+	}
 	return &YtDlp{bin: tools.YtDlp, args: args}
+}
+
+// paced makes every yt-dlp run wait for its turn, at least interval apart, and space the
+// requests within a run too.
+func (y *YtDlp) paced(p *rateLimiter, interval time.Duration) *YtDlp {
+	p.mu.Lock()
+	p.interval = interval
+	p.mu.Unlock()
+	c := *y
+	c.pacer = p
+	if interval > 0 {
+		c.args = append(append([]string{}, y.args...), "--sleep-requests", fmt.Sprintf("%.2f", interval.Seconds()/2))
+	}
+	return &c
 }
 
 var (
 	reANSI       = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	unreachable  = []string{"unable to download webpage", "unable to download api page", "ssl", "timed out", "connection", "temporary failure in name resolution", "network is unreachable", "http error 429", "http error 5"}
-	botCheckHint = []string{"sign in to confirm", "not a bot"}
+	unreachable  = []string{"unable to download webpage", "unable to download api page", "ssl", "timed out", "connection", "temporary failure in name resolution", "network is unreachable", "http error 5"}
+	botCheckHint = []string{"sign in to confirm you", "not a bot", "http error 429", "too many requests", "rate-limit", "rate limit"}
 )
 
 func ytdlpError(stderr string, err error) error {
@@ -109,7 +95,10 @@ func ytdlpError(stderr string, err error) error {
 	low := strings.ToLower(msg)
 	for _, s := range botCheckHint {
 		if strings.Contains(low, s) {
-			return unavailablef("YouTube asked to sign in (bot check); run again with --cookies-from-browser firefox (or chrome)")
+			if strings.Contains(low, "soundcloud") {
+				return blockedf("SoundCloud is rate-limiting us")
+			}
+			return blockedf("YouTube asked to sign in (bot check); in Settings, set \"Cookies from browser\" to a browser where you're logged in to YouTube")
 		}
 	}
 	for _, s := range unreachable {
@@ -123,6 +112,11 @@ func ytdlpError(stderr string, err error) error {
 func (y *YtDlp) run(ctx context.Context, extra ...string) ([]byte, error) {
 	if y.bin == "" {
 		return nil, unavailablef("yt-dlp is not available")
+	}
+	if y.pacer != nil {
+		if err := y.pacer.wait(ctx); err != nil {
+			return nil, err
+		}
 	}
 	var stdout, stderr bytes.Buffer
 	cmd := command(ctx, y.bin, append(append([]string{}, y.args...), extra...)...)
@@ -225,8 +219,14 @@ type YouTubeMusic struct {
 	http  *HTTP
 }
 
-func (s *YouTubeMusic) Name() string  { return "youtube_music" }
-func (s *YouTubeMusic) Label() string { return "YouTube Music" }
+func (s *YouTubeMusic) Name() string        { return "youtube_music" }
+func (s *YouTubeMusic) Label() string       { return "YouTube Music" }
+func (s *YouTubeMusic) MaxQuality() Quality { return youtubeQuality }
+
+// YouTube's audio is Opus at about 130 kbps (AAC 256 for Premium accounts). It's also used as
+// the most YouTube can offer, so tracks you have in about that quality aren't searched for
+// there (every YouTube request adds to the risk of a bot check).
+var youtubeQuality = Quality{Codec: "opus", Kbps: 130}
 
 func (s *YouTubeMusic) Download(ctx context.Context, c Candidate, t *Track, workdir string) (string, error) {
 	return s.ytdlp.download(ctx, c.URL, workdir)
@@ -274,7 +274,7 @@ func parseYTMusicResults(resp any) []Candidate {
 		if vid == "" || len(cols) < 2 {
 			continue
 		}
-		c := Candidate{Source: "youtube_music", URL: "https://music.youtube.com/watch?v=" + vid, ArtistIsCredit: true}
+		c := Candidate{Source: "youtube_music", URL: "https://music.youtube.com/watch?v=" + vid, ArtistIsCredit: true, Quality: youtubeQuality}
 		for _, run := range asSlice(dig(cols[0], "musicResponsiveListItemFlexColumnRenderer", "text", "runs")) {
 			c.Title += str(dig(run, "text"))
 		}
@@ -313,8 +313,9 @@ type YouTube struct {
 	http  *HTTP
 }
 
-func (s *YouTube) Name() string  { return "youtube" }
-func (s *YouTube) Label() string { return "YouTube" }
+func (s *YouTube) Name() string        { return "youtube" }
+func (s *YouTube) Label() string       { return "YouTube" }
+func (s *YouTube) MaxQuality() Quality { return youtubeQuality }
 
 func (s *YouTube) Download(ctx context.Context, c Candidate, t *Track, workdir string) (string, error) {
 	return s.ytdlp.download(ctx, c.URL, workdir)
@@ -344,7 +345,7 @@ func (s *YouTube) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 			continue
 		}
 		out = append(out, Candidate{Source: "youtube", URL: "https://www.youtube.com/watch?v=" + e.ID, Title: e.Title,
-			Artist: firstNonEmpty(e.Channel, e.Uploader), Duration: e.Duration, ArtistURL: firstNonEmpty(e.ChannelURL, e.UploaderURL)})
+			Artist: firstNonEmpty(e.Channel, e.Uploader), Duration: e.Duration, ArtistURL: firstNonEmpty(e.ChannelURL, e.UploaderURL), Quality: youtubeQuality})
 	}
 	return out, nil
 }
@@ -362,7 +363,7 @@ func parseYouTubeResults(resp any) []Candidate {
 			title += str(dig(run, "text"))
 		}
 		c := Candidate{Source: "youtube", URL: "https://www.youtube.com/watch?v=" + id, Title: title,
-			Duration: float64(parseDurationMs(length)) / 1000}
+			Duration: float64(parseDurationMs(length)) / 1000, Quality: youtubeQuality}
 		if owner := asSlice(dig(v, "ownerText", "runs")); len(owner) > 0 {
 			c.Artist = str(dig(owner[0], "text"))
 			if p := str(dig(owner[0], "navigationEndpoint", "browseEndpoint", "canonicalBaseUrl")); p != "" {
@@ -378,8 +379,9 @@ func parseYouTubeResults(resp any) []Candidate {
 
 type SoundCloud struct{ ytdlp *YtDlp }
 
-func (s *SoundCloud) Name() string  { return "soundcloud" }
-func (s *SoundCloud) Label() string { return "SoundCloud" }
+func (s *SoundCloud) Name() string        { return "soundcloud" }
+func (s *SoundCloud) Label() string       { return "SoundCloud" }
+func (s *SoundCloud) MaxQuality() Quality { return Quality{Codec: "aac", Kbps: 160} }
 
 func (s *SoundCloud) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 	entries, err := s.ytdlp.search(ctx, "scsearch8:"+t.Artists[0]+" "+searchTitle(t.Title))
@@ -393,7 +395,7 @@ func (s *SoundCloud) Search(ctx context.Context, t *Track) ([]Candidate, error) 
 			continue
 		}
 		out = append(out, Candidate{Source: "soundcloud", URL: u, Title: e.Title, Artist: e.Uploader,
-			Duration: e.Duration, ArtistURL: e.UploaderURL})
+			Duration: e.Duration, ArtistURL: e.UploaderURL, Quality: Quality{Codec: "mp3", Kbps: 128}})
 	}
 	return out, nil
 }

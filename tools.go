@@ -25,7 +25,9 @@ type Tools struct {
 	JSRuntimes                     []string // passed to yt-dlp, which needs one for YouTube
 }
 
-func findTools(ctx context.Context, ytdlpFlag, cacheDir string, needYtDlp bool, logf func(string, ...any)) (*Tools, error) {
+// findBaseTools finds ffmpeg, ffprobe, aria2c and a JavaScript runtime; yt-dlp is fetched
+// separately when a source needs it.
+func findBaseTools() (*Tools, error) {
 	t := &Tools{}
 	var err error
 	if t.FFmpeg, err = exec.LookPath("ffmpeg"); err != nil {
@@ -40,26 +42,12 @@ func findTools(ctx context.Context, ytdlpFlag, cacheDir string, needYtDlp bool, 
 			t.JSRuntimes = append(t.JSRuntimes, rt)
 		}
 	}
-	if !needYtDlp {
-		return t, nil
-	}
-	if ytdlpFlag != "" {
-		t.YtDlp = expandHome(ytdlpFlag)
-		return t, nil
-	}
-	t.YtDlp, err = ensureYtDlp(ctx, filepath.Join(cacheDir, "bin"), logf)
-	if err != nil {
-		if p, lerr := exec.LookPath("yt-dlp"); lerr == nil {
-			logf("Couldn't fetch the latest yt-dlp (%v); using %s", err, p)
-			t.YtDlp = p
-			return t, nil
-		}
-		return nil, fmt.Errorf("yt-dlp is needed for YouTube/SoundCloud and couldn't be downloaded: %w", err)
-	}
-	if len(t.JSRuntimes) == 0 {
-		logf("Note: no JavaScript runtime (deno or node) found; YouTube downloads may fail without one")
-	}
 	return t, nil
+}
+
+func lookPath(name string) (string, bool) {
+	p, err := exec.LookPath(name)
+	return p, err == nil
 }
 
 func ytdlpAsset() (string, error) {

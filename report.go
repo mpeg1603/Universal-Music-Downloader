@@ -12,19 +12,26 @@ import (
 	"time"
 )
 
-// The three lists (artists, downloaded tracks, failed tracks) and local .m3u8 playlists.
+// The reports (artists, downloaded tracks, tracks you already have, failed tracks) and local
+// .m3u8 playlists, all written into the downloads folder.
 
 var failureCategories = []struct{ key, text string }{
 	{"not_found", "No acceptable match on any source"},
-	{"source_error", "A source was unreachable or errored (retried automatically on the next run)"},
-	{"missing_file", "Downloaded earlier but the file is gone (downloaded again on the next run)"},
-	{"pending", "Not attempted yet (run interrupted or limited with --limit)"},
+	{"source_error", "A source was unreachable or paused (tried again automatically)"},
+	{"missing_file", "Downloaded earlier but the file is gone (restart it to download again)"},
+	{"pending", "Not attempted yet"},
+	{"cancelled", "Cancelled by you"},
 	{"skipped", "Not a song (podcast, audiobook) or no longer on Spotify"},
 }
 
 type downloadedEntry struct {
 	Track *Track
 	Rec   Record
+}
+
+type libraryEntry struct {
+	Track *Track
+	File  *LibFile
 }
 
 type failedEntry struct {
@@ -41,28 +48,36 @@ type link struct{ Label, URL string }
 
 type Report struct {
 	Downloaded []downloadedEntry
+	InLibrary  []libraryEntry
 	Failed     []failedEntry
 	Artists    []*artistEntry
 }
 
-func buildReport(lib *Library, recs map[string]Record, musicDir string) *Report {
+func buildReport(lib *Library, views map[string]JobView) *Report {
 	rep := &Report{}
 	for _, t := range lib.ordered() {
-		r, ok := recs[t.Key]
+		v, ok := views[t.Key]
 		var cat, reason string
 		switch {
-		case ok && r.Status == "downloaded":
-			if _, err := os.Stat(filepath.Join(musicDir, filepath.FromSlash(r.Path))); err == nil {
-				rep.Downloaded = append(rep.Downloaded, downloadedEntry{t, r})
-				continue
-			}
-			cat, reason = "missing_file", r.Path+" no longer exists"
 		case !ok:
 			cat, reason = "pending", "not attempted yet"
-		case r.Status == "error":
-			cat, reason = "source_error", r.Reason
+		case v.State == JobDone:
+			if _, err := os.Stat(v.Rec.Path); err == nil {
+				rep.Downloaded = append(rep.Downloaded, downloadedEntry{t, v.Rec})
+				continue
+			}
+			cat, reason = "missing_file", v.Rec.Path+" no longer exists"
+		case v.State == JobInLibrary:
+			rep.InLibrary = append(rep.InLibrary, libraryEntry{t, v.Lib})
+			continue
+		case v.State == JobFailed:
+			cat, reason = "not_found", v.Reason
+		case v.State == JobWaiting:
+			cat, reason = "source_error", v.Reason
+		case v.State == JobCancelled:
+			cat, reason = "cancelled", "cancelled by you"
 		default:
-			cat, reason = "not_found", r.Reason
+			cat, reason = "pending", "not finished yet"
 		}
 		if t.IsLocal {
 			reason = "(local file in your Spotify playlist) " + reason
@@ -168,7 +183,7 @@ func writeReports(rep *Report, dir string) ([]string, error) {
 		return nil, err
 	}
 	stamp := "generated " + time.Now().Format("2006-01-02 15:04")
-	total := len(rep.Downloaded) + len(rep.Failed)
+	total := len(rep.Downloaded) + len(rep.Failed) + len(rep.InLibrary)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Downloaded artists\n\n%s · %d artists across %d downloaded tracks\n\n", stamp, len(rep.Artists), len(rep.Downloaded))
@@ -183,7 +198,7 @@ func writeReports(rep *Report, dir string) ([]string, error) {
 		fmt.Fprintf(&b, "| %s | %d | %s |\n", mdEscape(a.Name), a.Tracks, strings.Join(md, " · "))
 		rows = append(rows, []string{a.Name, fmt.Sprint(a.Tracks), strings.Join(urls, " ")})
 	}
-	files := []string{filepath.Join(dir, "artists.md"), filepath.Join(dir, "downloaded.md"), filepath.Join(dir, "failed.md")}
+	files := []string{filepath.Join(dir, "artists.md"), filepath.Join(dir, "downloaded.md"), filepath.Join(dir, "failed.md"), filepath.Join(dir, "in_library.md")}
 	if err := os.WriteFile(files[0], []byte(b.String()), 0o644); err != nil {
 		return nil, err
 	}
@@ -191,22 +206,35 @@ func writeReports(rep *Report, dir string) ([]string, error) {
 
 	b.Reset()
 	rows = nil
-	fmt.Fprintf(&b, "# Downloaded tracks\n\n%s · %d of %d tracks downloaded\n\n", stamp, len(rep.Downloaded), total)
-	b.WriteString("| # | Artist | Title | Album | Source | File |\n|---:|---|---|---|---|---|\n")
+	upgrades := 0
+	for _, d := range rep.Downloaded {
+		if d.Rec.LibPath != "" {
+			upgrades++
+		}
+	}
+	fmt.Fprintf(&b, "# Downloaded tracks\n\n%s · %d of %d tracks downloaded", stamp, len(rep.Downloaded), total)
+	if upgrades > 0 {
+		fmt.Fprintf(&b, " (%d of them in better quality than the copy in your library, which was left untouched; see the last column)", upgrades)
+	}
+	b.WriteString("\n\n| # | Artist | Title | Album | Quality | Source | File | Replaces library copy |\n|---:|---|---|---|---|---|---|---|\n")
 	for i, d := range rep.Downloaded {
 		t, r := d.Track, d.Rec
 		label := sourceLabels[r.Source]
 		if r.Source == "torrent" && r.SourceAlbum != "" {
 			label = "Torrent: " + r.SourceAlbum
 		}
-		fmt.Fprintf(&b, "| %d | %s | %s | %s | %s | `%s` |\n", i+1, mdEscape(t.ArtistStr()), mdLink(t.Title, t.SpotifyURL),
-			mdEscape(t.Album), mdLink(label, r.SourceURL), strings.ReplaceAll(r.Path, "`", "'"))
-		rows = append(rows, []string{t.ArtistStr(), t.Title, t.Album, label, r.SourceURL, r.Path, t.SpotifyURL, t.ISRC})
+		replaces := ""
+		if r.LibPath != "" {
+			replaces = fmt.Sprintf("`%s` (%s)", strings.ReplaceAll(r.LibPath, "`", "'"), r.LibQuality)
+		}
+		fmt.Fprintf(&b, "| %d | %s | %s | %s | %s | %s | `%s` | %s |\n", i+1, mdEscape(t.ArtistStr()), mdLink(t.Title, t.SpotifyURL),
+			mdEscape(t.Album), r.Quality, mdLink(label, r.SourceURL), strings.ReplaceAll(r.Path, "`", "'"), replaces)
+		rows = append(rows, []string{t.ArtistStr(), t.Title, t.Album, r.Quality.String(), label, r.SourceURL, r.Path, t.SpotifyURL, t.ISRC, r.LibPath, libQualityText(r)})
 	}
 	if err := os.WriteFile(files[1], []byte(b.String()), 0o644); err != nil {
 		return nil, err
 	}
-	writeCSV(filepath.Join(dir, "downloaded.csv"), []string{"artists", "title", "album", "source", "source_url", "file", "spotify_url", "isrc"}, rows)
+	writeCSV(filepath.Join(dir, "downloaded.csv"), []string{"artists", "title", "album", "quality", "source", "source_url", "file", "spotify_url", "isrc", "replaces_library_file", "library_quality"}, rows)
 
 	b.Reset()
 	rows = nil
@@ -231,12 +259,36 @@ func writeReports(rep *Report, dir string) ([]string, error) {
 		return nil, err
 	}
 	writeCSV(filepath.Join(dir, "failed.csv"), []string{"artists", "title", "album", "category", "reason", "spotify_url"}, rows)
+
+	b.Reset()
+	rows = nil
+	fmt.Fprintf(&b, "# Already in your library\n\n%s · %d tracks were not downloaded because your library has them in good enough quality\n\n", stamp, len(rep.InLibrary))
+	b.WriteString("| # | Artist | Title | Quality | File |\n|---:|---|---|---|---|\n")
+	for i, e := range rep.InLibrary {
+		p, q := "", ""
+		if e.File != nil {
+			p, q = e.File.Path, e.File.Q.String()
+		}
+		fmt.Fprintf(&b, "| %d | %s | %s | %s | `%s` |\n", i+1, mdEscape(e.Track.ArtistStr()), mdLink(e.Track.Title, e.Track.SpotifyURL), q, strings.ReplaceAll(p, "`", "'"))
+		rows = append(rows, []string{e.Track.ArtistStr(), e.Track.Title, e.Track.Album, q, p})
+	}
+	if err := os.WriteFile(files[3], []byte(b.String()), 0o644); err != nil {
+		return nil, err
+	}
+	writeCSV(filepath.Join(dir, "in_library.csv"), []string{"artists", "title", "album", "quality", "file"}, rows)
 	return files, nil
 }
 
-// writePlaylists writes one .m3u8 per playlist (and Liked Songs) listing the downloaded tracks.
-func writePlaylists(lib *Library, recs map[string]Record, musicDir string) (int, error) {
-	dir := filepath.Join(musicDir, "Playlists")
+func libQualityText(r Record) string {
+	if r.LibPath == "" {
+		return ""
+	}
+	return r.LibQuality.String()
+}
+
+// writePlaylists writes one .m3u8 per playlist, pointing at the downloaded file or, for songs
+// you already had, at the library copy.
+func writePlaylists(lib *Library, views map[string]JobView, dir string) (int, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return 0, err
 	}
@@ -245,17 +297,28 @@ func writePlaylists(lib *Library, recs map[string]Record, musicDir string) (int,
 		var b strings.Builder
 		b.WriteString("#EXTM3U\n#PLAYLIST:" + p.Name + "\n")
 		for _, k := range p.Keys {
-			r, ok := recs[k]
-			if !ok || r.Status != "downloaded" {
+			v, ok := views[k]
+			if !ok {
 				continue
 			}
-			full := filepath.Join(musicDir, filepath.FromSlash(r.Path))
-			if _, err := os.Stat(full); err != nil {
+			file := ""
+			if v.State == JobDone {
+				file = v.Rec.Path
+			} else if v.Lib != nil {
+				file = v.Lib.Path
+			}
+			if file == "" {
+				continue
+			}
+			if _, err := os.Stat(file); err != nil {
 				continue
 			}
 			t := lib.Tracks[k]
-			rel, _ := filepath.Rel(dir, full)
-			fmt.Fprintf(&b, "#EXTINF:%d,%s - %s\n%s\n", t.DurationMs/1000, t.ArtistStr(), t.Title, filepath.ToSlash(rel))
+			ref := file
+			if rel, err := filepath.Rel(dir, file); err == nil {
+				ref = rel
+			}
+			fmt.Fprintf(&b, "#EXTINF:%d,%s - %s\n%s\n", t.DurationMs/1000, t.ArtistStr(), t.Title, filepath.ToSlash(ref))
 		}
 		name := sanitize(p.Name)
 		for n := 2; used[strings.ToLower(name)]; n++ {

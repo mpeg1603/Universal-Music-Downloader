@@ -287,14 +287,25 @@ func importCSV(lib *Library, defaultPlaylist string, r io.Reader) error {
 		return fmt.Errorf("no artist column in CSV header %q", header)
 	}
 	lib.playlist(defaultPlaylist)
-	for {
-		row, err := cr.Read()
-		if err == io.EOF {
-			return nil
+	rows, err := cr.ReadAll()
+	if err != nil {
+		return err
+	}
+	// Exportify separates artists with ";" these days, and with "," before; names like
+	// "Woe, Is Me" are why ";" wins when it's there.
+	sep := map[string]string{}
+	for _, field := range []string{"artists", "artist_uris", "album_artist"} {
+		sep[field] = ","
+		if i, ok := col[field]; ok {
+			for _, row := range rows {
+				if i < len(row) && strings.Contains(row[i], ";") {
+					sep[field] = ";"
+					break
+				}
+			}
 		}
-		if err != nil {
-			return err
-		}
+	}
+	for _, row := range rows {
 		get := func(field string) string {
 			if i, ok := col[field]; ok && i < len(row) {
 				return strings.TrimSpace(row[i])
@@ -302,7 +313,7 @@ func importCSV(lib *Library, defaultPlaylist string, r io.Reader) error {
 			return ""
 		}
 		title := get("title")
-		artists := splitList(get("artists"))
+		artists := splitBy(get("artists"), sep["artists"])
 		if title == "" || len(artists) == 0 {
 			continue
 		}
@@ -320,7 +331,7 @@ func importCSV(lib *Library, defaultPlaylist string, r io.Reader) error {
 			Title:       title,
 			Artists:     artists,
 			Album:       get("album"),
-			AlbumArtist: strings.Join(splitList(get("album_artist")), ", "),
+			AlbumArtist: strings.Join(splitBy(get("album_artist"), sep["album_artist"]), ", "),
 			ISRC:        get("isrc"),
 			ReleaseDate: get("release"),
 			CoverURL:    get("cover"),
@@ -333,7 +344,7 @@ func importCSV(lib *Library, defaultPlaylist string, r io.Reader) error {
 		} else {
 			t.DurationMs = parseDurationMs(get("duration"))
 		}
-		if uris := splitList(get("artist_uris")); len(uris) == len(artists) {
+		if uris := splitBy(get("artist_uris"), sep["artist_uris"]); len(uris) == len(artists) {
 			t.ArtistURLs = map[string]string{}
 			for i, u := range uris {
 				if id := strings.TrimPrefix(u, "spotify:artist:"); id != u {
@@ -343,11 +354,14 @@ func importCSV(lib *Library, defaultPlaylist string, r io.Reader) error {
 		}
 		lib.add(playlist, t)
 	}
+	return nil
 }
 
-func splitList(s string) []string {
+func splitList(s string) []string { return splitBy(s, ",") }
+
+func splitBy(s, sep string) []string {
 	var out []string
-	for _, p := range strings.Split(s, ",") {
+	for _, p := range strings.Split(s, sep) {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}

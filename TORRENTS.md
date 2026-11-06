@@ -1,7 +1,8 @@
 # Torrent setup guide
 
-`torrent` is a download source like the others: you can use it alone (`--sources torrent`), put
-it first, or leave it at the end of the list, where it goes automatically once it's set up.
+`Torrent` is a download source like the others. In the app's **Sources** tab (key `4`) you turn
+it on, put it anywhere in the order (`K`/`J`), and enter your Jackett or Prowlarr address and
+API key (`Enter` on the Torrent row).
 
 It needs two things next to `spotify-downloader`:
 
@@ -29,13 +30,16 @@ spotify-downloader ──search "Artist Album"──▶ Jackett / Prowlarr ─�
 
 ## Quick start (if Jackett or Prowlarr is already running)
 
+1. In the app: **Sources** tab → select **Torrent** → `Enter` → enter `http://127.0.0.1:9117`
+   (Jackett) or `http://127.0.0.1:9696` (Prowlarr) and the API key → **Save**; `space` turns
+   the source on.
+2. Check the whole chain from a terminal:
+
 ```sh
-./spotify-downloader --torznab http://127.0.0.1:9117 --torznab-key YOUR_API_KEY --check-torrents   # Jackett
-./spotify-downloader --torznab http://127.0.0.1:9696 --torznab-key YOUR_API_KEY --check-torrents   # Prowlarr
+./spotify-downloader --check-torrents
 ```
 
-If every line shows ✓, you're done. The settings are saved, so later runs need no `--torznab`
-flags. Continue with [step 8](#step-8-choose-where-torrents-go-in-the-order).
+If every line shows ✓, you're done. Continue with [step 8](#step-8-choose-where-torrents-go-in-the-order).
 
 ---
 
@@ -156,11 +160,13 @@ those pages for them.
 
 ## Step 7: connect spotify-downloader and check
 
-```sh
-./spotify-downloader --torznab http://127.0.0.1:9117 --torznab-key PASTE_KEY_HERE --check-torrents
-```
+In the app's **Sources** tab, select **Torrent**, press `Enter` and fill in the address
+(`http://127.0.0.1:9117` for Jackett, `http://127.0.0.1:9696` for Prowlarr) and the API key.
+Then, from a terminal:
 
-Use `http://127.0.0.1:9696` for Prowlarr.
+```sh
+./spotify-downloader --check-torrents
+```
 
 The check goes through every step and says what to fix when something's wrong:
 
@@ -178,39 +184,33 @@ All good.
 
 Things to know about this step:
 
-- **What it searches for:** an album from your library, or `--torrent-query "Artist Album"` if you
+- **What it searches for:** an album from your playlists, or `--torrent-query "Artist Album"` if you
   give one.
-- **The settings are saved** in `~/.config/spotify-downloader/torrents.json`, readable only by you
-  because it holds the key. Later runs don't need the flags again. `--torznab none` forgets them.
-- **Instead of saving them**, you can set `TORZNAB_URL` and `TORZNAB_KEY` in your environment.
+- **The settings are saved** in `~/.config/spotify-downloader/config.json`, readable only by you
+  because it holds the key.
 
 ### Other ways to point it at your indexers
 
-| You pass | What happens |
+| Address field | What happens |
 |---|---|
-| `--torznab http://127.0.0.1:9117` | Jackett: every configured indexer that carries music, each searched on its own (in parallel), so an indexer that fails shows its error instead of quietly returning nothing |
-| `--torznab http://127.0.0.1:9696` | Prowlarr: every enabled torrent indexer, found automatically |
-| `--torznab "http://127.0.0.1:9117/api/v2.0/indexers/NAME/results/torznab/"` | one specific Jackett indexer (copy it with **Copy Torznab Feed** on the dashboard) |
-| `--torznab URL1 --torznab URL2` | several feeds; results are merged |
+| `http://127.0.0.1:9117` | Jackett: every configured indexer that carries music, each searched on its own (in parallel), so an indexer that fails shows its error instead of quietly returning nothing |
+| `http://127.0.0.1:9696` | Prowlarr: every enabled torrent indexer, found automatically |
+| `http://127.0.0.1:9117/api/v2.0/indexers/NAME/results/torznab/` | one specific Jackett indexer (copy it with **Copy Torznab Feed** on the dashboard) |
+| `URL1, URL2` | several feeds; results are merged |
 
 A feed URL that already contains `apikey=…` keeps its own key.
 
 ## Step 8: choose where torrents go in the order
 
-Sources are tried left to right for each track; the first one with a good match wins.
+Sources are tried top to bottom (Sources tab) for each track; the first one with a good match
+wins. Move Torrent with `K` (up) and `J` (down); `space` turns a source on or off. For example,
+Torrent right after Bandcamp gets lossless files first and leaves YouTube for the rest.
 
-| Command | Effect |
-|---|---|
-| `./spotify-downloader` | default order, torrents last: Bandcamp, Internet Archive, YouTube Music, SoundCloud, YouTube, Torrent |
-| `./spotify-downloader --sources torrent` | torrents only |
-| `./spotify-downloader --sources torrent,youtube_music` | torrents first, YouTube Music for the rest |
-| `./spotify-downloader --sources bandcamp,torrent,youtube_music` | free Bandcamp downloads first, then torrents, then YouTube Music |
-| `./spotify-downloader --sources bandcamp,archive,youtube_music,soundcloud,youtube` | no torrents, even though they're set up |
+Torrents usually give the best quality, especially with the format set to `flac` or `original`
+(Settings), which prefer lossless torrents. They're slower per track than YouTube.
 
-Torrents usually give the best quality, especially with `--format flac` or `--format original`,
-which prefer lossless torrents. They're slower per track than YouTube.
-
-To retry tracks that weren't found earlier, now that torrents are available, add `--retry-failed`.
+To retry tracks that weren't found earlier, now that torrents are available, press `R` in the
+Queue tab.
 
 ---
 
@@ -226,7 +226,14 @@ For each track:
    3. the artist alone, for discographies and albums named differently on the indexer.
 
    Punctuation that trips up search engines (`: ( ) [ ] /` …) is left out. Each search is made
-   once per run and reused for the album's other tracks.
+   once and reused for the album's other tracks; results are also kept on disk for 12 hours,
+   so restarting the app doesn't search everything again.
+
+   All your indexers are asked at once, but a search **doesn't wait for slow ones**: each gets
+   20 seconds at most (Sources → Torrent → settings), and once one indexer has answered the
+   others get only a few more seconds. An indexer that fails three times in a row is **left
+   out** for 5 minutes, then 10, 20, 40, 80, so a broken one can't slow every search down. The
+   Sources tab shows each indexer's state, its last error and how fast it answers.
 2. **Rank** the results by how well their name fits the artist and album, preferring: the
    format you asked for (lossless for `--format flac`/`original`, otherwise lossy), one file per
    track over one-file-per-CD images (*image+.cue*, which can't be split here), CD-resolution
@@ -247,28 +254,30 @@ For each track:
    track, then it's converted to your format, tagged and filed. In the reports the source shows
    as *Torrent: «torrent name»*, linking to its page on the indexer.
 
-While a track waits for its torrent it doesn't take one of the `--workers` slots, so the other
-tracks keep being searched meanwhile, and several torrents download at once (up to 5; more
-wait in line).
+While a track waits for its torrent it doesn't take a download slot, so other downloads go on
+meanwhile, and several torrents download at once (up to 5; more wait in line). The bandwidth
+cap (Settings) covers torrents too: aria2c gets what the other downloads leave over.
 
 Results that only have a **magnet link** need aria2c to fetch the torrent's file list from other
-peers first, which can take up to a minute; results with a `.torrent` file are looked into first.
+peers first, which can take up to 50 seconds; results with a `.torrent` file are looked into
+first. Fetched `.torrent` files are kept between runs.
 
 ## Tuning
 
 | Setting | Effect |
 |---|---|
-| `--torrent-timeout 1h` | give a track's torrent file more time (default 30 minutes, counted while its torrent is downloading, not while it waits in line) |
-| `--workers N` | tracks searched and converted in parallel. Tracks waiting for a torrent don't count. |
-| `--format flac` / `original` | prefer lossless torrents |
+| Give up on a torrent download after (Torrent settings) | give a track's torrent file more time (default 30 minutes, counted while its torrent is downloading, not while it waits in line) |
+| Give up on an indexer search after (Torrent settings) | default 20 seconds; lower it if some indexers are always slow |
+| Format `flac` / `original` (Settings) | prefer lossless torrents |
 | Firewall | aria2c listens on TCP/UDP ports 6881–6999. Opening them (or forwarding them on your router) lets more peers connect, so it's faster. It works without that too. |
 
 A torrent that receives no data for 3 minutes is given up on as dead.
 
 ## Troubleshooting
 
-Run `./spotify-downloader --check-torrents` first. It tells you which step is broken. Run with
-`-v` (or read the log, whose path is printed at the end of each run) for details.
+Run `./spotify-downloader --check-torrents` first. It tells you which step is broken. The
+Sources tab shows each indexer's last error; the Log tab (`v` for details) and the log file
+(in `~/.local/share/spotify-downloader/logs/`) have more.
 
 | Message | What to do |
 |---|---|
@@ -277,15 +286,15 @@ Run `./spotify-downloader --check-torrents` first. It tells you which step is br
 | `error 100: Invalid API Key` / `rejected the API key` | Copy the key again (step 6). Prowlarr and Jackett keys are different. |
 | `HTTP 404` / `doesn't look like a Torznab feed` | Give just the address (`http://127.0.0.1:9117`) instead of a hand-written path. |
 | `Prowlarr … has no enabled torrent indexers` | Add/enable indexers in Prowlarr (step 4). |
-| `search … found nothing` | No indexers, or none carry music: add music indexers and use **Test**. Try `--torrent-query "Artist Album"` with a well-known album. |
+| `search … found nothing` | No indexers, or none carry music: add music indexers and use **Test**. Try `--check-torrents --torrent-query "Artist Album"` with a well-known album. |
+| Every indexer fails within a second with `The response ended prematurely` | Jackett can't get out: check **Proxy** in Jackett's settings (a proxy that's down or refuses Jackett breaks every indexer at once). |
 | `couldn't get the torrent file` | The indexer refused the download: it's behind Cloudflare (step 5) or your login on that site expired (re-enter it in Jackett/Prowlarr). |
 | `N torrents found; the M best-matching ones don't contain this track` | Normal for rarer music: the album isn't on your indexers in a form that contains this track. More indexers help. The log lists which torrents were looked into. |
-| `Jackett: NAME: error 900: …` | That indexer failed inside Jackett (login expired, Cloudflare, site down). Fix it in Jackett (**Test** shows the same error). These tracks are retried automatically on the next run. |
+| `Jackett: NAME: error 900: …` / `answered HTTP 400` | That indexer failed inside Jackett (login expired, Cloudflare, site down, proxy). Fix it in Jackett (**Test** shows the same error). After three failures it's left out for a while; the Sources tab shows when it's tried again. |
 | `no peers answered for the magnet link` | The torrent is dead or your network blocks BitTorrent. Other results are tried for the next track. |
-| `no peer sent any data for 3 minutes (dead torrent?)` / `the torrent download stalled` | Dead or nearly dead torrent; the next-best one is tried right away. Rerun later with `--retry-failed`. |
-| `didn't finish within 30m` | Slow swarm: raise `--torrent-timeout`. |
-| `Torrent: skipped, it kept failing to respond earlier in this run` | Jackett/Prowlarr stopped answering five times in a row, so torrents were paused for the run. Check that it's still running; those tracks are retried next run. |
-| `Skipping torrents: …` at the start | Torrents are set up but the check failed, so the run continued without them. Run `--check-torrents`. |
+| `no peer sent any data for 3 minutes (dead torrent?)` / `the torrent download stalled` | Dead or nearly dead torrent; the next-best one is tried right away. Retry later with `r` (one track) or `R` (all) in the Queue tab. |
+| `didn't finish within 30m` | Slow swarm: raise "Give up on a torrent download after". |
+| `every torrent indexer is paused after repeated errors` | All indexers failed three times in a row; tracks wait and are retried when the first one comes back. |
+| `Torrent: …` problem in the Sources tab | The source couldn't be set up (Jackett/Prowlarr unreachable, wrong key, no aria2c). Fix it and save the Torrent settings again. |
 
-To stop using torrents: `--torznab none` forgets the settings. To skip them for one run only, pass
-`--sources` without `torrent`.
+To stop using torrents, turn the Torrent source off (`space` in the Sources tab).

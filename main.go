@@ -1,21 +1,21 @@
-// spotify-downloader makes a local copy of your Spotify library (your playlists and Liked
-// Songs) from other sources: free Bandcamp downloads, licensed Internet Archive items,
-// YouTube Music, SoundCloud, YouTube and, as a last resort, torrents. It needs no Spotify
-// Premium or developer app: the track list comes from Spotify's own data export or from
-// CSV exports, text files or public playlist links.
+// spotify-downloader makes a local copy of the songs in your Spotify playlists from other
+// sources (Bandcamp free downloads, Internet Archive, Yandex Music, VK, YouTube Music,
+// SoundCloud, YouTube, torrents), skipping songs your music library already has in good
+// enough quality. It runs as a terminal app where every setting can be changed while it works.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,94 +24,22 @@ type listFlag []string
 func (l *listFlag) String() string     { return strings.Join(*l, ", ") }
 func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
 
-var (
-	debugLog *log.Logger
-	verbose  bool
-	color    = isTerminal(os.Stdout)
-)
+const usage = `spotify-downloader: download the songs of your Spotify playlists from other sources,
+skipping the ones your music library already has in good enough quality.
 
-func debugf(format string, args ...any) {
-	if debugLog != nil {
-		debugLog.Printf(format, args...)
-	}
-	if verbose {
-		screen.printDebug(fmt.Sprintf("  · "+format, args...))
-	}
-}
+Run it without options to open the app; everything is set up and controlled in there.
 
-// logf prints a message for the user (and keeps it in the log file).
-func logf(format string, args ...any) {
-	screen.println(fmt.Sprintf(format, args...))
-	if debugLog != nil {
-		debugLog.Printf(format, args...)
-	}
-}
-
-func isTerminal(f *os.File) bool {
-	return isCharDevice(f) && os.Getenv("NO_COLOR") == ""
-}
-
-func paint(code, s string) string {
-	if !color {
-		return s
-	}
-	return "\x1b[" + code + "m" + s + "\x1b[0m"
-}
-
-const usage = `spotify-downloader: download the songs in your Spotify playlists and Liked Songs
-from other sources, then list what was downloaded, by whom, and what couldn't be found.
-
-Usage:
-  spotify-downloader --from my_spotify_data.zip        first run: read your library and download
-  spotify-downloader                                   later runs: continue / retry
-  spotify-downloader --from my_spotify_data.zip --list  just show the playlists that were found
-
-Where the track list comes from (no Spotify Premium or developer app needed):
-  --from PATH|URL        Repeatable. Any of:
-                           Spotify's data export (spotify.com → Account → Privacy settings →
-                             Download your data → "Account data"): the zip or its folder
-                           CSV files from Exportify, TuneMyMusic etc. (a file, folder or zip)
-                           a .txt file with one "Artist - Title" per line
-                           a public playlist/album link (only its first 100 tracks)
-                         The list is remembered, so later runs don't need --from.
-  --list                 show the playlists found (with track counts) and exit
-  --playlist NAME        only this playlist (repeatable; "Liked Songs" is one too)
-  --exclude-playlist NAME  skip this playlist (repeatable), e.g. ones you follow but didn't make
-  --no-liked             skip Liked Songs
-
-Output:
-  --out DIR              music folder (default ~/Music/Spotify); reports and .m3u8
-                         playlists go in it as well
-  --format FMT           mp3 (default), opus, m4a, flac, or original (no re-encoding)
-  --template T           file layout (default "{album_artist}/{album}/{tracknum} - {title}");
-                         fields: {artist} {artists} {album_artist} {album} {title} {tracknum} {year}
-
-Downloading:
-  --sources LIST         tried in this order (default bandcamp,archive,youtube_music,soundcloud,youtube,
-                         plus torrent at the end once torrents are set up); any subset, any order,
-                         e.g. --sources torrent or --sources torrent,youtube_music
-  --workers N            tracks searched/converted in parallel (default 3); tracks waiting
-                         for a torrent swarm don't count, so torrents run alongside
-  --limit N              only process N tracks (handy for a first test)
-  --retry-failed         also retry tracks that found no match last time
-  --no-enrich            don't look up missing lengths/covers on Deezer
-  --cookies FILE         cookies.txt for yt-dlp
-  --cookies-from-browser BROWSER   let yt-dlp use your browser's YouTube login (helps with bot checks)
-  --yt-dlp PATH          use this yt-dlp instead of the automatically downloaded one
-
-Torrents (the "torrent" source; needs Jackett or Prowlarr and the aria2 package; see TORRENTS.md):
-  --torznab URL          your Jackett (http://127.0.0.1:9117) or Prowlarr (http://127.0.0.1:9696)
-                         address, or a Torznab feed URL; repeatable. Remembered for later runs
-                         (--torznab none forgets it). Also read from TORZNAB_URL.
-  --torznab-key KEY      their API key (remembered too; or set TORZNAB_KEY)
-  --check-torrents       test the torrent setup step by step, then exit
-  --torrent-query Q      what --check-torrents searches for (default: an album from your library)
-  --torrent-timeout D    give up on a track's torrent file if it isn't done after downloading
-                         this long (default 30m; time queued behind other torrents doesn't count)
-
-Other:
-  --report-only          only rewrite the reports and playlists
-  -v                     verbose output
+Options (all optional; the app saves its settings):
+  --config FILE      settings file (default ~/.config/spotify-downloader/config.json)
+  --data DIR         where the app keeps its state, logs and caches
+                     (default ~/.local/share/spotify-downloader)
+  --add PATH|URL     add a playlist file, folder, zip or link (repeatable)
+  --library DIR      add a library folder to check (repeatable; never written to)
+  --out DIR          the downloads folder
+  --bandwidth MBPS   bandwidth target and cap in MB/s (0: none)
+  --headless         no app: work through the queue, print progress, write the reports, exit
+  --check-torrents   test the Jackett/Prowlarr setup step by step, then exit
+  -v                 detailed log
 `
 
 func main() {
@@ -121,332 +49,198 @@ func main() {
 func run(args []string) int {
 	fs := flag.NewFlagSet("spotify-downloader", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	var from, only, exclude listFlag
-	fs.Var(&from, "from", "")
-	fs.Var(&only, "playlist", "")
-	fs.Var(&exclude, "exclude-playlist", "")
-	home, _ := os.UserHomeDir()
-	out := fs.String("out", filepath.Join(home, "Music", "Spotify"), "")
-	format := fs.String("format", "mp3", "")
-	template := fs.String("template", defaultTemplate, "")
-	sourcesFlag := fs.String("sources", strings.Join(defaultSources, ","), "")
-	workers := fs.Int("workers", 3, "")
-	limit := fs.Int("limit", 0, "")
-	retryFailed := fs.Bool("retry-failed", false, "")
-	noLiked := fs.Bool("no-liked", false, "")
-	noEnrich := fs.Bool("no-enrich", false, "")
-	list := fs.Bool("list", false, "")
-	reportOnly := fs.Bool("report-only", false, "")
-	cookies := fs.String("cookies", "", "")
-	cookiesFromBrowser := fs.String("cookies-from-browser", "", "")
-	ytdlpPath := fs.String("yt-dlp", "", "")
-	var torznab listFlag
-	fs.Var(&torznab, "torznab", "")
-	torznabKey := fs.String("torznab-key", "", "")
-	checkTorrentsFlag := fs.Bool("check-torrents", false, "")
+	configPath := fs.String("config", defaultConfigPath(), "")
+	dataDir := fs.String("data", defaultDataDir(), "")
+	var add, libs listFlag
+	fs.Var(&add, "add", "")
+	fs.Var(&libs, "library", "")
+	out := fs.String("out", "", "")
+	bandwidth := fs.Float64("bandwidth", -1, "")
+	headless := fs.Bool("headless", false, "")
+	check := fs.Bool("check-torrents", false, "")
 	torrentQuery := fs.String("torrent-query", "", "")
-	torrentTimeout := fs.Duration("torrent-timeout", 30*time.Minute, "")
 	fs.BoolVar(&verbose, "v", false, "")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	explicitSources := false
-	fs.Visit(func(f *flag.Flag) { explicitSources = explicitSources || f.Name == "sources" })
 	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "unexpected argument %q (did you mean --from %s?)\n", fs.Arg(0), fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unexpected argument %q (did you mean --add %s?)\n", fs.Arg(0), fs.Arg(0))
 		return 2
 	}
-	validFormat := false
-	for _, f := range formats {
-		validFormat = validFormat || f == *format
-	}
-	if !validFormat {
-		fmt.Fprintf(os.Stderr, "--format must be one of %s\n", strings.Join(formats, ", "))
-		return 2
-	}
-
-	musicDir, _ := filepath.Abs(expandHome(*out))
-	stateDir := filepath.Join(musicDir, ".spotify-downloader")
-	if err := os.MkdirAll(filepath.Join(stateDir, "logs"), 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		return 1
-	}
-	logPath := filepath.Join(stateDir, "logs", time.Now().Format("20060102-150405")+".log")
-	if f, err := os.Create(logPath); err == nil {
-		defer f.Close()
-		debugLog = log.New(f, "", log.LstdFlags)
-	} else {
-		debugLog = log.New(io.Discard, "", 0)
-	}
-
-	// First Ctrl-C: finish the tracks in progress, then write the reports. Second: stop now.
-	ctx, kill := context.WithCancel(context.Background())
-	defer kill()
-	stop := make(chan struct{})
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, os.Interrupt)
-	go func() {
-		<-signals
-		screen.setStopping()
-		screen.println(paint("33", "Stopping after the tracks in progress (Ctrl-C again to stop immediately)…"))
-		close(stop)
-		<-signals
-		kill()
-	}()
-
 	fail := func(err error) int {
-		debugLog.Printf("fatal: %v", err)
 		fmt.Fprintln(os.Stderr, paint("31", "Error: ")+err.Error())
 		return 1
 	}
-
-	tcfg, err := torrentSettings(torznab, *torznabKey)
+	*configPath, *dataDir = cleanPath(*configPath), cleanPath(*dataDir)
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		return fail(err)
 	}
-	libPath := filepath.Join(stateDir, "library.json")
-	if *checkTorrentsFlag {
+	changed := false
+	for _, a := range add {
+		if !strings.Contains(a, "://") && !strings.HasPrefix(a, "spotify:") {
+			a = cleanPath(a)
+		}
+		if !containsInput(cfg.Inputs, a) {
+			cfg.Inputs = append(cfg.Inputs, InputCfg{Path: a, Enabled: true})
+			changed = true
+		}
+	}
+	for _, d := range libs {
+		if d = cleanPath(d); !containsStr(cfg.LibraryDirs, d) {
+			cfg.LibraryDirs = append(cfg.LibraryDirs, d)
+			changed = true
+		}
+	}
+	if *out != "" {
+		cfg.OutputDir, changed = *out, true
+	}
+	if *bandwidth >= 0 {
+		cfg.BandwidthMBps, changed = *bandwidth, true
+	}
+	if err := cfg.validate(); err != nil {
+		return fail(err)
+	}
+	if err := checkDataDir(cfg, *dataDir); err != nil {
+		return fail(err)
+	}
+	if _, err := os.Stat(*configPath); changed || os.IsNotExist(err) {
+		if err := saveConfig(*configPath, cfg); err != nil {
+			return fail(err)
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Join(*dataDir, "logs"), 0o755); err != nil {
+		return fail(err)
+	}
+	logPath := filepath.Join(*dataDir, "logs", time.Now().Format("20060102-150405")+".log")
+	if f, err := os.Create(logPath); err == nil {
+		defer f.Close()
+		debugLog = log.New(f, "", log.LstdFlags)
+	}
+	pruneLogs(filepath.Join(*dataDir, "logs"), 20)
+
+	if *check {
 		aria2c, _ := exec.LookPath("aria2c")
 		query := *torrentQuery
 		if query == "" {
-			query = sampleAlbumQuery(libPath)
+			query = sampleAlbumQuery(filepath.Join(*dataDir, "library.json"))
 		}
-		if checkTorrents(ctx, tcfg, aria2c, query) {
+		if checkTorrents(context.Background(), cfg.Torznab, aria2c, query) {
 			return 0
 		}
 		return 1
 	}
 
-	// The track list.
-	var full *Library
-	if len(from) > 0 {
-		lib := newLibrary()
-		lib.Inputs = from
-		logf("Reading your track list…")
-		for _, src := range from {
-			if err := importInput(ctx, lib, src, logf); err != nil {
-				return fail(err)
-			}
-		}
-		if len(lib.Tracks) == 0 {
-			return fail(fmt.Errorf("no tracks found in %s", strings.Join(from, ", ")))
-		}
-		if old, err := loadLibrary(libPath); err == nil {
-			for k, t := range lib.Tracks { // keep earlier Deezer lookups
-				if o := old.Tracks[k]; o != nil && o.Enriched {
-					t.fillFrom(o)
-					t.DeezerArtistURL, t.Enriched = firstNonEmpty(t.DeezerArtistURL, o.DeezerArtistURL), true
-				}
-			}
-		}
-		if err := lib.save(libPath); err != nil {
-			return fail(err)
-		}
-		full = lib
-	} else {
-		var err error
-		if full, err = loadLibrary(libPath); err != nil {
-			fmt.Fprint(os.Stderr, "No track list yet: pass --from with your Spotify data export, a CSV, a text file or a playlist link.\n\n"+usage)
-			return 2
-		}
+	m := newManager(*configPath, *dataDir, cfg)
+	if *headless {
+		return runHeadless(m, logPath)
 	}
-	lib := full.filtered(only, exclude, *noLiked)
-
-	if *list {
-		fmt.Printf("%d unique tracks in %d playlists:\n", len(lib.Tracks), len(lib.Playlists))
-		for _, p := range lib.Playlists {
-			fmt.Printf("  %5d  %s\n", len(p.Keys), p.Name)
-		}
-		if len(lib.Skipped) > 0 {
-			fmt.Printf("(%d podcast episodes and other non-songs will be skipped)\n", len(lib.Skipped))
-		}
-		fmt.Println("\nTip: Spotify's export also lists playlists you only follow; leave those out with --exclude-playlist NAME.")
-		return 0
+	if !isCharDevice(os.Stdin) || !isCharDevice(os.Stdout) {
+		fmt.Fprintln(os.Stderr, "Not a terminal: run it in a terminal, or use --headless.")
+		return 2
 	}
-
-	state, err := openState(filepath.Join(stateDir, "state.jsonl"))
+	if err := m.Start(); err != nil {
+		return fail(err)
+	}
+	err = runTUI(m)
+	fmt.Println("Stopping…")
+	m.Stop()
 	if err != nil {
 		return fail(err)
 	}
-	defer state.close()
-	writeAll := func() {
-		recs := state.all()
-		rep := buildReport(lib, recs, musicDir)
-		files, err := writeReports(rep, filepath.Join(musicDir, "reports"))
-		if err != nil {
-			fail(err)
-			return
-		}
-		n, _ := writePlaylists(lib, recs, musicDir)
-		fmt.Printf("\n%s tracks downloaded by %s artists, %s entries not downloaded\n",
-			paint("1", fmt.Sprint(len(rep.Downloaded))), paint("1", fmt.Sprint(len(rep.Artists))), paint("1", fmt.Sprint(len(rep.Failed))))
-		for i, label := range []string{"Artists:   ", "Downloaded:", "Failed:    "} {
-			fmt.Printf("  %s %s\n", label, files[i])
-		}
-		fmt.Printf("  Playlists:  %s (%d .m3u8 files)\n", filepath.Join(musicDir, "Playlists"), n)
-	}
-	if *reportOnly {
-		writeAll()
-		return 0
-	}
-
-	// Tools and sources.
-	sourceNames := strings.Split(strings.ReplaceAll(*sourcesFlag, " ", ""), ",")
-	if !explicitSources && tcfg.configured() {
-		sourceNames = append(sourceNames, "torrent")
-	}
-	tools, err := findTools(ctx, *ytdlpPath, defaultCacheDir(), usesYtDlp(sourceNames), logf)
-	if err != nil {
-		return fail(err)
-	}
-	cacheDir := filepath.Join(stateDir, "cache")
-	defer os.RemoveAll(cacheDir)
-	defer os.RemoveAll(filepath.Join(stateDir, "tmp"))
-	var torrentSource Source
-	if contains(sourceNames, "torrent") {
-		src, err := setUpTorrents(ctx, tcfg, tools, cacheDir, *format, *torrentTimeout)
-		switch {
-		case err == nil:
-			torrentSource = src
-			defer src.Close() // before the cache folder it downloads into is removed
-		case explicitSources:
-			return fail(err)
-		default: // added automatically: carry on without it
-			logf("Skipping torrents: %v", err)
-			sourceNames = remove(sourceNames, "torrent")
-		}
-	}
-	sources, err := buildSources(sourceNames, *format, cacheDir, newYtDlp(tools, *cookies, *cookiesFromBrowser), torrentSource)
-	if err != nil {
-		return fail(err)
-	}
-
-	if !*noEnrich {
-		enrichLibrary(ctx, lib, logf)
-		full.save(libPath)
-	}
-
-	engine := newEngine(Settings{
-		MusicDir: musicDir, Format: *format, Template: *template, Workers: *workers, Limit: *limit,
-		RetryFailed: *retryFailed, TriesPerSource: 2, MaxOutages: 5,
-	}, sources, state, tools, filepath.Join(stateDir, "tmp"))
-	engine.board = &Board{}
-
-	todo := engine.pending(lib)
-	recs := state.all()
-	done, notFound := 0, 0
-	for k := range lib.Tracks {
-		if r, ok := recs[k]; ok && r.Status == "downloaded" && engine.fileExists(r.Path) {
-			done++
-		} else if ok && r.Status == "failed" {
-			notFound++
-		}
-	}
-	summary := fmt.Sprintf("%d to process · %d already downloaded", len(todo), done)
-	if notFound > 0 && !*retryFailed {
-		summary += fmt.Sprintf(" · %d not found last time (add --retry-failed to try again)", notFound)
-	}
-	logf("%s", summary)
-	var labels []string
-	for _, s := range sources {
-		labels = append(labels, s.Label())
-	}
-	logf("Sources, in order: %s", strings.Join(labels, ", "))
-
-	n := 0
-	total := len(todo)
-	screen.start(engine.board, total, musicDir)
-	counts := engine.run(ctx, stop, todo, func(o Outcome) {
-		if o.Status == "aborted" {
-			return
-		}
-		n++
-		screen.record(o.Status)
-		prefix := fmt.Sprintf("[%*d/%d]", len(fmt.Sprint(total)), n, total)
-		name := o.Track.String()
-		if a := o.Track.Album; a != "" && !strings.EqualFold(a, o.Track.Title) {
-			name += paint("2", " · "+a)
-		}
-		if o.Status == "downloaded" {
-			screen.println(fmt.Sprintf("%s %s %s %s", prefix, paint("32", "✓"), name, paint("2", "← "+o.Detail)))
-			return
-		}
-		detail := o.Detail
-		if r := []rune(detail); len(r) > 200 {
-			detail = string(r[:199]) + "…"
-		}
-		screen.println(fmt.Sprintf("%s %s %s %s", prefix, paint("31", "✗"), name, paint("2", "— "+detail)))
-	})
-	screen.stop()
-	if total > 0 {
-		fmt.Printf("\n%s, %s\n", paint("32", fmt.Sprintf("%d downloaded", counts["downloaded"])),
-			paint("31", fmt.Sprintf("%d not downloaded", counts["failed"]+counts["error"])))
-		if counts["error"] > 0 {
-			fmt.Printf("(%d of those because a source was unreachable; they're retried on the next run)\n", counts["error"])
-		}
-	}
-	full.save(libPath) // keeps details learned while downloading
-	writeAll()
-	fmt.Printf("  Log:        %s\n", logPath)
+	fmt.Printf("Reports: %s\nLog: %s\n", filepath.Join(m.Config().OutputDir, "reports"), logPath)
 	return 0
 }
 
-// torrentSettings combines --torznab/--torznab-key, the TORZNAB_* variables and the saved
-// settings. Settings given as flags are saved for later runs.
-func torrentSettings(feeds []string, key string) (TorrentConfig, error) {
-	saved := loadTorrentConfig()
-	cfg := saved
-	switch {
-	case len(feeds) == 1 && strings.EqualFold(feeds[0], "none"):
-		cfg = TorrentConfig{}
-	case len(feeds) > 0:
-		cfg = TorrentConfig{Feeds: feeds, Key: firstNonEmpty(key, saved.Key)}
-	case os.Getenv("TORZNAB_URL") != "":
-		return TorrentConfig{Feeds: splitList(os.Getenv("TORZNAB_URL")), Key: firstNonEmpty(key, os.Getenv("TORZNAB_KEY"))}, nil
-	case key != "":
-		cfg.Key = key
+func containsInput(list []InputCfg, p string) bool {
+	for _, in := range list {
+		if in.Path == p {
+			return true
+		}
 	}
-	if strings.Join(cfg.Feeds, " ") == strings.Join(saved.Feeds, " ") && cfg.Key == saved.Key {
-		return cfg, nil
-	}
-	if err := saveTorrentConfig(cfg); err != nil {
-		return cfg, fmt.Errorf("couldn't save the torrent settings: %w", err)
-	}
-	if cfg.configured() {
-		logf("Saved the torrent settings to %s", torrentConfigPath())
-	} else {
-		logf("Forgot the saved torrent settings")
-	}
-	return cfg, nil
+	return false
 }
 
-func setUpTorrents(ctx context.Context, cfg TorrentConfig, tools *Tools, cacheDir, format string, timeout time.Duration) (*TorrentSource, error) {
-	if !cfg.configured() {
-		return nil, fmt.Errorf("the torrent source needs Jackett or Prowlarr: pass --torznab URL --torznab-key KEY (see TORRENTS.md)")
-	}
-	if tools.Aria2c == "" {
-		return nil, fmt.Errorf("the aria2c command wasn't found; install the aria2 package (sudo pacman -S aria2 or sudo apt install aria2)")
-	}
-	feeds, err := resolveFeeds(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("%w (run with --check-torrents for help)", err)
-	}
-	// Check each feed once now, rather than failing on every track.
-	var working []*Torznab
-	for _, f := range feeds {
-		if err := f.caps(ctx); err != nil {
-			if len(feeds) == 1 {
-				return nil, fmt.Errorf("%w (run with --check-torrents for help)", err)
-			}
-			logf("Leaving out %v (run with --check-torrents for help)", err)
-			continue
+// runHeadless works through the queue without the app, printing what happens.
+func runHeadless(m *Manager, logPath string) int {
+	appLog.onLine = func(l logLine) {
+		if !l.Debug || verbose {
+			fmt.Println(l.Text)
 		}
-		working = append(working, f)
 	}
-	if len(working) == 0 {
-		return nil, fmt.Errorf("none of the torrent feeds answered (run with --check-torrents for help)")
+	var count atomic.Int64
+	var waitMu sync.Mutex
+	waited := map[string]bool{}
+	m.onFinish = func(v JobView) {
+		if v.State == JobWaiting { // shown once; it's tried again later
+			waitMu.Lock()
+			seen := waited[v.Key]
+			waited[v.Key] = true
+			waitMu.Unlock()
+			if seen {
+				return
+			}
+		}
+		n := count.Add(1)
+		name := v.Track.String()
+		switch v.State {
+		case JobDone:
+			fmt.Printf("[%d] %s %s %s\n", n, paint("32", "✓"), name, paint("2", fmt.Sprintf("← %s · %s", sourceLabels[v.Rec.Source], v.Rec.Quality)))
+		case JobWaiting:
+			fmt.Printf("[%d] %s %s %s\n", n, paint("33", "⟳"), name, paint("2", "— "+fitWidth(v.Reason, 200)))
+		default:
+			fmt.Printf("[%d] %s %s %s\n", n, paint("31", "✗"), name, paint("2", "— "+fitWidth(v.Reason, 200)))
+		}
 	}
-	return newTorrentSource(working, tools.Aria2c, cacheDir, format, timeout), nil
+	if err := m.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, paint("31", "Error: ")+err.Error())
+		return 1
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	lastStatus := time.Now()
+	idleSince := time.Time{}
+loop:
+	for {
+		select {
+		case <-signals:
+			fmt.Println(paint("33", "Stopping (tracks in progress continue next time)…"))
+			break loop
+		case <-tick.C:
+		}
+		if m.idle() {
+			if idleSince.IsZero() {
+				idleSince = time.Now()
+			} else if time.Since(idleSince) > 3*time.Second {
+				break loop
+			}
+		} else {
+			idleSince = time.Time{}
+		}
+		if time.Since(lastStatus) > 30*time.Second {
+			lastStatus = time.Now()
+			o := m.Overview()
+			fmt.Println(paint("2", fmt.Sprintf("  … %s · ⇣ %s · %d downloading, %d searching", m.summaryLine(),
+				fmtRate(o.Own+o.Torrent), o.Counts[JobDownloading], o.Counts[JobSearching])))
+		}
+	}
+	m.Stop()
+	fmt.Println(m.summaryLine())
+	fmt.Printf("Reports: %s\nLog: %s\n", filepath.Join(m.Config().OutputDir, "reports"), logPath)
+	return 0
+}
+
+func pruneLogs(dir string, keep int) {
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.log"))
+	if len(matches) <= keep {
+		return
+	}
+	for _, p := range matches[:len(matches)-keep] { // names sort by time
+		os.Remove(p)
+	}
 }
 
 // sampleAlbumQuery picks an album from the saved library for --check-torrents to search for.
@@ -459,23 +253,4 @@ func sampleAlbumQuery(libPath string) string {
 		}
 	}
 	return "Kevin MacLeod"
-}
-
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
-func remove(list []string, s string) []string {
-	var out []string
-	for _, v := range list {
-		if v != s {
-			out = append(out, v)
-		}
-	}
-	return out
 }

@@ -46,6 +46,13 @@ func TestAcceptsGoodMatches(t *testing.T) {
 	expectAccepted(t, q, cand("Bohemian Rhapsody", "Queen - Topic", 354))
 }
 
+func TestRejectsMashups(t *testing.T) {
+	eits := track("Remember Me As A Time Of Day - Remastered", []string{"Explosions In The Sky"}, "How Strange, Innocence", 4)
+	expectRejected(t, eits, cand("Ellie Goulding vs. Explosions in the Sky - Lights, Remember Me as a Time of Day", "seancoban", 4), "mashup")
+	vs := track("Hello", []string{"Armin van Buuren vs. Tiësto"}, "", 200)
+	expectAccepted(t, vs, Candidate{Title: "Armin van Buuren vs. Tiësto - Hello", Artist: "Armin van Buuren", Duration: 200})
+}
+
 func TestRejectsOtherVersions(t *testing.T) {
 	for _, title := range []string{"Get Lucky (Live at the Grammys)", "Get Lucky - acoustic cover", "Get Lucky Karaoke Version",
 		"Get Lucky (sped up)", "Get Lucky [Nightcore]", "Get Lucky 1 Hour", "Get Lucky (Remix)"} {

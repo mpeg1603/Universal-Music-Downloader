@@ -158,7 +158,7 @@ func TestResolveFeeds(t *testing.T) {
 	defer jackett.Close()
 
 	feeds, err := resolveFeeds(context.Background(), TorrentConfig{Key: "pkey", Feeds: []string{
-		prowlarr.URL, jackett.URL + "/", "http://127.0.0.1:9117/api/v2.0/indexers/rutracker/results/torznab/"}})
+		prowlarr.URL, jackett.URL + "/", "http://127.0.0.1:9117/api/v2.0/indexers/rutracker/results/torznab/"}}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,29 +177,31 @@ func TestResolveFeeds(t *testing.T) {
 	if !strings.Contains(feeds[0].url(nil), "apikey=pkey") {
 		t.Errorf("API key not added: %s", feeds[0].url(nil))
 	}
-	if _, err := resolveFeeds(context.Background(), TorrentConfig{Key: "wrong", Feeds: []string{prowlarr.URL}}); err == nil || !strings.Contains(err.Error(), "API key") {
+	if _, err := resolveFeeds(context.Background(), TorrentConfig{Key: "wrong", Feeds: []string{prowlarr.URL}}, 0); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Errorf("bad key: %v", err)
 	}
 }
 
-func TestTorrentSettingsAreRemembered(t *testing.T) {
+func TestConfigMigratesTorrentSettingsAndIsPrivate(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("TORZNAB_URL", "")
-	cfg, err := torrentSettings([]string{"http://127.0.0.1:9696"}, "secret")
-	if err != nil || !cfg.configured() {
-		t.Fatal(cfg, err)
+	if err := saveTorrentConfig(TorrentConfig{Feeds: []string{"http://127.0.0.1:9117"}, Key: "secret"}); err != nil {
+		t.Fatal(err)
 	}
-	if info, err := os.Stat(torrentConfigPath()); err != nil || info.Mode().Perm() != 0o600 {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Torznab.Key != "secret" || !cfg.source("torrent").Enabled {
+		t.Fatalf("migrated: %+v %v", cfg.Torznab, err)
+	}
+	cfg.Sources = cfg.Sources[:2] // an older config that doesn't know the newer sources
+	if err := saveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("saved settings: %v %v", info, err)
 	}
-	if cfg, _ := torrentSettings(nil, ""); cfg.Key != "secret" || cfg.Feeds[0] != "http://127.0.0.1:9696" {
-		t.Errorf("not remembered: %+v", cfg)
-	}
-	if cfg, _ := torrentSettings([]string{"none"}, ""); cfg.configured() {
-		t.Errorf("not forgotten: %+v", cfg)
-	}
-	if cfg, _ := torrentSettings(nil, ""); cfg.configured() {
-		t.Errorf("forgotten settings came back: %+v", cfg)
+	again, err := loadConfig(path)
+	if err != nil || len(again.Sources) != len(allSources) || again.source("vk").Route != routeDirect {
+		t.Errorf("reloaded: %+v %v", again.Sources, err)
 	}
 }
 
@@ -258,7 +260,7 @@ func TestTorrentSourceInEngine(t *testing.T) {
 	srv := fakeIndexer(t, name, files, [][]byte{tone, tone}, nil)
 	defer srv.Close()
 
-	feeds, err := resolveFeeds(context.Background(), TorrentConfig{Feeds: []string{srv.URL}, Key: "secret"})
+	feeds, err := resolveFeeds(context.Background(), TorrentConfig{Feeds: []string{srv.URL}, Key: "secret"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,17 +270,18 @@ func TestTorrentSourceInEngine(t *testing.T) {
 	lucky := getLucky()
 	lucky.DurationMs = 4000
 	contact := track("Contact", []string{"Daft Punk"}, "Random Access Memories", 4)
-	e, state, music := testEngine(t, tools, []Source{src}, nil)
-	out := runAll(e, testLibrary(lucky, contact))
+	m := testManager(t, tools, []Source{src}, testLibrary(lucky, contact), nil)
+	state, music := m.state, m.Config().OutputDir
+	out := runManager(t, m)
 
-	if out[lucky.Key].Status != "downloaded" {
+	if out[lucky.Key].State != JobDone {
 		t.Fatalf("Get Lucky: %+v / %+v", out[lucky.Key], state.get(lucky.Key))
 	}
 	r := state.get(lucky.Key)
-	if r.Source != "torrent" || r.SourceURL != "https://tracker/t/1" || r.SourceAlbum != name || r.Path != "Daft Punk/Random Access Memories/08 - Get Lucky.mp3" {
+	if r.Source != "torrent" || r.SourceURL != "https://tracker/t/1" || r.SourceAlbum != name || r.Path != filepath.Join(music, "Daft Punk/Random Access Memories/08 - Get Lucky.mp3") {
 		t.Errorf("record %+v", r)
 	}
-	if _, err := os.Stat(filepath.Join(music, filepath.FromSlash(r.Path))); err != nil {
+	if _, err := os.Stat(r.Path); err != nil {
 		t.Error(err)
 	}
 	if fetcher.fetched != 1 {
@@ -287,7 +290,11 @@ func TestTorrentSourceInEngine(t *testing.T) {
 	if rc := state.get(contact.Key); rc.Status != "failed" || !strings.Contains(rc.Reason, "don't contain this track") {
 		t.Errorf("Contact: %+v", rc)
 	}
-	rep := buildReport(testLibrary(lucky, contact), state.all(), music)
+	views := map[string]JobView{}
+	for _, v := range m.Jobs() {
+		views[v.Key] = v
+	}
+	rep := buildReport(testLibrary(lucky, contact), views)
 	reports, _ := writeReports(rep, filepath.Join(music, "reports"))
 	data, _ := os.ReadFile(reports[1])
 	if !strings.Contains(string(data), `[Torrent: Daft Punk - Random Access Memories (2013) \[MP3\]](https://tracker/t/1)`) {

@@ -129,7 +129,7 @@ func TestJackettIndexerFeedsReportErrors(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	feeds, err := resolveFeeds(context.Background(), TorrentConfig{Feeds: []string{srv.URL}, Key: "k"})
+	feeds, err := resolveFeeds(context.Background(), TorrentConfig{Feeds: []string{srv.URL}, Key: "k"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,40 +140,6 @@ func TestJackettIndexerFeedsReportErrors(t *testing.T) {
 	_, err = src.Search(context.Background(), &Track{Title: "NYC", Artists: []string{"Interpol"}, Album: "Turn On The Bright Lights"})
 	if err == nil || !isUnavailable(err) || !strings.Contains(err.Error(), "login failed") {
 		t.Errorf("search error: %v", err)
-	}
-}
-
-func TestSlotPoolParking(t *testing.T) {
-	ctx := context.Background()
-	p := newSlotPool(1, 10)
-	p.acquire(ctx, false)
-	a := &slotHandle{pool: p, held: true}
-	a.park() // a waits for a swarm: b may run meanwhile
-	if err := p.acquire(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	b := &slotHandle{pool: p, held: true}
-	order := make(chan string, 2)
-	go func() { p.acquire(ctx, false); order <- "new track"; p.release() }()
-	time.Sleep(50 * time.Millisecond)
-	go func() { a.resume(ctx); order <- "resumed track"; a.done() }()
-	time.Sleep(50 * time.Millisecond)
-	b.done()
-	if first := <-order; first != "resumed track" {
-		t.Errorf("%s got the slot first", first)
-	}
-	<-order
-	p.mu.Lock()
-	free, parked := p.free, p.parked
-	p.mu.Unlock()
-	if free != 1 || parked != 0 {
-		t.Errorf("pool left with free=%d parked=%d", free, parked)
-	}
-	full := newSlotPool(1, 0)
-	full.acquire(ctx, false)
-	h := &slotHandle{pool: full, held: true}
-	if h.park(); h.parked {
-		t.Error("parked beyond the limit")
 	}
 }
 
@@ -196,13 +162,6 @@ func TestDisplayHelpers(t *testing.T) {
 	colored := "\x1b[32m✓\x1b[0m done"
 	if displayWidth(colored) != 6 || fitWidth(colored, 10) != colored {
 		t.Errorf("colors counted: %d", displayWidth(colored))
-	}
-	if got := padWidth("日本", 6); got != "日本  " {
-		t.Errorf("padWidth: %q", got)
-	}
-	color = false
-	if got := bar(0.55, 10, "32"); got != "━━━━━╸────" {
-		t.Errorf("bar: %q", got)
 	}
 	if fmtBytes(1536) != "1.5 KiB" || fmtBytes(83*1024*1024) != "83.0 MiB" {
 		t.Errorf("fmtBytes: %s %s", fmtBytes(1536), fmtBytes(83*1024*1024))

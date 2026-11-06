@@ -25,10 +25,16 @@ import (
 const userAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
 
 // SourceError is an expected failure; its message ends up in the failure report.
-// Unavailable marks network trouble, so the track is retried automatically next run.
+// Unavailable marks network trouble, so the track is tried again later. Blocked means the
+// site refuses us for now (bot check, rate limit, captcha): the source pauses for a while.
 type SourceError struct {
 	Msg         string
 	Unavailable bool
+	Blocked     bool
+	// Pending: the source has the track but waits for something from you (such as Bandcamp's
+	// emailed link); the track waits too, instead of being taken from a worse source.
+	Pending bool
+	Retry   time.Duration // for Pending: when to look again (unless woken earlier)
 }
 
 func (e *SourceError) Error() string { return e.Msg }
@@ -41,9 +47,42 @@ func unavailablef(format string, args ...any) error {
 	return &SourceError{Msg: fmt.Sprintf(format, args...), Unavailable: true}
 }
 
+func blockedf(format string, args ...any) error {
+	return &SourceError{Msg: fmt.Sprintf(format, args...), Unavailable: true, Blocked: true}
+}
+
 func isUnavailable(err error) bool {
 	var se *SourceError
 	return errors.As(err, &se) && se.Unavailable
+}
+
+func pendingf(retry time.Duration, format string, args ...any) error {
+	return &SourceError{Msg: fmt.Sprintf(format, args...), Pending: true, Retry: retry}
+}
+
+func isPending(err error) (time.Duration, bool) {
+	var se *SourceError
+	if errors.As(err, &se) && se.Pending {
+		return se.Retry, true
+	}
+	return 0, false
+}
+
+func isBlocked(err error) bool {
+	var se *SourceError
+	return errors.As(err, &se) && se.Blocked
+}
+
+// isChallenge recognizes the "checking your browser" pages bot protection serves instead of
+// the real page. This program doesn't try to get past them; the source just pauses.
+func isChallenge(body []byte) bool {
+	head := body[:min(len(body), 4096)]
+	for _, s := range []string{"<title>Client Challenge</title>", "/_fs-ch-", "<title>Just a moment...</title>", "cf-chl-", "captcha-delivery.com"} {
+		if bytes.Contains(head, []byte(s)) {
+			return true
+		}
+	}
+	return false
 }
 
 func describeNetErr(err error) string {
@@ -73,10 +112,11 @@ type rateLimiter struct {
 }
 
 func (r *rateLimiter) wait(ctx context.Context) error {
+	r.mu.Lock()
 	if r.interval <= 0 {
+		r.mu.Unlock()
 		return nil
 	}
-	r.mu.Lock()
 	now := time.Now()
 	start := r.next
 	if start.Before(now) {
@@ -97,16 +137,23 @@ type HTTP struct {
 	client  *http.Client
 	limiter *rateLimiter
 	retries int
+	timeout time.Duration // per attempt
+	ua      string
 }
 
 func newHTTP(name string, interval time.Duration) *HTTP {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 60 * time.Second
+	return newRoutedHTTP(name, interval, routeSystem)
+}
+
+// newRoutedHTTP makes a client whose connections take route (see netroute.go).
+func newRoutedHTTP(name string, interval time.Duration, route string) *HTTP {
 	return &HTTP{
 		Name:    name,
-		client:  &http.Client{Transport: transport},
+		client:  &http.Client{Transport: router.Transport(route)},
 		limiter: &rateLimiter{interval: interval},
 		retries: 4,
+		timeout: 90 * time.Second,
+		ua:      userAgent,
 	}
 }
 
@@ -126,13 +173,13 @@ func (h *HTTP) do(ctx context.Context, req request) (int, []byte, error) {
 		if err := h.limiter.wait(ctx); err != nil {
 			return 0, nil, err
 		}
-		rctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		rctx, cancel := context.WithTimeout(ctx, h.timeout)
 		r, err := http.NewRequestWithContext(rctx, req.method, req.url, bytes.NewReader(req.body))
 		if err != nil {
 			cancel()
 			return 0, nil, err
 		}
-		r.Header.Set("User-Agent", userAgent)
+		r.Header.Set("User-Agent", h.ua)
 		for k, v := range req.headers {
 			r.Header.Set(k, v)
 		}
@@ -150,9 +197,12 @@ func (h *HTTP) do(ctx context.Context, req request) (int, []byte, error) {
 		if ctx.Err() != nil {
 			return 0, nil, ctx.Err()
 		}
-		if attempt == h.retries-1 {
+		if attempt >= h.retries-1 {
 			if err != nil {
 				return 0, nil, unavailablef("%s unreachable (%s)", h.Name, describeNetErr(err))
+			}
+			if resp.StatusCode == 429 {
+				return 0, nil, blockedf("%s is rate-limiting us (HTTP 429)", h.Name)
 			}
 			return 0, nil, unavailablef("%s answered HTTP %d", h.Name, resp.StatusCode)
 		}
@@ -179,6 +229,9 @@ func (h *HTTP) getJSON(ctx context.Context, u string, out any) error {
 	if err != nil {
 		return err
 	}
+	if isChallenge(body) {
+		return blockedf("%s is showing its bot check page to this connection", h.Name)
+	}
 	if status != 200 {
 		return failf("%s answered HTTP %d", h.Name, status)
 	}
@@ -197,6 +250,9 @@ func (h *HTTP) postJSON(ctx context.Context, u string, payload any, headers map[
 	status, resp, err := h.do(ctx, request{method: "POST", url: u, body: body, headers: hdr})
 	if err != nil {
 		return err
+	}
+	if isChallenge(resp) {
+		return blockedf("%s is showing its bot check page to this connection", h.Name)
 	}
 	if status != 200 {
 		return failf("%s answered HTTP %d", h.Name, status)
@@ -226,7 +282,7 @@ func (h *HTTP) downloadOnce(ctx context.Context, u, dir, stem string) (string, e
 	if err != nil {
 		return "", err
 	}
-	r.Header.Set("User-Agent", userAgent)
+	r.Header.Set("User-Agent", h.ua)
 	resp, err := h.client.Do(r)
 	if err != nil {
 		return "", unavailablef("%s download failed (%s)", h.Name, describeNetErr(err))
@@ -244,9 +300,9 @@ func (h *HTTP) downloadOnce(ctx context.Context, u, dir, stem string) (string, e
 	if err != nil {
 		return "", err
 	}
-	var body io.Reader = resp.Body
+	var body io.Reader = bw.Reader(ctx, resp.Body)
 	if task := taskFrom(ctx); task != nil {
-		body = &countingReader{r: resp.Body, task: task, total: max(resp.ContentLength, 0)}
+		body = &countingReader{r: body, task: task, total: max(resp.ContentLength, 0)}
 	}
 	_, err = io.Copy(f, body)
 	if cerr := f.Close(); err == nil {

@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-var formats = []string{"mp3", "opus", "m4a", "flac", "original"}
+var formats = []string{"original", "flac", "mp3", "opus", "m4a"}
 
 var extForFormat = map[string]string{"mp3": ".mp3", "opus": ".opus", "m4a": ".m4a", "flac": ".flac"}
 var extForCodec = map[string]string{"mp3": ".mp3", "aac": ".m4a", "alac": ".m4a", "opus": ".opus", "vorbis": ".ogg", "flac": ".flac"}
@@ -40,26 +40,20 @@ func targetExtension(format, codec string) string {
 	return extForFormat[format]
 }
 
-// probe returns the audio codec and duration (seconds) of a media file.
-func probe(ctx context.Context, tools *Tools, path string) (string, float64, error) {
+// probe returns the audio codec, duration (seconds) and quality of a media file.
+func probe(ctx context.Context, tools *Tools, path string) (string, float64, Quality, error) {
 	out, err := command(ctx, tools.FFprobe, "-v", "error", "-select_streams", "a:0",
-		"-show_entries", "stream=codec_name:format=duration", "-of", "json", path).Output()
+		"-show_entries", "stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,bit_rate,sample_fmt:format=duration,bit_rate",
+		"-of", "json", path).Output()
 	if err != nil {
-		return "", 0, failf("ffprobe couldn't read the downloaded file")
+		return "", 0, Quality{}, failf("ffprobe couldn't read the downloaded file")
 	}
-	var data struct {
-		Streams []struct {
-			CodecName string `json:"codec_name"`
-		} `json:"streams"`
-		Format struct {
-			Duration string `json:"duration"`
-		} `json:"format"`
-	}
+	var data ffprobeOutput
 	if err := json.Unmarshal(out, &data); err != nil || len(data.Streams) == 0 {
-		return "", 0, failf("the downloaded file contains no audio")
+		return "", 0, Quality{}, failf("the downloaded file contains no audio")
 	}
-	d, _ := strconv.ParseFloat(data.Format.Duration, 64)
-	return data.Streams[0].CodecName, d, nil
+	d, q := data.quality()
+	return data.Streams[0].CodecName, d, q, nil
 }
 
 func ffmetaEscape(s string) string {

@@ -14,8 +14,11 @@ import (
 
 type Record struct {
 	Key             string  `json:"key"`
-	Status          string  `json:"status"` // downloaded | failed | error (error = retried automatically)
-	Path            string  `json:"path,omitempty"`
+	Status          string  `json:"status"`         // downloaded | failed | error (retried automatically) | cancelled
+	Path            string  `json:"path,omitempty"` // absolute
+	Quality         Quality `json:"quality"`
+	LibPath         string  `json:"library_path,omitempty"` // the library copy this download improves on
+	LibQuality      Quality `json:"library_quality"`
 	Source          string  `json:"source,omitempty"`
 	SourceURL       string  `json:"source_url,omitempty"`
 	SourceTitle     string  `json:"source_title,omitempty"`
@@ -126,6 +129,10 @@ func (s *State) markFailed(key, reason string, transient bool) {
 		status = "error"
 	}
 	s.put(Record{Key: key, Status: status, Reason: reason})
+}
+
+func (s *State) markCancelled(key string) {
+	s.put(Record{Key: key, Status: "cancelled", Reason: "cancelled by you"})
 }
 
 func (s *State) close() {

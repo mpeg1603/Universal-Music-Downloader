@@ -1,153 +1,242 @@
 # spotify-downloader
 
-Makes a local copy of your Spotify library: your playlists and Liked Songs. It never downloads
-from Spotify; it finds each song elsewhere. By default it tries these sources in this order, and
-`--sources` picks any of them in any order:
+A terminal app that downloads the songs of your Spotify playlists from other sources, and
+**skips the ones your music library already has in good enough quality**. It never downloads
+from Spotify, and never writes to your library: new files go to their own downloads folder.
 
-| Source | What it uses |
-|---|---|
-| **Bandcamp** | Only releases the artist offers as a free download. Paid ones show up in the failure report with a link to buy them. |
-| **Internet Archive** | Only items published under a license (Creative Commons / public domain). Live concert tapes are excluded. |
-| **YouTube Music** | Official "song" uploads, found by ISRC and by artist + title. |
-| **SoundCloud** | Public tracks. 30-second preview streams are detected and rejected. |
-| **YouTube** | Regular uploads. |
-| **Torrent** *(optional)* | Searched through your own Jackett or Prowlarr, downloaded with aria2c, fetching only the file needed. Added at the end of the default order once set up; see **[TORRENTS.md](TORRENTS.md)**. |
+Everything is set up and controlled inside the app: playlists, library folders, quality
+threshold, sources and their order, bandwidth, and every track (cancel, restart, do next).
+Changes apply right away, while it runs.
 
-Every result is checked before it's used:
+## Sources
 
-- title, artist and length must match;
-- versions like *live*, *remix*, *cover*, *karaoke*, *sped up* or *1 hour* are rejected unless your track is that version;
-- the real length of the downloaded file is checked again.
+Tried top to bottom for each track; the order is yours to change (Sources tab).
 
-Files are then converted, tagged (title, artists, album, track number, year, ISRC, cover art) and
-saved as `Album Artist/Album/NN - Title.ext`.
+| Source | What it uses | Quality |
+|---|---|---|
+| **Bandcamp** | Free and name-your-price downloads. When the artist asks for an email address, Bandcamp emails you the download link: you paste it, or the app reads it from your Gmail or IMAP mailbox (see below). Paid releases are listed in the report with a link to buy them. | FLAC when offered |
+| **Internet Archive** | Items published under a license (Creative Commons, public domain); no live tapes. | FLAC / MP3 |
+| **Yandex Music** *(optional)* | Your own account (token). Full tracks need Plus. Reached directly, not through your VPN. | FLAC (Plus) / MP3 320 |
+| **VK** *(optional)* | Your own account (token). Reached directly, not through your VPN. | MP3 up to 320 |
+| **YouTube Music** | Official "song" uploads, found by ISRC and by artist + title. | Opus ~130 |
+| **SoundCloud** | Public tracks; 30-second previews are rejected. | MP3 128 / AAC |
+| **YouTube** | Regular uploads. | Opus ~130 |
+| **Torrent** *(optional)* | Your Jackett or Prowlarr, downloaded with aria2c (only the file needed). See **[TORRENTS.md](TORRENTS.md)**. | often FLAC |
 
-At the end you get, in `~/Music/Spotify/reports/` (as `.md` and `.csv`):
+Every result is checked before it's used: title, artist and length must match; *live*,
+*remix*, *cover*, *sped up* and similar versions are rejected unless your track is that
+version; the downloaded file's real length is checked again. Files are tagged (title, artists,
+album, track number, year, ISRC, cover) and saved as `Album Artist/Album/NN - Title.ext`.
 
-1. **`artists`**: every artist you got at least one track from, with links: Spotify, Deezer, and where the music was found (Bandcamp page, YouTube Music channel, …)
-2. **`downloaded`**: every downloaded track, with its source link and file path
-3. **`failed`**: every track that was not downloaded and why, per source (e.g. "on Bandcamp but not a free download; you can buy it at …")
+## Your library: what gets downloaded
 
-Also in `~/Music/Spotify/Playlists/`: one `.m3u8` file per playlist, which any music player opens.
+Add your music folders in the **Library** tab. They are scanned (tags, codec, bitrate; read
+with built-in readers, so even big libraries take seconds after the first scan) and **only
+read: nothing in them is ever created, changed, moved or deleted.** The downloads folder can't
+be inside a library folder (or the other way round); the app refuses that setting.
+
+For each track of your playlists:
+
+- **Not in your library** → downloaded.
+- **In your library at or above the quality threshold** → skipped ("◆ in library").
+- **In your library below the threshold** → downloaded **only if a source has it in clearly
+  better quality**. Sources that can't do better aren't even searched, results that are only
+  as good are passed over, and the downloaded file is measured again: if it isn't better, it's
+  dropped. A better file goes to the downloads folder; your copy stays where it is, and the
+  report `downloaded.md` lists which library file it improves on so you can swap them yourself.
+
+The threshold (Library tab, `t`) is one of: `lossless` (default: FLAC, ALAC, WAV…), `320`,
+`256`, `192`, `128`, `any`. Lossy files are compared by MP3-equivalent bitrate (Opus 160 ≈ MP3
+256, AAC 256 ≈ MP3 320). `r` on an "in library" track downloads it anyway.
+
+## Bandwidth
+
+Set a bandwidth in **Settings** (or press `[` / `]` anywhere): it's both the **target** and the
+**cap** for all downloads together, torrents included. The app keeps adding parallel downloads
+while the total stays below it (up to "Most downloads at once") and never goes above it. With
+no bandwidth set, it runs "Most downloads at once" downloads in parallel. Searching runs
+separately ("Searches at once"), ahead of the downloads, so they never sit idle.
 
 ## Requirements
 
-- **The `spotify-downloader` program**: a single file with nothing to install. Build it once with `go build` (see the end of this file).
-- **ffmpeg**. Most Linux systems have it; otherwise `sudo pacman -S ffmpeg` / `sudo apt install ffmpeg`.
-- **yt-dlp** is downloaded automatically on first use (the official build, checksum-verified, refreshed weekly) into `~/.cache/spotify-downloader/`.
-- **For YouTube**, a JavaScript runtime: `node` (which you have) or `deno`.
-- **For torrents only**: the **`aria2`** package, which provides the `aria2c` command
-  (`sudo pacman -S aria2` / `sudo apt install aria2`; there is no package called `aria2c`),
-  plus Jackett or Prowlarr. [TORRENTS.md](TORRENTS.md) walks through it.
+- **ffmpeg** (`sudo pacman -S ffmpeg` / `sudo apt install ffmpeg`).
+- **yt-dlp** is downloaded automatically (official build, checksum-verified, refreshed weekly)
+  into `~/.cache/spotify-downloader/`. For YouTube it needs `node` or `deno`.
+- **For torrents only:** the **aria2** package and Jackett or Prowlarr ([TORRENTS.md](TORRENTS.md)).
 
-## Step 1: get your track list (no Premium needed)
-
-Spotify only lets apps you register yourself read your library if you pay for Premium, so the
-tool reads the track list from a file instead. Pick one:
-
-- **Spotify's own data export (recommended, complete).**
-  1. Go to <https://www.spotify.com/account/privacy/>.
-  2. Under *Download your data*, tick **Account data** and request it.
-  3. Spotify emails you a link, usually within a few days. Download `my_spotify_data.zip`.
-
-  It contains all your playlists and Liked Songs. It doesn't say which playlists you *made* versus
-  only *follow*, so check with `--list` and leave the followed ones out with `--exclude-playlist`.
-  It also has no track lengths, so the tool looks them up on Deezer's free public API.
-- **[Exportify](https://exportify.net)**: log in, click *Export All*, and you get a zip of CSVs
-  including Liked Songs. It's a third-party app, so Spotify's limits on such apps may block it
-  for your account; if it works, it's instant.
-- **Any CSV** with track and artist columns (TuneMyMusic and similar tools export these).
-- **A text file** with one `Artist - Title` per line.
-- **A public playlist or album link.** It's instant, but Spotify only shows the first 100 tracks
-  this way.
-
-You can combine several: `--from a.zip --from b.csv`.
-
-## Step 2: run it
-
-```sh
-# See what was found:
-./spotify-downloader --from ~/Downloads/my_spotify_data.zip --list
-
-# Test with a few tracks first, leaving out playlists you only follow:
-./spotify-downloader --from ~/Downloads/my_spotify_data.zip --exclude-playlist "Discover Weekly" --limit 20
-
-# Then the whole thing. The track list is remembered, so later runs need no --from:
-./spotify-downloader --exclude-playlist "Discover Weekly"
-```
-
-While it runs, finished tracks scroll by (✓ downloaded, ✗ not, and why), and a panel at the
-bottom shows each track in progress (with a progress bar while it downloads), the overall
-progress, the download speed and how much disk space is left.
-
-You can stop it with Ctrl-C at any time. It finishes the tracks in progress, writes the reports,
-and continues where it left off on the next run. Tracks that failed because a site was unreachable
-are retried automatically. Tracks with no match are retried only with `--retry-failed`.
-
-### Options
-
-| Option | Meaning |
-|---|---|
-| `--out DIR` | Music folder (default `~/Music/Spotify`). |
-| `--format mp3\|opus\|m4a\|flac\|original` | Default `mp3` (VBR V0). YouTube audio is Opus at about 130–160 kbps, so `opus` or `original` avoid re-encoding it. Free Bandcamp downloads come in lossless. |
-| `--playlist NAME` / `--exclude-playlist NAME` / `--no-liked` | Choose which playlists to download (repeatable). |
-| `--sources LIST` | Which sources to use, in order: any of `bandcamp,archive,youtube_music,soundcloud,youtube,torrent`. Default: all but `torrent`, plus `torrent` at the end once torrents are set up. Examples: `--sources torrent`, `--sources torrent,youtube_music`. |
-| `--workers N` | Tracks searched/converted in parallel (default 3; more makes YouTube bot checks likelier). Tracks waiting for a torrent don't count. |
-| `--limit N` | Only process N tracks. |
-| `--retry-failed` | Try "no match" tracks again. |
-| `--cookies-from-browser firefox` | Let yt-dlp use your browser's YouTube login (see Troubleshooting). |
-| `--template "{artist}/{title}"` | File layout. Fields: `{artist} {artists} {album_artist} {album} {title} {tracknum} {year}`. |
-| `--report-only` | Just rewrite the reports and playlists. |
-| `-v` | Show what's happening in detail. |
-
-## Torrents
-
-`torrent` is a source like the others. Set it up once:
-
-1. Install the **aria2** package.
-2. Install Jackett or Prowlarr and add the indexers you want.
-3. Point the tool at it:
-
-```sh
-./spotify-downloader --torznab http://127.0.0.1:9117 --torznab-key YOUR_KEY --check-torrents   # Jackett
-./spotify-downloader --torznab http://127.0.0.1:9696 --torznab-key YOUR_KEY --check-torrents   # Prowlarr
-```
-
-`--check-torrents` tests every step (aria2c, connection, API key, a sample search, a sample
-torrent's file list) and says what to fix. The settings are remembered. From then on, torrents
-are tried after the other sources, or wherever you put `torrent` in `--sources`.
-
-**[TORRENTS.md](TORRENTS.md)** is the full guide: installing Jackett/Prowlarr (AUR, Docker),
-adding indexers, FlareSolverr for Cloudflare-protected sites, choosing the order, how torrents
-and files are picked, tuning, and troubleshooting every message.
-
-BitTorrent uploads to other peers *while* downloading, and many public torrents of commercial
-music are unauthorized copies. What you download this way, and whether it's legal where you live,
-is up to you.
-
-## Troubleshooting
-
-- **"YouTube asked to sign in (bot check)"**: run again with `--cookies-from-browser firefox` (or
-  `chrome`, `brave`, …) while logged in to YouTube in that browser, and/or use `--workers 2`.
-- **"skipped, it kept failing to respond earlier in this run"**: a site was unreachable five times
-  in a row, so it was skipped for the rest of the run. Those tracks are retried next time.
-- **Wrong song downloaded**: the log (path printed at the end of each run) shows which result was
-  picked and why. Delete the file and run again with a different `--sources` order.
-- **Podcast episodes and audiobooks** in playlists are skipped and listed in `failed`.
-
-## Building
-
-You need Go 1.22 or newer. There are no third-party dependencies.
+## Getting started
 
 ```sh
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader .
-# Other systems, e.g. Windows:
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o spotify-downloader.exe .
-go test ./...      # tests (need ffmpeg)
+./spotify-downloader
 ```
 
-The tool keeps its state in `<music folder>/.spotify-downloader/`:
+1. **Playlists** tab (`2`): `a` adds a playlist file. Any of:
+   - CSV files from [Exportify](https://exportify.net), TuneMyMusic and similar tools (a file, a
+     folder of them, or a zip);
+   - Spotify's own data export (spotify.com → Account → Privacy → Download your data → *Account
+     data*), as the zip; it includes Liked Songs;
+   - a text file with one `Artist - Title` per line;
+   - a public Spotify playlist or album link (only its first 100 tracks).
+2. **Library** tab (`3`): `a` adds your music folders; `t` sets the quality threshold.
+3. **Settings** tab (`5`): the downloads folder (default `~/Music/SpotifyDownloads`), format,
+   bandwidth. **Save** applies them.
+4. Watch the **Queue** tab (`1`).
 
-- `library.json`: the imported track list plus the Deezer lookups;
-- `state.jsonl`: per-track results;
-- `logs/`: one log per run.
+## The app
+
+| Tab | What's there | Keys |
+|---|---|---|
+| `1` Queue | every track: state, progress, speed, quality | `Enter` details (every source tried and why it didn't work), `c` cancel, `r` restart (search again from the first source; for a downloaded or in-library track, download again), `p` do next, `R` retry everything not found, `f` filter, `/` search, `o` sort |
+| `2` Playlists | your playlist files, and the playlists in them | `a` add, `d` remove, `space` on/off, `+` `-` priority (higher goes first), `Enter` show its tracks, `R` read the files again |
+| `3` Library | library folders, scan status, threshold | `a` add folder (suggestions show as you type: `↑` `↓` pick, `Tab` completes, `Enter` accepts, `Esc` closes), `d` remove, `s` rescan, `t` threshold |
+| `4` Sources | the sources in order, their route, state and counts; torrent indexers | `space` on/off, `K` `J` move up/down, `Enter` settings (tokens, cookies, email, Jackett), `e` route, `p` pause/resume, `b` paste Bandcamp download links |
+| `5` Settings | downloads folder, format, layout, threshold, bandwidth, parallel downloads and searches | `Tab`/arrows move, `Esc` leaves a field, **Save** applies |
+| `6` Log | what happened | `v` detailed log, `End` follow |
+
+Anywhere: `1`–`6` (or `Alt+1`–`6`, `F1`–`F6`) switch tabs, `[` `]` lower/raise the bandwidth,
+`P` pauses/resumes everything, `q` quits. Quitting stops the tracks in progress; they continue
+next time. Reports are rewritten every few minutes and on quit.
+
+### Reports
+
+In the downloads folder: `reports/` has `artists`, `downloaded`, `in_library` and `failed`
+(as `.md` and `.csv`); `Playlists/` has one `.m3u8` per playlist, pointing at the downloaded
+file or, for songs you already had, at your library copy.
+
+## Bot checks and blocks
+
+When a site pushes back (YouTube's "sign in to confirm you're not a bot", rate limits, VK
+captchas, Bandcamp's browser check), that source is **paused** for a while (2 minutes, then
+5, 15, 30, up to an hour) instead of being hammered; tracks that needed it wait ("⟳ retry
+later") and continue when it's back. Other sources carry on meanwhile. The Sources tab shows
+which source is paused, until when, and why; `p` resumes it early.
+
+To keep YouTube from flagging you:
+
+- **Use your browser's YouTube login:** Sources → YouTube (or YouTube Music) → `Enter` →
+  *Cookies from browser* → your browser (where you're logged in to YouTube). yt-dlp reads the
+  cookies from the browser each time; nothing is stored. A `cookies.txt` file works too.
+- YouTube requests are spaced out (2 seconds by default, "Seconds between YouTube requests").
+- If your VPN's address is flagged, you can give YouTube a different route (`e` in Sources).
+
+The app doesn't try to get around bot checks; it backs off and uses your own logins.
+Spotify is only contacted when you add a playlist *link*; CSV files and the data export need
+no connection to Spotify.
+
+## Routes: VPN or direct, per source
+
+Each source has a route (`e` in the Sources tab):
+
+- **system**: your system's routing (with a VPN on, through the VPN);
+- **direct**: bound to your physical network interface (Wi-Fi/Ethernet), bypassing the VPN's
+  tunnel. Detected automatically (the interface whose default route has a gateway), or set in
+  Settings. Done per connection inside the app (`SO_BINDTODEVICE` on Linux, no root needed);
+  your system's routes, DNS and VPN settings aren't touched;
+- a **proxy**: `socks5://user:pass@host:port` or `http://host:port`.
+
+Yandex Music and VK default to **direct**, since they need a Russian address.
+
+## Yandex Music and VK
+
+**Yandex Music:** Sources → Yandex Music → `Enter` → paste your OAuth token. To get it, open
+<https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d>
+in your browser, log in, and copy the `access_token=…` part of the address you end up on.
+Full tracks need a Plus subscription (FLAC where Yandex has it); without Plus Yandex only gives
+previews, which are rejected. `space` turns the source on.
+
+**VK:** Sources → VK → `Enter` → *Log in to get a token…* (phone/email, password, and the
+confirmation code if VK asks; the password isn't stored), or paste a Kate Mobile token. VK
+only lets a few apps use its music API; this uses Kate Mobile's identity, as other VK music
+tools do.
+
+Tokens are kept in `config.json`, readable only by you.
+
+## Bandcamp name-your-price with an email address
+
+Some free (name-your-price) releases make you enter an email address; Bandcamp then emails the
+download link. Sources → Bandcamp → `Enter` → *Your email address*, and choose where the links
+come from (*Download links from*):
+
+- **I paste them** (no mailbox access): the app sends your address to Bandcamp (once per
+  release, remembered across restarts) and the tracks wait ("⟳ retry later"). When the emails
+  arrive, copy the links (or whole emails, several at once) and paste them with `b` in the
+  Sources tab. The waiting tracks continue right away.
+- **Gmail: sign in with Google** (read only, no app password): see below.
+- **IMAP mailbox**: any mailbox that allows IMAP with a password or app password. **Yandex
+  Mail**: `imap.yandex.ru:993`, user = your login, an app password (id.yandex.ru → Security →
+  App passwords → Mail), and in Yandex Mail's settings → *Email clients* turn on IMAP and *App
+  passwords and OAuth tokens*. **Mail.ru**: `imap.mail.ru:993` with an app password. Only read:
+  nothing is marked as read, moved or deleted.
+
+Tracks waiting for such a link wait for it instead of being taken from a worse source. Without
+an email address, such releases are listed in the report with a link.
+
+SMTP is no help here: it only *sends* mail, and Bandcamp's link has to be *read* from your
+inbox (that's IMAP, the Gmail API, or you).
+
+### Gmail
+
+Google only lets registered apps read Gmail, and only through its own sign-in page, so you
+register this app for yourself once (free, about 5 minutes; no billing needed):
+
+1. <https://console.cloud.google.com/> → create a project (any name).
+2. *APIs & Services* → *Library* → **Gmail API** → *Enable*.
+3. *Google Auth Platform* (*OAuth consent screen* in older consoles) → *Get started*: any app
+   name, your address as support and contact email, audience **External**.
+4. *Audience* → *Test users* → add your Gmail address.
+5. *Clients* → *Create client* → type **Desktop app** → copy the **Client ID** and **Client
+   secret**.
+6. In the app: Sources → Bandcamp → `Enter` → *Download links from*: **Gmail** → paste the ID and
+   secret → **Sign in with Google…**. Your browser opens Google's page; pick your account and
+   allow read-only access ("Google hasn't verified this app" is expected: it's your own app →
+   *Continue*). Back in the app it says "signed in as …".
+
+The app asks only for `gmail.readonly` (it can't send, change or delete mail), reads only
+Bandcamp's emails, and keeps the sign-in in `config.json`. While the app is in *Testing*, Google
+ends the sign-in after 7 days (the Sources tab then says to sign in again); on *Audience* →
+*Publish app* (*In production*), it lasts. To remove the access:
+<https://myaccount.google.com/permissions>.
+
+## Without the app
+
+```sh
+./spotify-downloader --headless   # work through the queue with the saved settings, print progress, exit
+./spotify-downloader --check-torrents
+./spotify-downloader --add ~/playlists --library ~/Music --out ~/Music/SpotifyDownloads --bandwidth 5
+```
+
+`--add`, `--library`, `--out` and `--bandwidth` change the saved settings (handy for a first
+setup or scripts). `--config FILE` and `--data DIR` use another settings file and state folder.
+
+## Files
+
+- `~/.config/spotify-downloader/config.json`: settings (private: holds tokens and passwords).
+- `~/.local/share/spotify-downloader/`: `state.jsonl` (per-track results), `library.json`
+  (imported playlists and Deezer lookups), `library-index.json` (library scan),
+  `bandcamp-emails.json` (releases Bandcamp was asked to email, and the links received),
+  `cache/` (torrent files and searches), `logs/` (one per run, last 20 kept).
+
+## Troubleshooting
+
+- **A source shows a problem in the Sources tab** (needs a token, yt-dlp missing, Jackett
+  unreachable): fix it in its settings (`Enter`); it's set up again when you save.
+- **"paused until 18:05 (…bot check…)"**: see *Bot checks* above.
+- **"Bandcamp is showing its bot check page to this connection"**: Bandcamp currently serves a
+  browser challenge to this network; the source pauses and tries again later. Try another route
+  for it (`e`), or put it lower in the order.
+- **Wrong song downloaded**: `Enter` on the track shows which result was picked; delete the
+  file, move the source down, and `r` the track.
+- **A track in your library isn't recognized**: the match needs the artist and title tags (or,
+  without tags, an `Artist/Album/NN - Title` or `Artist - Title` file name) and a similar
+  length. `Enter` shows what was found.
+
+## Building and tests
+
+You need Go 1.22 or newer.
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader .
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o spotify-downloader.exe .
+go test ./...      # needs ffmpeg; the torrent tests also use aria2c if installed
+```

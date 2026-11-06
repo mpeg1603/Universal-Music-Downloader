@@ -27,7 +27,8 @@ type Candidate struct {
 	// ArtistIsCredit is true when Artist is the performer credit (Bandcamp band, YouTube Music
 	// credits). Then the artist's name in the title doesn't count: that's how covers are named.
 	ArtistIsCredit bool
-	Ref            string // source-specific data needed to download it
+	Ref            string  // source-specific data needed to download it
+	Quality        Quality // what the download is expected to be, when the source says
 }
 
 var accentFolder = strings.NewReplacer(
@@ -106,7 +107,7 @@ var versionMarkers = []struct {
 	{"preview or snippet", wordRe(`preview|snippet|teaser`)},
 	{"reaction or tutorial", wordRe(`reaction|tutorial|lesson|how to play`)},
 	{"orchestral/piano version", wordRe(`orchestral|piano version|guitar version`)},
-	{"mashup", wordRe(`mash ?up`)},
+	{"mashup", wordRe(`mash ?up|vs`)}, // "Ellie Goulding vs. Explosions in the Sky - Lights, Remember Me…"
 }
 
 // baseTitle drops a " - Remastered 2011"/" - Radio Edit" suffix and featured artists.
@@ -158,7 +159,7 @@ func containsPhrase(haystack, needle string) bool {
 }
 
 func versionConflict(t *Track, c *Candidate) string {
-	ours := normalize(t.Title + " " + t.Album)
+	ours := normalize(t.Title + " " + t.Album + " " + strings.Join(t.Artists, " "))
 	theirs := normalize(c.Title)
 	for _, m := range versionMarkers {
 		if m.re.MatchString(theirs) && !m.re.MatchString(ours) {

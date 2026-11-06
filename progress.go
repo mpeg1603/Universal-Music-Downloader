@@ -6,15 +6,11 @@ import (
 	"time"
 )
 
-// Live progress of the tracks being worked on (read by the terminal UI), and the worker
-// slots that limit how many tracks are worked on at once.
-
-// Task is one track in progress. Sources reach it through the context (taskFrom) to report
-// what they're doing; every method is a no-op on a nil Task.
+// Live progress of a track being worked on. Sources reach it through the context
+// (taskFrom) to report what they're doing; every method is a no-op on a nil Task.
 type Task struct {
 	Track   *Track
 	started time.Time
-	slot    *slotHandle
 
 	mu       sync.Mutex
 	stage    string // e.g. "searching Torrent", "downloading", "converting"
@@ -28,6 +24,7 @@ type Task struct {
 	// Set when the download is one file of a bigger one (a torrent).
 	group, file string
 	groupSpeed  float64
+	onPark      func()
 }
 
 type taskKey struct{}
@@ -99,23 +96,26 @@ func (t *Task) share(group, file string, speed float64) {
 	t.mu.Unlock()
 }
 
-// park frees the task's worker slot while it only waits (e.g. for a torrent swarm), so other
-// tracks can be searched meanwhile. resume takes a slot back, ahead of tracks not started yet.
+// park gives up the task's download slot while it only waits (e.g. for a torrent swarm),
+// so other downloads can use it meanwhile.
 func (t *Task) park() {
-	if t != nil {
-		t.slot.park()
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	f := t.onPark
+	t.onPark = nil
+	t.mu.Unlock()
+	if f != nil {
+		f()
 	}
 }
 
-func (t *Task) resume(ctx context.Context) error {
-	if t == nil {
-		return nil
-	}
-	return t.slot.resume(ctx)
-}
+// resume is called when the wait is over. Converting needs no download slot, so there's
+// nothing to take back.
+func (t *Task) resume(ctx context.Context) error { return nil }
 
 type taskView struct {
-	Track       *Track
 	Stage, Note string
 	Done, Total int64
 	Speed       float64 // the group's when Group is set
@@ -124,6 +124,9 @@ type taskView struct {
 }
 
 func (t *Task) view() taskView {
+	if t == nil {
+		return taskView{}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	speed := t.speed
@@ -133,174 +136,93 @@ func (t *Task) view() taskView {
 	if time.Since(t.updated) > 3*time.Second {
 		speed = 0
 	}
-	return taskView{Track: t.Track, Stage: t.stage, Note: t.note, Done: t.done, Total: t.total, Speed: speed,
+	return taskView{Stage: t.stage, Note: t.note, Done: t.done, Total: t.total, Speed: speed,
 		Group: t.group, File: t.file, Started: t.started}
 }
 
-// Board lists the tasks in progress, oldest first.
-type Board struct {
-	mu    sync.Mutex
-	tasks []*Task
+// --- gates ------------------------------------------------------------------------------------
+
+// gate limits how many jobs do something at once (search, download). Its limit can change
+// at any time; waiting jobs are let through highest priority first.
+type gate struct {
+	mu      sync.Mutex
+	limit   int
+	used    int
+	seq     int64
+	waiters []*gateWaiter
 }
 
-func (b *Board) add(t *Task) {
-	if b == nil {
-		return
-	}
-	b.mu.Lock()
-	b.tasks = append(b.tasks, t)
-	b.mu.Unlock()
+type gateWaiter struct {
+	prio int64
+	seq  int64
+	ch   chan struct{}
 }
 
-func (b *Board) remove(t *Task) {
-	if b == nil {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for i, x := range b.tasks {
-		if x == t {
-			b.tasks = append(b.tasks[:i], b.tasks[i+1:]...)
-			return
-		}
-	}
-}
+func newGate(limit int) *gate { return &gate{limit: max(1, limit)} }
 
-func (b *Board) snapshot() []taskView {
-	if b == nil {
+func (g *gate) acquire(ctx context.Context, prio int64) error {
+	g.mu.Lock()
+	if g.used < g.limit && len(g.waiters) == 0 {
+		g.used++
+		g.mu.Unlock()
 		return nil
 	}
-	b.mu.Lock()
-	tasks := append([]*Task(nil), b.tasks...)
-	b.mu.Unlock()
-	out := make([]taskView, len(tasks))
-	for i, t := range tasks {
-		out[i] = t.view()
-	}
-	return out
-}
-
-// --- worker slots ---------------------------------------------------------------------------
-
-// slotPool is a semaphore with two queues: tasks resuming after a wait go before new ones.
-type slotPool struct {
-	mu        sync.Mutex
-	free      int
-	parked    int
-	maxParked int
-	resuming  []chan struct{}
-	starting  []chan struct{}
-}
-
-func newSlotPool(size, maxParked int) *slotPool {
-	return &slotPool{free: size, maxParked: maxParked}
-}
-
-func (p *slotPool) acquire(ctx context.Context, resuming bool) error {
-	p.mu.Lock()
-	if p.free > 0 {
-		p.free--
-		p.mu.Unlock()
-		return nil
-	}
-	w := make(chan struct{})
-	if resuming {
-		p.resuming = append(p.resuming, w)
-	} else {
-		p.starting = append(p.starting, w)
-	}
-	p.mu.Unlock()
+	g.seq++
+	w := &gateWaiter{prio: prio, seq: g.seq, ch: make(chan struct{})}
+	g.waiters = append(g.waiters, w)
+	g.grantLocked()
+	g.mu.Unlock()
 	select {
-	case <-w:
+	case <-w.ch:
 		return nil
 	case <-ctx.Done():
-		p.mu.Lock()
-		removed := removeWaiter(&p.resuming, w) || removeWaiter(&p.starting, w)
-		p.mu.Unlock()
-		if !removed { // granted just now: hand it on
-			p.release()
+		g.mu.Lock()
+		for i, x := range g.waiters {
+			if x == w {
+				g.waiters = append(g.waiters[:i], g.waiters[i+1:]...)
+				g.mu.Unlock()
+				return ctx.Err()
+			}
 		}
+		g.mu.Unlock()
+		g.release() // granted just now: pass it on
 		return ctx.Err()
 	}
 }
 
-func removeWaiter(list *[]chan struct{}, w chan struct{}) bool {
-	for i, x := range *list {
-		if x == w {
-			*list = append((*list)[:i], (*list)[i+1:]...)
-			return true
+func (g *gate) grantLocked() {
+	for g.used < g.limit && len(g.waiters) > 0 {
+		best := 0
+		for i, w := range g.waiters {
+			b := g.waiters[best]
+			if w.prio > b.prio || (w.prio == b.prio && w.seq < b.seq) {
+				best = i
+			}
 		}
-	}
-	return false
-}
-
-func (p *slotPool) release() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, q := range []*[]chan struct{}{&p.resuming, &p.starting} {
-		if len(*q) > 0 {
-			w := (*q)[0]
-			*q = (*q)[1:]
-			close(w)
-			return
-		}
-	}
-	p.free++
-}
-
-func (p *slotPool) tryPark() bool {
-	p.mu.Lock()
-	if p.parked >= p.maxParked {
-		p.mu.Unlock()
-		return false
-	}
-	p.parked++
-	p.mu.Unlock()
-	p.release()
-	return true
-}
-
-func (p *slotPool) unparked() {
-	p.mu.Lock()
-	p.parked--
-	p.mu.Unlock()
-}
-
-// slotHandle is one task's hold on the pool; only that task's goroutine uses it.
-type slotHandle struct {
-	pool   *slotPool
-	held   bool
-	parked bool
-}
-
-func (h *slotHandle) park() {
-	if h != nil && h.held && h.pool.tryPark() {
-		h.held, h.parked = false, true
+		w := g.waiters[best]
+		g.waiters = append(g.waiters[:best], g.waiters[best+1:]...)
+		g.used++
+		close(w.ch)
 	}
 }
 
-func (h *slotHandle) resume(ctx context.Context) error {
-	if h == nil || !h.parked {
-		return nil
-	}
-	if err := h.pool.acquire(ctx, true); err != nil {
-		return err
-	}
-	h.pool.unparked()
-	h.held, h.parked = true, false
-	return nil
+func (g *gate) release() {
+	g.mu.Lock()
+	g.used--
+	g.grantLocked()
+	g.mu.Unlock()
 }
 
-func (h *slotHandle) done() {
-	if h == nil {
-		return
-	}
-	if h.held {
-		h.pool.release()
-		h.held = false
-	}
-	if h.parked {
-		h.pool.unparked()
-		h.parked = false
-	}
+func (g *gate) setLimit(n int) {
+	g.mu.Lock()
+	g.limit = max(1, n)
+	g.grantLocked()
+	g.mu.Unlock()
+}
+
+// stats returns the slots in use, the limit and how many are waiting.
+func (g *gate) stats() (used, limit, waiting int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.used, g.limit, len(g.waiters)
 }

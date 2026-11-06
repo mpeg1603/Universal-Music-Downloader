@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"html"
 	"io"
 	"math"
@@ -40,19 +41,39 @@ type Bandcamp struct {
 	encodings []string
 	mu        sync.Mutex
 	locks     map[string]*sync.Mutex
+	mail      *bandcampMail // nil: no email address set
 }
 
-func newBandcamp(cacheDir, format string) *Bandcamp {
+func newBandcamp(cacheDir, format, route string, mail *bandcampMail) *Bandcamp {
 	return &Bandcamp{
-		http:      newHTTP("Bandcamp", 500*time.Millisecond),
+		http:      newRoutedHTTP("Bandcamp", 500*time.Millisecond, route),
 		cacheDir:  filepath.Join(cacheDir, "bandcamp"),
 		encodings: bandcampEncodings[format],
 		locks:     map[string]*sync.Mutex{},
+		mail:      mail,
 	}
 }
 
 func (b *Bandcamp) Name() string  { return "bandcamp" }
 func (b *Bandcamp) Label() string { return "Bandcamp" }
+
+func (b *Bandcamp) MaxQuality() Quality { return encodingQuality(b.encodings[0]) }
+
+func encodingQuality(enc string) Quality {
+	switch enc {
+	case "flac", "alac", "wav", "aiff-lossless":
+		return Quality{Codec: strings.TrimSuffix(enc, "-lossless"), Lossless: true}
+	case "mp3-320":
+		return Quality{Codec: "mp3", Kbps: 320}
+	case "mp3-v0":
+		return Quality{Codec: "mp3", Kbps: 245}
+	case "aac-hi":
+		return Quality{Codec: "aac", Kbps: 256}
+	case "vorbis":
+		return Quality{Codec: "vorbis", Kbps: 190}
+	}
+	return Quality{}
+}
 
 func (b *Bandcamp) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 	var res struct {
@@ -77,7 +98,7 @@ func (b *Bandcamp) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 	for _, r := range res.Auto.Results {
 		if r.Type == "t" && r.ItemURLPath != "" {
 			out = append(out, Candidate{Source: "bandcamp", URL: r.ItemURLPath, Title: r.Name, Artist: r.BandName,
-				Album: r.AlbumName, ArtistURL: r.ItemURLRoot, ArtistIsCredit: true})
+				Album: r.AlbumName, ArtistURL: r.ItemURLRoot, ArtistIsCredit: true, Quality: b.MaxQuality()})
 		}
 	}
 	return out, nil
@@ -87,6 +108,8 @@ type tralbum struct {
 	FreeDownloadPage string `json:"freeDownloadPage"`
 	AlbumURL         string `json:"album_url"`
 	Current          struct {
+		ID           int64    `json:"id"`
+		Type         string   `json:"type"`
 		MinimumPrice *float64 `json:"minimum_price"`
 	} `json:"current"`
 	TrackInfo []struct {
@@ -106,6 +129,9 @@ func (b *Bandcamp) tralbum(ctx context.Context, u string) (*tralbum, error) {
 	status, body, err := b.http.get(ctx, u)
 	if err != nil {
 		return nil, err
+	}
+	if isChallenge(body) {
+		return nil, blockedf("Bandcamp is showing its bot check page to this connection")
 	}
 	if status != 200 {
 		return nil, failf("couldn't open %s (HTTP %d)", u, status)
@@ -143,15 +169,107 @@ func (b *Bandcamp) Download(ctx context.Context, c Candidate, t *Track, workdir 
 			return b.fetchFree(ctx, album.FreeDownloadPage, workdir, albumURL, trackNumberInAlbum(album, c.URL, c.Title), c.Title)
 		}
 	}
+	// Name-your-price releases whose artist asks for an email address: Bandcamp emails the
+	// download link. The album is preferred, so its other tracks come from the same download.
 	for _, p := range []struct {
 		t *tralbum
 		u string
-	}{{page, c.URL}, {album, albumURL}} {
-		if p.t != nil && p.t.Current.MinimumPrice != nil && *p.t.Current.MinimumPrice == 0 {
-			return "", failf("name-your-price on Bandcamp, but the artist wants an email address first; grab it by hand: %s", p.u)
+	}{{album, albumURL}, {page, c.URL}} {
+		if p.t == nil || p.t.Current.MinimumPrice == nil || *p.t.Current.MinimumPrice != 0 {
+			continue
 		}
+		if b.mail == nil {
+			return "", failf("name-your-price on Bandcamp, but the artist wants an email address first; enter yours in Sources → Bandcamp, or grab it by hand: %s", p.u)
+		}
+		dl, err := b.emailDownload(ctx, p.t, p.u)
+		if err != nil {
+			return "", err
+		}
+		var file string
+		if p.t == album {
+			file, err = b.fetchFree(ctx, dl, workdir, albumURL, trackNumberInAlbum(album, c.URL, c.Title), c.Title)
+		} else {
+			file, err = b.fetchFree(ctx, dl, workdir, "", 0, c.Title)
+		}
+		if err != nil && ctx.Err() == nil && !isUnavailable(err) {
+			b.mail.dropLink(itemKey(p.t.Current.Type, p.t.Current.ID)) // expired: ask again next time
+		}
+		return file, err
 	}
 	return "", failf("on Bandcamp but not a free download; you can buy it at %s", c.URL)
+}
+
+// emailDownload returns the download page Bandcamp emails for a release: asks Bandcamp to send
+// it (once), then waits for it to show up in your mailbox, or for you to paste it.
+func (b *Bandcamp) emailDownload(ctx context.Context, t *tralbum, pageURL string) (string, error) {
+	key := itemKey(t.Current.Type, t.Current.ID)
+	mb := b.mail
+	if link := mb.link(key); link != "" {
+		return link, nil
+	}
+	task := taskFrom(ctx)
+	task.park() // waiting for an email needs no download slot
+	lock := b.lockFor("email " + key)
+	lock.Lock()
+	defer lock.Unlock()
+	if link := mb.link(key); link != "" {
+		return link, nil
+	}
+	cfg, canFetch := mb.settings()
+	ch := mb.wait(key)
+	defer mb.forget(key, ch)
+	// Asked once; again only if the link never came (a day with a mailbox, a week without).
+	again := 7 * 24 * time.Hour
+	if canFetch {
+		again = 24 * time.Hour
+	}
+	if at := mb.requestedAt(key); at.IsZero() || time.Since(at) > again {
+		task.setStage("asking Bandcamp to email the download")
+		u, err := url.Parse(pageURL)
+		if err != nil {
+			return "", err
+		}
+		form := url.Values{"encoding_name": {"none"}, "item_id": {strconv.FormatInt(t.Current.ID, 10)},
+			"item_type": {t.Current.Type}, "address": {cfg.Email}, "country": {firstNonEmpty(cfg.Country, "United States")},
+			"postcode": {firstNonEmpty(cfg.Postcode, "10001")}}
+		status, body, err := b.http.do(ctx, request{method: "POST", url: u.Scheme + "://" + u.Host + "/email_download",
+			body: []byte(form.Encode()), headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded",
+				"Referer": pageURL, "X-Requested-With": "XMLHttpRequest"}})
+		if err != nil {
+			return "", err
+		}
+		if isChallenge(body) {
+			return "", blockedf("Bandcamp is showing its bot check page to this connection")
+		}
+		var ok struct {
+			OK bool `json:"ok"`
+		}
+		if status != 200 || json.Unmarshal(body, &ok) != nil || !ok.OK {
+			return "", failf("Bandcamp didn't accept the email address for %s (HTTP %d)", pageURL, status)
+		}
+		mb.markRequested(key)
+		logf("Bandcamp: asked for %s to be emailed to %s", pageURL, cfg.Email)
+	}
+	if !canFetch {
+		return "", pendingf(6*time.Hour, "Bandcamp emails the download link to %s: paste it with b in the Sources tab (%s)", cfg.Email, pageURL)
+	}
+	task.setStage("waiting for Bandcamp's email")
+	go mb.poll()
+	select {
+	case link := <-ch:
+		return link, nil
+	case <-time.After(10 * time.Minute):
+		return "", pendingf(30*time.Minute, "Bandcamp's email to %s hasn't arrived yet; the mailbox is checked again later, or paste the link with b in the Sources tab (%s)", cfg.Email, pageURL)
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func itemKey(typ string, id int64) string {
+	if typ != "" {
+		typ = typ[:1]
+	}
+	return fmt.Sprintf("%s%d", typ, id)
 }
 
 func trackNumberInAlbum(album *tralbum, trackURL, title string) int {

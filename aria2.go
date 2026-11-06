@@ -254,6 +254,38 @@ func (a *aria2) changeOption(ctx context.Context, gid string, opts map[string]st
 	return err
 }
 
+// globalSpeed is aria2c's overall download speed (0 when it isn't running).
+func (m *torrentManager) globalSpeed() float64 {
+	if !m.aria.alive() {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := m.aria.call(ctx, "aria2.getGlobalStat")
+	if err != nil {
+		return 0
+	}
+	var st struct {
+		DownloadSpeed int64 `json:"downloadSpeed,string"`
+	}
+	json.Unmarshal(res, &st)
+	return float64(st.DownloadSpeed)
+}
+
+// setGlobalLimit caps aria2c's overall download speed (0: no cap).
+func (m *torrentManager) setGlobalLimit(bps float64) bool {
+	m.mu.Lock()
+	m.limit = bps
+	m.mu.Unlock()
+	if !m.aria.alive() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := m.aria.call(ctx, "aria2.changeGlobalOption", map[string]string{"max-overall-download-limit": strconv.FormatInt(int64(bps), 10)})
+	return err == nil
+}
+
 // forget stops a download if it's still running and drops it from aria2c's memory.
 func (a *aria2) forget(gid string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -305,7 +337,8 @@ type torrentManager struct {
 	jobs    map[string]*torrentJob // by .torrent path
 	polling bool
 	closed  bool
-	started int // aria2c downloads started, for the log and tests
+	started int     // aria2c downloads started, for the log and tests
+	limit   float64 // overall speed limit (bytes/s), applied when aria2c (re)starts
 }
 
 type torrentJob struct {
@@ -346,8 +379,15 @@ func newTorrentManager(a *aria2, dir string, timeout time.Duration) *torrentMana
 
 func (m *torrentManager) fetch(ctx context.Context, torrentFile string, index int, dest string, task *Task) (string, error) {
 	task.setStage("starting torrent")
+	fresh := !m.aria.alive()
 	if err := m.aria.ensure(ctx); err != nil {
 		return "", err
+	}
+	m.mu.Lock()
+	limit := m.limit
+	m.mu.Unlock()
+	if fresh && limit > 0 {
+		m.setGlobalLimit(limit)
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -571,13 +611,6 @@ func downloadError(st *ariaStatus) error {
 		return failf("no peer sent any data for %s (dead torrent?)", fmtWait(stallTimeout))
 	}
 	return failf("the torrent download stalled (no data for %s)", fmtWait(stallTimeout))
-}
-
-func fmtWait(d time.Duration) string {
-	if d%time.Minute == 0 {
-		return fmt.Sprintf("%d minutes", int(d.Minutes()))
-	}
-	return d.String()
 }
 
 // endDownload wraps up the current download: waiters still without their file get err (or a

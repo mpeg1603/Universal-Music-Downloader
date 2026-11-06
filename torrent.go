@@ -76,15 +76,82 @@ type Torznab struct {
 	feed string // ends in /api
 	key  string
 	http *HTTP
+	sem  chan struct{} // searches at once on this indexer
+
+	// Health: an indexer that keeps failing is left out for a while, so it doesn't hold up
+	// every search.
+	mu       sync.Mutex
+	fails    int
+	until    time.Time
+	lastErr  string
+	lastOK   time.Time
+	searches int
+	errors   int
+	avg      time.Duration
 }
 
-func newTorznabFeed(name, feed, key string) *Torznab {
+func newTorznabFeed(name, feed, key string, timeout time.Duration) *Torznab {
 	feed = strings.TrimRight(feed, "/")
 	if u, err := url.Parse(feed); err == nil && !strings.HasSuffix(u.Path, "/api") {
 		u.Path = strings.TrimRight(u.Path, "/") + "/api"
 		feed = u.String()
 	}
-	return &Torznab{Name: name, feed: feed, key: key, http: newHTTP("Torznab feed "+name, time.Second)}
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	h := newHTTP("Torznab feed "+name, 0)
+	h.retries, h.timeout = 1, timeout // a slow indexer is skipped, not waited for again and again
+	return &Torznab{Name: name, feed: feed, key: key, http: h, sem: make(chan struct{}, 2)}
+}
+
+func (z *Torznab) available() bool {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	return !time.Now().Before(z.until)
+}
+
+// record notes how a search went. Three failures in a row pause the indexer: 5 minutes,
+// then 10, 20, 40, up to 80.
+func (z *Torznab) record(err error, took time.Duration) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return // given up on by us, not the indexer's fault
+	}
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.searches++
+	if err == nil {
+		z.fails, z.lastOK = 0, time.Now()
+		if z.avg == 0 {
+			z.avg = took
+		} else {
+			z.avg = (z.avg*3 + took) / 4
+		}
+		return
+	}
+	z.errors++
+	z.fails++
+	z.lastErr = err.Error()
+	if z.fails >= 3 {
+		d := 5 * time.Minute << min(z.fails-3, 4)
+		z.until = time.Now().Add(d)
+		logf("Torrent indexer %s failed %d times in a row (%v); leaving it out for %s", z.Name, z.fails, err, fmtWait(d))
+	}
+}
+
+type feedStatus struct {
+	Name             string
+	OK               bool
+	Until            time.Time
+	LastErr          string
+	Searches, Errors int
+	Avg              time.Duration
+}
+
+func (z *Torznab) status() feedStatus {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	return feedStatus{Name: z.Name, OK: !time.Now().Before(z.until), Until: z.until, LastErr: z.lastErr,
+		Searches: z.searches, Errors: z.errors, Avg: z.avg}
 }
 
 func (z *Torznab) url(params url.Values) string {
@@ -321,14 +388,14 @@ func jackettIndexers(ctx context.Context, all *Torznab) ([]*Torznab, error) {
 			continue
 		}
 		feeds = append(feeds, newTorznabFeed("Jackett: "+firstNonEmpty(ix.Title, ix.ID),
-			base+"/"+url.PathEscape(ix.ID)+"/results/torznab/api", all.key))
+			base+"/"+url.PathEscape(ix.ID)+"/results/torznab/api", all.key, all.http.timeout))
 	}
 	return feeds, nil
 }
 
 // resolveFeeds turns the configured URLs into Torznab feeds. A bare Jackett address becomes
 // its all-indexers feed; a bare Prowlarr address becomes one feed per enabled torrent indexer.
-func resolveFeeds(ctx context.Context, cfg TorrentConfig) ([]*Torznab, error) {
+func resolveFeeds(ctx context.Context, cfg TorrentConfig, timeout time.Duration) ([]*Torznab, error) {
 	var feeds []*Torznab
 	h := newHTTP("Jackett/Prowlarr", 0)
 	h.retries = 2
@@ -338,7 +405,7 @@ func resolveFeeds(ctx context.Context, cfg TorrentConfig) ([]*Torznab, error) {
 			return nil, fmt.Errorf("%q is not a URL (expected e.g. http://127.0.0.1:9117)", raw)
 		}
 		if strings.Trim(u.Path, "/") != "" {
-			feeds = append(feeds, newTorznabFeed(u.Host+u.Path, raw, cfg.Key))
+			feeds = append(feeds, newTorznabFeed(u.Host+u.Path, raw, cfg.Key, timeout))
 			continue
 		}
 		base := strings.TrimRight(u.String(), "/")
@@ -361,7 +428,7 @@ func resolveFeeds(ctx context.Context, cfg TorrentConfig) ([]*Torznab, error) {
 			found := 0
 			for _, ix := range indexers {
 				if ix.Enable && ix.Protocol == "torrent" && (ix.SupportsSearch == nil || *ix.SupportsSearch) {
-					feeds = append(feeds, newTorznabFeed("Prowlarr: "+ix.Name, fmt.Sprintf("%s/%d/api", base, ix.ID), cfg.Key))
+					feeds = append(feeds, newTorznabFeed("Prowlarr: "+ix.Name, fmt.Sprintf("%s/%d/api", base, ix.ID), cfg.Key, timeout))
 					found++
 				}
 			}
@@ -372,7 +439,7 @@ func resolveFeeds(ctx context.Context, cfg TorrentConfig) ([]*Torznab, error) {
 		}
 		// Otherwise assume Jackett: one feed per configured indexer, or if it can't list them,
 		// its feed that searches all indexers at once.
-		all := newTorznabFeed("Jackett (all indexers)", base+"/api/v2.0/indexers/all/results/torznab/api", cfg.Key)
+		all := newTorznabFeed("Jackett (all indexers)", base+"/api/v2.0/indexers/all/results/torznab/api", cfg.Key, timeout)
 		if list, err := jackettIndexers(ctx, all); err == nil && len(list) > 0 {
 			feeds = append(feeds, list...)
 		} else {
@@ -459,28 +526,62 @@ func bdecodeValue(b []byte) (any, []byte, error) {
 // torrentFiles lists the files of a .torrent as slash paths relative to aria2c's --dir, in
 // the order aria2c's --select-file numbers them (from 1).
 func torrentFiles(data []byte) ([]string, error) {
+	names, _, err := torrentFileList(data)
+	return names, err
+}
+
+// torrentFileList is torrentFiles with each file's size.
+func torrentFileList(data []byte) ([]string, []int64, error) {
 	v, err := bdecode(data)
 	if err != nil {
-		return nil, fmt.Errorf("not a torrent file: %w", err)
+		return nil, nil, fmt.Errorf("not a torrent file: %w", err)
 	}
 	info, _ := dig(v, "info").(map[string]any)
 	if info == nil {
-		return nil, errors.New("torrent has no info section")
+		return nil, nil, errors.New("torrent has no info section")
 	}
 	name := str(firstOf(info["name.utf-8"], info["name"]))
 	files, multi := info["files"].([]any)
 	if !multi {
-		return []string{name}, nil
+		n, _ := info["length"].(int64)
+		return []string{name}, []int64{n}, nil
 	}
 	var out []string
+	var sizes []int64
 	for _, f := range files {
 		var parts []string
 		for _, p := range asSlice(firstOf(dig(f, "path.utf-8"), dig(f, "path"))) {
 			parts = append(parts, str(p))
 		}
 		out = append(out, path.Join(append([]string{name}, parts...)...))
+		n, _ := dig(f, "length").(int64)
+		sizes = append(sizes, n)
 	}
-	return out, nil
+	return out, sizes, nil
+}
+
+// fileQuality estimates a torrent file's quality from its name and size.
+func fileQuality(name string, size int64, seconds float64) Quality {
+	kbps := 0
+	if seconds > 0 && size > 0 {
+		kbps = int(float64(size) * 8 / seconds / 1000)
+	}
+	switch strings.ToLower(path.Ext(name)) {
+	case ".flac", ".ape", ".wv", ".wav", ".aiff", ".aif":
+		return Quality{Codec: "flac", Lossless: true}
+	case ".mp3":
+		return Quality{Codec: "mp3", Kbps: kbps}
+	case ".ogg":
+		return Quality{Codec: "vorbis", Kbps: kbps}
+	case ".opus":
+		return Quality{Codec: "opus", Kbps: kbps}
+	case ".m4a":
+		if kbps > 500 {
+			return Quality{Codec: "alac", Lossless: true}
+		}
+		return Quality{Codec: "aac", Kbps: kbps}
+	}
+	return Quality{}
 }
 
 func firstOf(values ...any) any {
@@ -745,7 +846,8 @@ func (c *cache[T]) get(ctx context.Context, key string, f func() (T, error)) (T,
 	if e != nil {
 		select {
 		case <-e.done:
-			if e.err != nil && time.Since(e.at) > c.retryAfter {
+			cancelled := errors.Is(e.err, context.Canceled) || errors.Is(e.err, context.DeadlineExceeded)
+			if e.err != nil && (cancelled || time.Since(e.at) > c.retryAfter) {
 				e = nil
 			}
 		default:
@@ -772,26 +874,36 @@ func (c *cache[T]) get(ctx context.Context, key string, f func() (T, error)) (T,
 type torrentMeta struct {
 	file  string // the .torrent on disk
 	files []string
+	sizes []int64
 }
 
 type TorrentSource struct {
 	feeds    []*Torznab
 	aria2c   string
-	dir      string // cached .torrent files
+	dir      string // cached .torrent files (kept between runs)
 	lossless bool
 	client   *http.Client
 	dl       torrentFetcher
+	grace    time.Duration // once one indexer has answered, wait this long for the others
+	timeout  time.Duration // per indexer
 
 	searches cache[[]torrentResult]
 	metas    cache[*torrentMeta]
+	cacheDir string // search results (kept for a while between runs)
 }
 
-func newTorrentSource(feeds []*Torznab, aria2c, cacheDir, format string, timeout time.Duration) *TorrentSource {
+// newTorrentSource makes the torrent source; extra[0] is the per-indexer search timeout.
+func newTorrentSource(feeds []*Torznab, aria2c, cacheDir, format string, timeout time.Duration, extra ...time.Duration) *TorrentSource {
 	dir := filepath.Join(cacheDir, "torrents")
+	indexerTimeout := 20 * time.Second
+	if len(extra) > 0 && extra[0] > 0 {
+		indexerTimeout = extra[0]
+	}
 	return &TorrentSource{
-		feeds: feeds, aria2c: aria2c, dir: dir,
+		feeds: feeds, aria2c: aria2c, dir: dir, grace: 6 * time.Second, timeout: indexerTimeout,
+		cacheDir: filepath.Join(cacheDir, "torrent-searches"),
 		lossless: format == "flac" || format == "original",
-		client: &http.Client{Timeout: time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if req.URL.Scheme == "magnet" {
 				return http.ErrUseLastResponse // some indexers redirect to a magnet link
 			}
@@ -803,54 +915,142 @@ func newTorrentSource(feeds []*Torznab, aria2c, cacheDir, format string, timeout
 	}
 }
 
-func (s *TorrentSource) Name() string  { return "torrent" }
-func (s *TorrentSource) Label() string { return "Torrent" }
+func (s *TorrentSource) Name() string        { return "torrent" }
+func (s *TorrentSource) Label() string       { return "Torrent" }
+func (s *TorrentSource) MaxQuality() Quality { return Quality{Codec: "flac", Lossless: true} }
 
 // Close stops aria2c.
 func (s *TorrentSource) Close() { s.dl.close() }
 
-// searchAll queries every feed at once and merges the results. Each query is made once per
-// run (a failed one again after a minute).
+func (s *TorrentSource) feedStatus() []feedStatus {
+	var out []feedStatus
+	for _, f := range s.feeds {
+		out = append(out, f.status())
+	}
+	return out
+}
+
+// speed is aria2c's overall download speed (bytes/s).
+func (s *TorrentSource) speed() float64 {
+	if g, ok := s.dl.(interface{ globalSpeed() float64 }); ok {
+		return g.globalSpeed()
+	}
+	return 0
+}
+
+// setLimit sets aria2c's overall download limit (bytes/s, 0: none).
+func (s *TorrentSource) setLimit(bps float64) bool {
+	if g, ok := s.dl.(interface{ setGlobalLimit(float64) bool }); ok {
+		return g.setGlobalLimit(bps)
+	}
+	return false
+}
+
+type cachedSearch struct {
+	At      time.Time       `json:"at"`
+	Results []torrentResult `json:"results"`
+}
+
+func (s *TorrentSource) searchCachePath(query string) string {
+	sum := sha1.Sum([]byte(strings.ToLower(query)))
+	return filepath.Join(s.cacheDir, hex.EncodeToString(sum[:10])+".json")
+}
+
+// searchAll queries every working indexer at once and merges the results. It doesn't wait for
+// slow indexers: once one has answered, the others get a few more seconds. Results are kept
+// on disk for half a day, so restarting doesn't search everything again.
 func (s *TorrentSource) searchAll(ctx context.Context, query string) ([]torrentResult, error) {
 	return s.searches.get(ctx, strings.ToLower(query), func() ([]torrentResult, error) {
+		if data, err := os.ReadFile(s.searchCachePath(query)); err == nil {
+			var c cachedSearch
+			if json.Unmarshal(data, &c) == nil {
+				ttl := 12 * time.Hour
+				if len(c.Results) == 0 {
+					ttl = 3 * time.Hour
+				}
+				if time.Since(c.At) < ttl {
+					return c.Results, nil
+				}
+			}
+		}
+		var live []*Torznab
+		for _, f := range s.feeds {
+			if f.available() {
+				live = append(live, f)
+			}
+		}
+		if len(live) == 0 {
+			return nil, unavailablef("every torrent indexer is paused after repeated errors (see Sources → Torrent)")
+		}
+		// Not tied to the track that asked first: other tracks wait for the same answer.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.timeout+5*time.Second)
+		defer cancel()
 		type answer struct {
+			i       int
 			results []torrentResult
 			err     error
 		}
-		answers := make([]answer, len(s.feeds))
-		var wg sync.WaitGroup
-		for i, f := range s.feeds {
-			wg.Add(1)
+		answers := make(chan answer, len(live))
+		for i, f := range live {
 			go func() {
-				defer wg.Done()
-				res, err := f.search(ctx, query)
-				answers[i] = answer{res, err}
+				select {
+				case f.sem <- struct{}{}:
+				case <-sctx.Done():
+					answers <- answer{i, nil, sctx.Err()}
+					return
+				}
+				start := time.Now()
+				res, err := f.search(sctx, query)
+				<-f.sem
+				f.record(err, time.Since(start))
+				answers <- answer{i, res, err}
 			}()
 		}
-		wg.Wait()
 		var out []torrentResult
 		var firstErr error
-		failed := 0
+		got, waiting := 0, len(live)
 		seen := map[string]bool{}
-		for i, a := range answers {
-			if a.err != nil {
-				debugf("%s: search %q failed: %v", s.feeds[i].Name, query, a.err)
-				failed++
-				if firstErr == nil {
-					firstErr = a.err
+		var grace <-chan time.Time
+	collect:
+		for waiting > 0 {
+			select {
+			case a := <-answers:
+				waiting--
+				if a.err != nil {
+					debugf("%s: search %q failed: %v", live[a.i].Name, query, a.err)
+					if firstErr == nil {
+						firstErr = a.err
+					}
+					continue
 				}
-				continue
-			}
-			debugf("%s: %d results for %q", s.feeds[i].Name, len(a.results), query)
-			for _, r := range a.results {
-				if !seen[r.id()] {
-					seen[r.id()] = true
-					out = append(out, r)
+				got++
+				debugf("%s: %d results for %q", live[a.i].Name, len(a.results), query)
+				for _, r := range a.results {
+					if !seen[r.id()] {
+						seen[r.id()] = true
+						out = append(out, r)
+					}
 				}
+				if grace == nil {
+					grace = time.After(s.grace)
+				}
+			case <-grace:
+				debugf("torrent search %q: going on without %d slow indexers", query, waiting)
+				break collect
+			case <-sctx.Done():
+				break collect
 			}
 		}
-		if failed > 0 && failed == len(s.feeds) {
+		if got == 0 {
+			if firstErr == nil || errors.Is(firstErr, context.DeadlineExceeded) {
+				firstErr = unavailablef("no torrent indexer answered within %s", s.timeout)
+			}
 			return nil, firstErr
+		}
+		if data, err := json.Marshal(cachedSearch{At: time.Now(), Results: out}); err == nil {
+			if os.MkdirAll(s.cacheDir, 0o755) == nil {
+				writeFileAtomic(s.searchCachePath(query), data)
+			}
 		}
 		return out, nil
 	})
@@ -940,8 +1140,12 @@ func (s *TorrentSource) inspect(ctx context.Context, t *Track, picks []torrentRe
 			debugf("torrent %q: no file fits %s among its %d files", r.Title, t, len(a.meta.files))
 			continue
 		}
+		var size int64
+		if i < len(a.meta.sizes) {
+			size = a.meta.sizes[i]
+		}
 		found[a.i] = &Candidate{Source: "torrent", URL: r.Details, Title: stem, Artist: r.Title,
-			Album: r.Title, Ref: a.meta.file + "#" + strconv.Itoa(i)}
+			Album: r.Title, Ref: a.meta.file + "#" + strconv.Itoa(i), Quality: fileQuality(a.meta.files[i], size, t.Duration())}
 		fits = true
 	}
 	var out []Candidate
@@ -956,23 +1160,28 @@ func (s *TorrentSource) inspect(ctx context.Context, t *Track, picks []torrentRe
 // meta gets a result's .torrent (from its link, or a magnet's metadata via aria2c) and file list.
 func (s *TorrentSource) meta(ctx context.Context, r torrentResult) (*torrentMeta, error) {
 	return s.metas.get(ctx, r.id(), func() (*torrentMeta, error) {
-		data, err := s.torrentBytes(ctx, r)
-		if err != nil {
-			return nil, err
-		}
-		files, err := torrentFiles(data)
-		if err != nil {
-			return nil, err
-		}
 		sum := sha1.Sum([]byte(r.id()))
 		p := filepath.Join(s.dir, hex.EncodeToString(sum[:10])+".torrent")
+		if data, err := os.ReadFile(p); err == nil { // fetched on an earlier run
+			if files, sizes, err := torrentFileList(data); err == nil {
+				return &torrentMeta{file: p, files: files, sizes: sizes}, nil
+			}
+		}
+		data, err := s.torrentBytes(context.WithoutCancel(ctx), r)
+		if err != nil {
+			return nil, err
+		}
+		files, sizes, err := torrentFileList(data)
+		if err != nil {
+			return nil, err
+		}
 		if err := os.MkdirAll(s.dir, 0o755); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(p, data, 0o644); err != nil {
+		if err := writeFileAtomic(p, data); err != nil {
 			return nil, err
 		}
-		return &torrentMeta{file: p, files: files}, nil
+		return &torrentMeta{file: p, files: files, sizes: sizes}, nil
 	})
 }
 
@@ -1009,10 +1218,10 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	mctx, cancel := context.WithTimeout(ctx, 75*time.Second)
+	mctx, cancel := context.WithTimeout(ctx, 50*time.Second)
 	defer cancel()
 	out, err := command(mctx, s.aria2c, "--dir="+tmp, "--bt-metadata-only=true", "--bt-save-metadata=true",
-		"--bt-stop-timeout=60", "--dht-entry-point=dht.transmissionbt.com:6881", "--bt-tracker-connect-timeout=15",
+		"--bt-stop-timeout=45", "--dht-entry-point=dht.transmissionbt.com:6881", "--bt-tracker-connect-timeout=15",
 		"--bt-tracker-timeout=30", "--summary-interval=0", "--console-log-level=error", "--download-result=hide", magnet).CombinedOutput()
 	matches, _ := filepath.Glob(filepath.Join(tmp, "*.torrent"))
 	if len(matches) == 0 {
@@ -1068,7 +1277,7 @@ func checkTorrents(ctx context.Context, cfg TorrentConfig, aria2c, query string)
 	if cfg.Key == "" {
 		fmt.Printf("  %s no API key given (--torznab-key); Jackett and Prowlarr need one\n", paint("33", "!"))
 	}
-	feeds, err := resolveFeeds(ctx, cfg)
+	feeds, err := resolveFeeds(ctx, cfg, 30*time.Second)
 	if err != nil {
 		bad("%v", err)
 		explainFeedError(err, hint)
@@ -1133,8 +1342,7 @@ func checkTorrents(ctx context.Context, cfg TorrentConfig, aria2c, query string)
 	}
 	ok("the top result's torrent file lists %d files (%d audio)", len(meta.files), audio)
 	if good {
-		fmt.Println("\nAll good. Torrents are now tried after the other sources; to change that, e.g.:")
-		fmt.Println("  spotify-downloader --sources torrent,youtube_music")
+		fmt.Println("\nAll good. Enable the Torrent source (and set its place in the order) in the app's Sources tab.")
 	}
 	return good
 }
