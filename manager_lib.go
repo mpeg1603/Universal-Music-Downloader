@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -75,8 +78,17 @@ func (m *Manager) enabledView(cfg Config) *Library {
 }
 
 // rebuildJobs makes a job for every track of the enabled playlists, keeping the jobs that
-// already exist. Tracks no longer in any enabled playlist are dropped (and stopped).
+// already exist, and checks them against the library. Tracks no longer in any enabled
+// playlist are dropped (and stopped).
 func (m *Manager) rebuildJobs() {
+	m.makeJobs()
+	m.reevaluateLibrary()
+	m.dirty.Store(true)
+	m.wake()
+}
+
+// makeJobs is rebuildJobs without the library check.
+func (m *Manager) makeJobs() {
 	cfg := m.Config()
 	lib := m.enabledView(cfg)
 	recs := m.state.all()
@@ -122,9 +134,6 @@ func (m *Manager) rebuildJobs() {
 	}
 	m.jobs, m.order = jobs, order
 	m.jobsMu.Unlock()
-	m.reevaluateLibrary()
-	m.dirty.Store(true)
-	m.wake()
 }
 
 // recordFor is the track's own record, or a download made earlier under the key of another
@@ -163,46 +172,71 @@ func (m *Manager) initJob(j *Job, rec Record) {
 
 // reevaluateLibrary checks the jobs not yet downloaded against the library: tracks you have in
 // good enough quality are skipped; ones you have in lower quality are only downloaded if a
-// source offers better.
+// source offers better. With tens of thousands of tracks this is a lot of fuzzy matching, so it
+// runs on every core (and one check at a time); it stops when the app does.
 func (m *Manager) reevaluateLibrary() {
 	if m.index == nil {
 		return
 	}
+	m.checkMu.Lock()
+	defer m.checkMu.Unlock()
 	th := Threshold(m.Config().Threshold)
 	m.jobsMu.Lock()
 	list := append([]*Job(nil), m.order...)
 	m.jobsMu.Unlock()
-	n := 0
-	for _, j := range list {
-		j.mu.Lock()
-		st, force, t := j.state, j.force, j.Track
-		j.mu.Unlock()
-		if st.active() || st == JobDone || st == JobCancelled || force {
-			continue
-		}
-		matches := m.index.Match(t)
-		j.mu.Lock()
-		if j.state != st { // changed meanwhile
-			j.mu.Unlock()
-			continue
-		}
-		j.lib = matches
-		j.needBetter = len(matches) > 0
-		switch {
-		case len(matches) > 0 && th.meets(matches[0].Q):
-			if j.state != JobInLibrary {
-				n++
+	m.checkDone.Store(0)
+	m.checkTotal.Store(int64(len(list)))
+	defer m.checkTotal.Store(0)
+	start := time.Now()
+	var next, n atomic.Int64
+	var wg sync.WaitGroup
+	for range runtime.NumCPU() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for m.ctx.Err() == nil {
+				i := int(next.Add(1)) - 1
+				if i >= len(list) {
+					return
+				}
+				if m.checkJob(list[i], th) {
+					n.Add(1)
+				}
+				m.checkDone.Add(1)
 			}
-			j.state = JobInLibrary
-		case j.state == JobInLibrary:
-			j.state = JobQueued
-		}
-		j.mu.Unlock()
+		}()
 	}
-	if n > 0 {
-		debugf("library check: %d more tracks already in your library", n)
-	}
+	wg.Wait()
+	debugf("library check of %d tracks took %s; %d more already in your library", len(list), time.Since(start).Round(time.Millisecond), n.Load())
 	m.wake()
+}
+
+// checkJob looks for the job's track in the library. It reports whether the track is now
+// newly "in library".
+func (m *Manager) checkJob(j *Job, th Threshold) bool {
+	j.mu.Lock()
+	st, force, t := j.state, j.force, j.Track
+	j.mu.Unlock()
+	if st.active() || st == JobDone || st == JobCancelled || force {
+		return false
+	}
+	matches := m.index.Match(t)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.state != st { // changed meanwhile
+		return false
+	}
+	j.lib = matches
+	j.needBetter = len(matches) > 0
+	switch {
+	case len(matches) > 0 && th.meets(matches[0].Q):
+		newly := j.state != JobInLibrary
+		j.state = JobInLibrary
+		return newly
+	case j.state == JobInLibrary:
+		j.state = JobQueued
+	}
+	return false
 }
 
 // scanLibrary reads the library folders; no new downloads start meanwhile.

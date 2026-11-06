@@ -166,6 +166,9 @@ type Manager struct {
 	scanStop context.CancelFunc
 	wg       sync.WaitGroup
 
+	checkMu               sync.Mutex // one library check at a time
+	checkDone, checkTotal atomic.Int64
+
 	// onFinish is called when a job reaches a final state (for the headless output).
 	onFinish func(JobView)
 }
@@ -237,7 +240,8 @@ func (m *Manager) Start() error {
 	} else {
 		m.full = newLibrary()
 	}
-	m.rebuildJobs()
+	// Shown right away; setup checks them against the library before anything is downloaded.
+	m.makeJobs()
 
 	m.wg.Add(1)
 	go func() {
@@ -1470,18 +1474,19 @@ func (m *Manager) TorrentFeeds() []feedStatus {
 }
 
 type Overview struct {
-	Counts          map[JobState]int
-	Total           int
-	Own, Torrent    float64
-	Cap             float64
-	DlUsed, DlLimit int
-	DlWaiting       int
-	SrUsed, SrLimit int
-	Paused, Ready   bool
-	Importing       bool
-	Lib             LibScanStatus
-	Free            int64
-	OutputDir       string
+	Counts           map[JobState]int
+	Total            int
+	Own, Torrent     float64
+	Cap              float64
+	DlUsed, DlLimit  int
+	DlWaiting        int
+	SrUsed, SrLimit  int
+	Paused, Ready    bool
+	Importing        bool
+	Checked, ToCheck int // the library check in progress
+	Lib              LibScanStatus
+	Free             int64
+	OutputDir        string
 }
 
 func (m *Manager) Overview() Overview {
@@ -1498,6 +1503,7 @@ func (m *Manager) Overview() Overview {
 	o.DlUsed, o.DlLimit, o.DlWaiting = m.dlGate.stats()
 	o.SrUsed, o.SrLimit, _ = m.searchGate.stats()
 	o.Paused, o.Ready, o.Importing = m.paused.Load(), m.ready.Load(), m.importing.Load()
+	o.Checked, o.ToCheck = int(m.checkDone.Load()), int(m.checkTotal.Load())
 	if m.index != nil {
 		o.Lib = m.index.Status()
 	}

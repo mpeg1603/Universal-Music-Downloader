@@ -516,6 +516,10 @@ func (ui *tui) refresh() {
 	switch {
 	case !o.Ready && o.Lib.Scanning:
 		state = fmt.Sprintf("[yellow]◌ scanning your library %d/%d[-]", o.Lib.Done, o.Lib.Total)
+	case !o.Ready && o.ToCheck > 0:
+		state = fmt.Sprintf("[yellow]◌ checking your library for %d/%d tracks[-]", o.Checked, o.ToCheck)
+	case !o.Ready && o.Importing:
+		state = "[yellow]◌ reading your playlists…[-]"
 	case !o.Ready:
 		state = "[yellow]◌ starting…[-]"
 	case o.Paused:
