@@ -466,3 +466,30 @@ func TestTUITransparentBackground(t *testing.T) {
 		t.Error("no selected row drawn with dark text")
 	}
 }
+
+// Clicks outside the queue's cells (below the last row, right of the last column) make tview
+// ask the table content for row or column -1; that used to crash the app.
+func TestQueueClickOutsideCells(t *testing.T) {
+	content := &queueContent{rows: []JobView{{Key: "a", Track: track("Get Lucky", []string{"Daft Punk"}, "RAM", 4)}}}
+	table := tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetContent(content)
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	screen.SetSize(200, 10)
+	table.SetRect(0, 0, 200, 10)
+	table.Draw(screen)
+
+	click := table.MouseHandler()
+	for _, at := range [][2]int{{5, 8}, {199, 0}, {199, 1}, {199, 8}} {
+		ev := tcell.NewEventMouse(at[0], at[1], tcell.Button1, 0)
+		click(tview.MouseLeftClick, ev, func(tview.Primitive) {})
+		table.Draw(screen)
+	}
+	for _, rc := range [][2]int{{-1, 0}, {0, -1}, {1, -1}, {0, len(queueHeaders)}, {2, 0}} {
+		if c := content.GetCell(rc[0], rc[1]); c != nil {
+			t.Errorf("GetCell(%d, %d) = %q, want nil", rc[0], rc[1], c.Text)
+		}
+	}
+}

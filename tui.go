@@ -614,12 +614,14 @@ var queueHeaders = []string{"", "Track", "Album", "Status", "Quality", "Playlist
 func (q *queueContent) GetRowCount() int    { return len(q.rows) + 1 }
 func (q *queueContent) GetColumnCount() int { return len(queueHeaders) }
 
+// GetCell must accept positions outside the table: tview's mouse handler asks for row or
+// column -1 when a click lands below the last row or right of the last column.
 func (q *queueContent) GetCell(row, col int) *tview.TableCell {
+	if row < 0 || row > len(q.rows) || col < 0 || col >= len(queueHeaders) {
+		return nil
+	}
 	if row == 0 {
 		return tview.NewTableCell(queueHeaders[col]).SetSelectable(false).SetAttributes(tcell.AttrBold).SetTextColor(tcell.ColorYellow)
-	}
-	if row-1 >= len(q.rows) {
-		return nil
 	}
 	v := q.rows[row-1]
 	switch col {
