@@ -430,3 +430,39 @@ func walkForm(p tview.Primitive, f func(tview.Primitive)) {
 		}
 	}
 }
+
+// Nothing is drawn on black, so a translucent terminal shows through; selected rows keep
+// their dark text on a light bar.
+func TestTUITransparentBackground(t *testing.T) {
+	tools := needFFmpeg(t)
+	a := getLucky()
+	a.Key = "a"
+	src := &fakeSource{name: "youtube", t: t, results: map[string][]Candidate{"a": found("youtube", "Get Lucky", "Daft Punk", 4)}}
+	m := testManager(t, tools, []Source{src}, testLibrary(a), func(c *Config) {
+		c.Inputs = []InputCfg{{Path: "/tmp/playlists.csv", Enabled: true}}
+	})
+	runManager(t, m)
+	d := startUI(t, m)
+	if text := d.text(); !strings.Contains(text, "Daft Punk - Get Lucky") {
+		t.Fatalf("queue not shown:\n%s", text)
+	}
+	var black, selected int
+	d.onUI("reading the screen", func() {
+		cells, _, _ := d.screen.GetContents()
+		for _, c := range cells {
+			fg, bg, _ := c.Style.Decompose()
+			if bg == tcell.ColorBlack {
+				black++
+			}
+			if bg != tcell.ColorDefault && fg == tcell.ColorBlack {
+				selected++
+			}
+		}
+	})
+	if black > 0 {
+		t.Errorf("%d cells drawn on black", black)
+	}
+	if selected == 0 {
+		t.Error("no selected row drawn with dark text")
+	}
+}

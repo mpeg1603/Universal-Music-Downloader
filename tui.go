@@ -113,11 +113,30 @@ func (ui *tui) build() {
 		ui.width, ui.height = s.Size()
 		return false
 	})
+	ui.app.SetAfterDrawFunc(transparentBackground)
 	start := "queue"
 	if len(ui.m.Config().Inputs) == 0 {
 		start = "playlists"
 	}
 	ui.show(start)
+}
+
+// transparentBackground swaps tview's black background for the terminal's
+// default one, so a translucent terminal (e.g. kitty's background_opacity)
+// shows through. Done after drawing rather than via tview.Styles because tview
+// also uses PrimitiveBackgroundColor as the text color of inverted elements
+// (selected table rows, dropdown and autocomplete lists), which would
+// otherwise become the terminal's default foreground and turn unreadable.
+func transparentBackground(s tcell.Screen) {
+	w, h := s.Size()
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			mainc, combc, style, _ := s.GetContent(x, y)
+			if _, bg, _ := style.Decompose(); bg == tcell.ColorBlack {
+				s.SetContent(x, y, mainc, combc, style.Background(tcell.ColorDefault))
+			}
+		}
+	}
 }
 
 func (ui *tui) show(name string) {
