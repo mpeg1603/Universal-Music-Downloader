@@ -35,6 +35,10 @@ with built-in readers, so even big libraries take seconds after the first scan) 
 read: nothing in them is ever created, changed, moved or deleted.** The downloads folder can't
 be inside a library folder (or the other way round); the app refuses that setting.
 
+A song listed more than once (in one playlist or several, also under two Spotify IDs, e.g. the
+album version and a re-release: same artist and length, same title or ISRC) is one track:
+downloaded once, and listed once in each playlist.
+
 For each track of your playlists:
 
 - **Not in your library** → downloaded.

@@ -133,6 +133,84 @@ func TestImportCSVVariantsAndText(t *testing.T) {
 	}
 }
 
+// Real playlists list songs twice: the same row again, or the album and a re-release under
+// another Spotify ID (sometimes with a translated title, or with ISRCs swapped between songs).
+const repeatsCSV = "Track URI,ISRC,Track Name,Album Name,Artist Name(s),Duration (ms)\n" +
+	"spotify:track:aaaaaaaaaaaaaaaaaaaaa1,AEA0D1846144,Тоска,Этажи,Molchat Doma,189048\n" +
+	"spotify:track:aaaaaaaaaaaaaaaaaaaaa2,AEA0D1847461,Люди надоели,С крыш наших домов,Molchat Doma,178860\n" +
+	"spotify:track:aaaaaaaaaaaaaaaaaaaaa3,AEA0D1847466,Дома молчат,С крыш наших домов,Molchat Doma,176979\n" +
+	"spotify:track:aaaaaaaaaaaaaaaaaaaaa4,QZES81838053,Groza (Thunderstorm),1,Leto V Gorode,234370\n" +
+	"spotify:track:aaaaaaaaaaaaaaaaaaaaa5,USHM91797375,War Is Peace,Leviathan,Diary of My Misanthropy,197333\n" +
+	"spotify:track:aaaaaaaaaaaaaaaaaaaaa1,AEA0D1846144,Тоска,Этажи,Molchat Doma,189048\n" + // the same row again
+	"spotify:track:bbbbbbbbbbbbbbbbbbbbb1,AEA0D1846144,ТОСКА,Этажи,Molchat Doma,189003\n" + // re-release
+	"spotify:track:bbbbbbbbbbbbbbbbbbbbb2,AEA0D1847461,Дома Молчат,С крыш наших домов,Molchat Doma,176979\n" + // swapped ISRC
+	"spotify:track:bbbbbbbbbbbbbbbbbbbbb3,AEA0D1847463,Люди Надоели,С крыш наших домов,Molchat Doma,178860\n" +
+	"spotify:track:bbbbbbbbbbbbbbbbbbbbb4,QZES81838053,Groza,1,Leto V Gorode,234370\n" + // translated title
+	"spotify:track:bbbbbbbbbbbbbbbbbbbbb5,USHM21864543,War Is Peace,Theatre of the Absurd,Diary of My Misanthropy,168000\n" // another version
+
+func TestImportMergesRepeatedSongs(t *testing.T) {
+	lib := newLibrary()
+	if err := importCSV(lib, "Sovietwave", strings.NewReader(repeatsCSV)); err != nil {
+		t.Fatal(err)
+	}
+	// A third listing in another file, without an ID or length.
+	if err := importText(lib, "Wishlist", strings.NewReader("Molchat Doma - Тоска\n"), quiet); err != nil {
+		t.Fatal(err)
+	}
+	keys := lib.playlist("Sovietwave").Keys
+	want := "aaaaaaaaaaaaaaaaaaaaa1 aaaaaaaaaaaaaaaaaaaaa2 aaaaaaaaaaaaaaaaaaaaa3 aaaaaaaaaaaaaaaaaaaaa4 " +
+		"aaaaaaaaaaaaaaaaaaaaa5 bbbbbbbbbbbbbbbbbbbbb5"
+	if got := strings.Join(keys, " "); got != want || len(lib.Tracks) != 6 || len(lib.Order) != 6 {
+		t.Fatalf("playlist = %s (%d tracks)\nwant %s", got, len(lib.Tracks), want)
+	}
+	if w := lib.playlist("Wishlist").Keys; len(w) != 1 || w[0] != "aaaaaaaaaaaaaaaaaaaaa1" {
+		t.Errorf("text listing not merged: %v", w)
+	}
+	for key, also := range map[string]string{
+		"aaaaaaaaaaaaaaaaaaaaa1": "bbbbbbbbbbbbbbbbbbbbb1 " + trackKey("", "Molchat Doma", "Тоска"),
+		"aaaaaaaaaaaaaaaaaaaaa2": "bbbbbbbbbbbbbbbbbbbbb3", // by title, not by the swapped ISRC
+		"aaaaaaaaaaaaaaaaaaaaa3": "bbbbbbbbbbbbbbbbbbbbb2",
+		"aaaaaaaaaaaaaaaaaaaaa4": "bbbbbbbbbbbbbbbbbbbbb4",
+		"aaaaaaaaaaaaaaaaaaaaa5": "",
+	} {
+		if got := strings.Join(lib.Tracks[key].Also, " "); got != also {
+			t.Errorf("%s merged %q, want %q", lib.Tracks[key], got, also)
+		}
+	}
+	if lib.merged != 5 {
+		t.Errorf("merged = %d, want 5", lib.merged)
+	}
+
+	// A download made under a key since merged away still counts for the song.
+	file := filepath.Join(t.TempDir(), "Тоска.flac")
+	os.WriteFile(file, []byte("x"), 0o644)
+	recs := map[string]Record{
+		"aaaaaaaaaaaaaaaaaaaaa1": {Key: "aaaaaaaaaaaaaaaaaaaaa1", Status: "failed"},
+		"bbbbbbbbbbbbbbbbbbbbb1": {Key: "bbbbbbbbbbbbbbbbbbbbb1", Status: "downloaded", Path: file},
+	}
+	if rec := recordFor(recs, lib.Tracks["aaaaaaaaaaaaaaaaaaaaa1"]); rec.Path != file {
+		t.Errorf("record = %+v", rec)
+	}
+	os.Remove(file)
+	if rec := recordFor(recs, lib.Tracks["aaaaaaaaaaaaaaaaaaaaa1"]); rec.Status != "failed" {
+		t.Errorf("record with the file gone = %+v", rec)
+	}
+
+	// Saved and loaded again, the merges are remembered.
+	p := filepath.Join(t.TempDir(), "library.json")
+	if err := lib.save(p); err != nil {
+		t.Fatal(err)
+	}
+	again, err := loadLibrary(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again.add("Sovietwave", &Track{Key: "bbbbbbbbbbbbbbbbbbbbb1", Title: "Тоска", Artists: []string{"Molchat Doma"}})
+	if len(again.Tracks) != 6 || len(again.playlist("Sovietwave").Keys) != 6 {
+		t.Errorf("after reload: %d tracks, playlist %v", len(again.Tracks), again.playlist("Sovietwave").Keys)
+	}
+}
+
 func TestParseDurations(t *testing.T) {
 	for in, want := range map[string]int{"3:25": 205000, "1:02:03": 3723000, "205": 205000, "205000": 205000, "": 0} {
 		if got := parseDurationMs(in); got != want {

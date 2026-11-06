@@ -43,7 +43,11 @@ func (m *Manager) importInputs() {
 	m.saveLibrary()
 	m.rebuildJobs()
 	if len(cfg.Inputs) > 0 {
-		logf("Playlists: %d tracks in %d playlists", len(lib.Tracks), len(lib.Playlists))
+		msg := fmt.Sprintf("Playlists: %d tracks in %d playlists", len(lib.Tracks), len(lib.Playlists))
+		if lib.merged > 0 {
+			msg += fmt.Sprintf(" (%d repeats of a song under another ID merged)", lib.merged)
+		}
+		logf("%s", msg)
 	}
 }
 
@@ -94,7 +98,7 @@ func (m *Manager) rebuildJobs() {
 		j := m.jobs[t.Key]
 		if j == nil {
 			j = &Job{Track: t, tried: map[string]bool{}}
-			m.initJob(j, recs[t.Key])
+			m.initJob(j, recordFor(recs, t))
 		}
 		j.mu.Lock()
 		if !j.state.active() {
@@ -121,6 +125,23 @@ func (m *Manager) rebuildJobs() {
 	m.reevaluateLibrary()
 	m.dirty.Store(true)
 	m.wake()
+}
+
+// recordFor is the track's own record, or a download made earlier under the key of another
+// listing of the song that has since been merged into it.
+func recordFor(recs map[string]Record, t *Track) Record {
+	rec := recs[t.Key]
+	if rec.Status == "downloaded" {
+		return rec
+	}
+	for _, k := range t.Also {
+		if r := recs[k]; r.Status == "downloaded" && filepath.IsAbs(r.Path) {
+			if _, err := os.Stat(r.Path); err == nil {
+				return r
+			}
+		}
+	}
+	return rec
 }
 
 func (m *Manager) initJob(j *Job, rec Record) {

@@ -357,9 +357,10 @@ func TestFallsThroughAndChecksRealLength(t *testing.T) {
 func TestSamePathGetsNumberedAndNothingIsOverwritten(t *testing.T) {
 	tools := needFFmpeg(t)
 	a, b := getLucky(), getLucky()
-	a.Key, b.Key, a.DurationMs, b.DurationMs = "a", "b", 4000, 4000
+	// Different recordings (lengths far apart) under the same name.
+	a.Key, b.Key, a.DurationMs, b.DurationMs = "a", "b", 4000, 9000
 	src := &fakeSource{name: "youtube", t: t, results: map[string][]Candidate{
-		"a": found("youtube", "Get Lucky", "Daft Punk", 4), "b": found("youtube", "Get Lucky", "Daft Punk", 4)}}
+		"a": found("youtube", "Get Lucky", "Daft Punk", 4), "b": found("youtube", "Get Lucky", "Daft Punk", 9)}}
 	m := testManager(t, tools, []Source{src}, testLibrary(a, b), func(c *Config) { c.SearchWorkers = 1 })
 	music := m.Config().OutputDir
 	// A file that was already there (not ours) is never replaced.
@@ -376,6 +377,24 @@ func TestSamePathGetsNumberedAndNothingIsOverwritten(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(existing); string(data) != "mine" {
 		t.Error("an existing file was overwritten")
+	}
+}
+
+// A song a playlist lists twice under different Spotify IDs is one job and one file.
+func TestSongListedTwiceIsDownloadedOnce(t *testing.T) {
+	tools := needFFmpeg(t)
+	a, b := getLucky(), getLucky()
+	a.Key, b.Key, a.DurationMs, b.DurationMs = "a", "b", 4000, 4050
+	src := &fakeSource{name: "youtube", t: t, results: map[string][]Candidate{
+		"a": found("youtube", "Get Lucky", "Daft Punk", 4), "b": found("youtube", "Get Lucky", "Daft Punk", 4)}}
+	m := testManager(t, tools, []Source{src}, testLibrary(a, b), nil)
+	out := runManager(t, m)
+	if len(out) != 1 || out["a"].State != JobDone || src.searched.Load() != 1 {
+		t.Fatalf("jobs %v, searched %d times", out, src.searched.Load())
+	}
+	files, _ := filepath.Glob(filepath.Join(m.Config().OutputDir, "Daft Punk/Random Access Memories/*"))
+	if len(files) != 1 {
+		t.Errorf("files %v", files)
 	}
 }
 

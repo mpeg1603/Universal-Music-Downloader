@@ -29,6 +29,7 @@ type Track struct {
 	DeezerArtistURL string            `json:"deezer_artist_url,omitempty"`
 	IsLocal         bool              `json:"is_local,omitempty"`
 	Enriched        bool              `json:"enriched,omitempty"` // Deezer lookup already attempted
+	Also            []string          `json:"also,omitempty"`     // keys of other listings of this song, merged into it
 }
 
 func (t *Track) Duration() float64 { return float64(t.DurationMs) / 1000 }
@@ -109,7 +110,27 @@ type Library struct {
 	Order      []string          `json:"order"`
 	Playlists  []*Playlist       `json:"playlists"`
 	Skipped    []Skipped         `json:"skipped"`
+
+	// Repeats: the songs seen so far by primary artist, and the keys merged into another.
+	songs  map[string][]sighting
+	alias  map[string]string
+	merged int // listings merged into the same song under a different key
 }
+
+// sighting is one listing of a song, as far as recognizing a repeat of it goes.
+type sighting struct {
+	key   string // the track it is (or was merged into)
+	title string // cleanTitle
+	isrc  string
+	ms    int
+}
+
+// How far the lengths of two listings may differ for them to be the same recording.
+// Re-releases of one master differ by well under a second; edits and other versions by more.
+const (
+	sameTitleSlackMs = 2000
+	sameISRCSlackMs  = 1000 // ISRCs alone are unreliable: re-releases sometimes swap them between songs
+)
 
 func newLibrary() *Library {
 	return &Library{ImportedAt: time.Now().Format(time.RFC3339), Tracks: map[string]*Track{}}
@@ -130,24 +151,103 @@ func (l *Library) playlist(name string) *Playlist {
 	return p
 }
 
-// add puts a track into a playlist, merging it with an earlier sighting of the same song.
+// add puts a track into a playlist, merging it with an earlier sighting of the same song, so
+// a song listed twice is downloaded once and listed once per playlist. Besides the same
+// Spotify ID, playlists often hold one song under two: from the album and from a re-release
+// or compilation. Those are recognized by the same primary artist and length with the same
+// title or ISRC.
 func (l *Library) add(playlistName string, t *Track) {
 	if len(t.Artists) == 0 || t.Artists[0] == "" {
 		t.Artists = []string{"Unknown Artist"}
 	}
-	if existing, ok := l.Tracks[t.Key]; ok {
-		existing.fillFrom(t)
-	} else {
-		l.Tracks[t.Key] = t
-		l.Order = append(l.Order, t.Key)
+	l.indexSongs()
+	key := t.Key
+	if k, ok := l.alias[key]; ok {
+		key = k
 	}
+	if existing, ok := l.Tracks[key]; ok {
+		existing.fillFrom(t)
+	} else if same := l.sameSong(t); same != nil {
+		debugf("%s: %q (%s) is the same song as %q (%s); downloading it once", playlistName, t.String(), t.Key, same.String(), same.Key)
+		same.fillFrom(t)
+		same.Also = append(same.Also, t.Key)
+		l.alias[t.Key] = same.Key
+		l.merged++
+		key = same.Key
+	} else {
+		l.Tracks[key] = t
+		l.Order = append(l.Order, key)
+	}
+	l.remember(key, t)
 	p := l.playlist(playlistName)
 	for _, k := range p.Keys {
-		if k == t.Key {
+		if k == key {
 			return
 		}
 	}
-	p.Keys = append(p.Keys, t.Key)
+	p.Keys = append(p.Keys, key)
+}
+
+// indexSongs builds the repeat index for a library loaded from disk.
+func (l *Library) indexSongs() {
+	if l.songs != nil {
+		return
+	}
+	l.songs, l.alias = map[string][]sighting{}, map[string]string{}
+	for _, k := range l.Order {
+		if t := l.Tracks[k]; t != nil {
+			l.remember(k, t)
+			for _, a := range t.Also {
+				l.alias[a] = k
+			}
+		}
+	}
+}
+
+func songArtist(t *Track) string {
+	if a := normalizedArtists(t); len(a) > 0 {
+		return a[0]
+	}
+	return ""
+}
+
+// remember notes a listing of the song stored under key; every listing is kept, so a later
+// one can match any of them (a translated title by ISRC, then a copy of that by title).
+func (l *Library) remember(key string, t *Track) {
+	artist := songArtist(t)
+	if artist == "" {
+		return
+	}
+	s := sighting{key: key, title: cleanTitle(t.Title, false), isrc: strings.ToUpper(strings.TrimSpace(t.ISRC)), ms: t.DurationMs}
+	for _, o := range l.songs[artist] {
+		if o == s {
+			return
+		}
+	}
+	l.songs[artist] = append(l.songs[artist], s)
+}
+
+// sameSong finds an earlier track that is the same recording as t under another key.
+func (l *Library) sameSong(t *Track) *Track {
+	artist := songArtist(t)
+	if artist == "" {
+		return nil
+	}
+	title, isrc := cleanTitle(t.Title, false), strings.ToUpper(strings.TrimSpace(t.ISRC))
+	near := func(o sighting, slack int) bool {
+		d := t.DurationMs - o.ms
+		return t.DurationMs > 0 && o.ms > 0 && d <= slack && -d <= slack
+	}
+	var byISRC *Track
+	for _, o := range l.songs[artist] {
+		switch {
+		case title != "" && o.title == title && (t.DurationMs == 0 || o.ms == 0 || near(o, sameTitleSlackMs)):
+			return l.Tracks[o.key]
+		case byISRC == nil && isrc != "" && o.isrc == isrc && near(o, sameISRCSlackMs):
+			byISRC = l.Tracks[o.key]
+		}
+	}
+	return byISRC
 }
 
 func (l *Library) ordered() []*Track {
