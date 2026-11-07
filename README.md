@@ -18,7 +18,7 @@ Tried top to bottom for each track; the order is yours to change (Sources tab).
 | **Internet Archive** | Items published under a license (Creative Commons, public domain); no live tapes. | FLAC / MP3 |
 | **Yandex Music** *(optional)* | Your own account (token). Full tracks need Plus. Reached directly, not through your VPN. | FLAC (Plus) / MP3 320 |
 | **VK** *(optional)* | Your own account (token). Reached directly, not through your VPN. | MP3 up to 320 |
-| **Soulseek** *(optional)* | Your own [slskd](https://github.com/slskd/slskd) (the Soulseek client as a service, with your account): people share their music folders. See **Soulseek** below. | often FLAC |
+| **Soulseek** *(optional)* | A Soulseek client built into the app, with your Soulseek account: people share their music folders, and you share yours. See **Soulseek** below. | often FLAC |
 | **Audius** | An open platform where artists upload their own music (much independent electronic music); free API, no account. Tracks only for paying fans are left out. | MP3 320 |
 | **YouTube Music** | Official "song" uploads, found by ISRC and by artist + title. | Opus ~130 |
 | **SoundCloud** | Public tracks; 30-second previews are rejected. | MP3 128 / AAC |
@@ -103,10 +103,11 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader .
 | `2` Playlists | your playlist files, and the playlists in them | `a` add, `d` remove, `space` on/off, `+` `-` priority (higher goes first), `Enter` show its tracks, `R` read the files again |
 | `3` Library | library folders, scan status, threshold | `a` add folder (suggestions show as you type: `↑` `↓` pick, `Tab` completes, `Enter` accepts, `Esc` closes), `d` remove, `s` rescan, `t` threshold |
 | `4` Sources | the sources in order, their route, state and counts; torrent indexers | `space` on/off, `K` `J` move up/down, `Enter` settings (tokens, cookies, email, Jackett), `e` route, `p` pause/resume, `b` paste Bandcamp download links |
-| `5` Settings | downloads folder, format, layout, threshold, bandwidth, parallel downloads and searches | `Tab`/arrows move, `Esc` leaves a field, **Save** applies |
-| `6` Log | what happened | `v` detailed log, `End` follow |
+| `5` Soulseek | the connection, what you share, transfers both ways, chat (private and rooms) | `Tab` transfers → chats → message line, `n` message someone, `j` join a room, `l` leave a room / close a chat, `m` message a transfer's user, `x` stop an upload, `B` ban a user, `o` check your port, `R` reconnect |
+| `6` Settings | downloads folder, format, layout, threshold, bandwidth, parallel downloads and searches; Soulseek account, sharing and limits | `Tab`/arrows move, `Esc` leaves a field, **Save** applies |
+| `7` Log | what happened | `v` detailed log, `End` follow |
 
-Anywhere: `1`–`6` (or `Alt+1`–`6`, `F1`–`F6`) switch tabs, `[` `]` lower/raise the bandwidth,
+Anywhere: `1`–`7` (or `Alt+1`–`7`, `F1`–`F7`) switch tabs, `[` `]` lower/raise the bandwidth,
 `P` pauses/resumes everything, `q` quits.
 
 **Pause** (`P`) stops everything right away: searches and downloads in progress are stopped and
@@ -172,15 +173,51 @@ Yandex Music and VK default to **direct**, since they need a Russian address.
 
 ## Soulseek
 
-Soulseek is a file-sharing network for music; [slskd](https://github.com/slskd/slskd) runs its
-client as a service (like Jackett for torrents) with your Soulseek account. In its `slskd.yml`,
-add an API key under `web: authentication: api_keys:` (16 or more characters, role
-`readwrite`). Then Sources → Soulseek → `Enter`: slskd's address (default
-`http://localhost:5030`), the API key, and slskd's downloads folder (`directories: downloads:`,
-default `~/.local/share/slskd/downloads`); `space` turns it on. Users who can send right away
-come first; one who hasn't started sending within 10 minutes is passed over for the next.
-Finished files are copied from slskd's downloads folder, which keeps its copy. slskd's speed
-isn't part of the bandwidth setting: set slskd's own limit.
+Soulseek is a file-sharing network for music (people share their music folders, often in
+FLAC). The client is built into the app; nothing else needs to be installed. It needs your
+Soulseek account: Settings (`6`) → **Soulseek username** and **password** (a name nobody uses
+yet makes a new account on first login; there's no way to reset a forgotten password, so
+keep it). If you use Nicotine+, **Import Soulseek settings from Nicotine+** copies its account,
+port, shared folders and upload limits (Nicotine+'s files are only read). Then turn the
+Soulseek source on in the Sources tab (`space`). Don't run another Soulseek client with the
+same account at the same time: each logs the other out (the app then stays offline until you
+press `R` in the Soulseek tab, instead of fighting over the login).
+
+**Being a good citizen.** The network's rules ask clients not to flood it, and it bans those
+that do. So the app sends **one search every 5 seconds** at most (configurable, never less
+than 3), at most two at a time; requests **at most 2 files at once** (configurable 1–4) and
+only one from any user; passes over a user who hasn't started sending within 5 minutes
+(configurable) instead of asking again; asks for its place in a queue only every few
+minutes; and never retries the server in a tight loop (15 seconds, then longer, up to 10
+minutes). Users who can send right away, and quickly, are tried first. Soulseek downloads
+count toward the bandwidth setting.
+
+**Sharing.** Many users don't send files to people who share nothing, and the network's
+rules expect clients to share. By default your library folders and the downloads folder are
+shared, read only (Settings → **Shared folders** to choose others; `Name=/path` names one).
+Others see a folder by its name (`Music\Artist\Album\01 Song.flac`). The app answers their
+searches (through the distributed search network, which it joins as a leaf), lets them browse
+your files, and uploads what they ask for: **2 upload slots** by default, privileged users
+(those who donated to Soulseek) first, then round robin. Settings: upload slots, an upload
+speed limit (KB/s), a queue limit per user (files and MB), banned users. The shared folders
+are read again after each library scan; new downloads are shared as they arrive. Turn
+**Share files** off to share nothing.
+
+**Getting through.** Others reach you on the listening port (2234; the next free one if
+it's taken). With **UPnP** on (the default, as in Nicotine+), the app asks your router to
+forward it while it runs. Through a VPN the port usually can't be reached from outside; the
+app then reaches users whose ports are open (most), connecting to them. `o` in the Soulseek tab
+asks the Soulseek site's port checker whether others can reach you. The Soulseek source's route
+(Sources → `e`) applies to all its connections.
+
+**Wishlist and chat.** Tracks that no source had, Soulseek included, go on the Soulseek
+wishlist: the server lets each client search for one wishlist item every 12 minutes (2 for
+privileged users), and the app does, in turn; when something fits, the track is tried on
+Soulseek again. The Soulseek tab shows private messages (the tab title counts unread ones) and
+chat rooms; rooms you join are joined again next time.
+
+The client speaks the protocol as documented by Nicotine+ (doc/SLSKPROTOCOL.md) and logs in
+as an experimental client (major version 177), as new clients are asked to.
 
 ## Yandex Music and VK
 

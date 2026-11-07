@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -157,8 +158,14 @@ type Manager struct {
 	torKey   string
 	ytdlpBin string
 	bcMail   *bandcampMail // Bandcamp's emailed download links
-	cookies  *ytCookies    // your YouTube login, for yt-dlp
-	cookieID string        // the settings cookies was made from
+	slsk     *slskClient   // the Soulseek client, while the source is on
+	slskKey  string        // the settings it logged in with
+	slskSrc  *Soulseek
+	shares   *slskShares // what's shared on Soulseek
+	shareKey string      // the folders scanned for it
+	wishPos  int         // where the Soulseek wishlist goes on
+	cookies  *ytCookies  // your YouTube login, for yt-dlp
+	cookieID string      // the settings cookies was made from
 
 	searchGate *gate
 	dlGate     *gate
@@ -193,7 +200,7 @@ func newManager(cfgPath, dataDir string, cfg Config) *Manager {
 		jobs: map[string]*Job{}, srcErr: map[string]string{}, srcNote: map[string]string{}, health: map[string]*sourceHealth{},
 		inputErrs: map[string]string{}, claimed: map[string]string{}, wakeCh: make(chan struct{}, 1),
 		searchGate: newGate(cfg.SearchWorkers), dlGate: newGate(cfg.MaxDownloads), deezer: newDeezer(),
-		bcMail: newBandcampMail(filepath.Join(dataDir, "bandcamp-emails.json"))}
+		bcMail: newBandcampMail(filepath.Join(dataDir, "bandcamp-emails.json")), shares: newSlskShares()}
 	m.bcMail.onLink = m.bandcampLinkArrived
 	for _, n := range allSources {
 		m.health[healthKey(n)] = &sourceHealth{}
@@ -278,6 +285,9 @@ func (m *Manager) setup() {
 	m.importInputs()
 	m.scanLibrary(false)
 	m.ready.Store(true)
+	if m.Soulseek() != nil {
+		m.shareFolders(m.Config(), false)
+	}
 	logf("Ready: %s", m.summaryLine())
 	m.wake()
 }
@@ -335,7 +345,12 @@ func (m *Manager) Stop() {
 	if m.torrent != nil {
 		m.torrent.Close()
 	}
+	slsk := m.slsk
+	m.slsk, m.slskSrc = nil, nil
 	m.srcMu.Unlock()
+	if slsk != nil {
+		slsk.Close()
+	}
 	if m.proxy != nil {
 		m.proxy.Close()
 	}
@@ -436,9 +451,9 @@ func (m *Manager) initialTarget(c Config) int {
 
 func sourcesChanged(a, b Config) bool {
 	ja, jb := fmt.Sprint(a.Sources, a.Torznab, a.Cookies, a.CookiesFromBrowser, a.YtDlpPath, a.VKToken,
-		a.YandexToken, a.Bandcamp, a.Format, a.TorrentTimeout, a.IndexerTimeout, a.YouTubePace, a.DirectInterface, a.Slskd),
+		a.YandexToken, a.Bandcamp, a.Format, a.TorrentTimeout, a.IndexerTimeout, a.YouTubePace, a.DirectInterface, a.Soulseek),
 		fmt.Sprint(b.Sources, b.Torznab, b.Cookies, b.CookiesFromBrowser, b.YtDlpPath, b.VKToken,
-			b.YandexToken, b.Bandcamp, b.Format, b.TorrentTimeout, b.IndexerTimeout, b.YouTubePace, b.DirectInterface, b.Slskd)
+			b.YandexToken, b.Bandcamp, b.Format, b.TorrentTimeout, b.IndexerTimeout, b.YouTubePace, b.DirectInterface, b.Soulseek)
 	return ja != jb
 }
 
@@ -461,8 +476,10 @@ func (m *Manager) rebuildSources() {
 	errs := map[string]string{}
 	var list []Source
 	m.setupTorrentIfNeeded(cfg)
+	m.setupSoulseek(cfg)
 	m.srcMu.RLock()
 	torrent, torErr := m.torrent, m.srcErr["torrent"]
+	slskSrc := m.slskSrc
 	bin := m.ytdlpBin
 	m.srcMu.RUnlock()
 	tools := *m.tools
@@ -526,12 +543,12 @@ func (m *Manager) rebuildSources() {
 			list = append(list, newYandex(cfg.YandexToken, route))
 		case "audius":
 			list = append(list, newAudius(route))
-		case "slskd":
-			if !cfg.Slskd.configured() {
-				errs[sc.Name] = "needs your slskd address and API key (Sources → Soulseek)"
+		case "soulseek":
+			if slskSrc == nil {
+				errs[sc.Name] = "needs your Soulseek username and password (Settings → Soulseek)"
 				continue
 			}
-			list = append(list, newSlskd(cfg.Slskd, cfg.Format, route))
+			list = append(list, slskSrc)
 		}
 	}
 	m.srcMu.Lock()
@@ -955,6 +972,11 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			}
 			accepted = keep
 		}
+		if len(accepted) > 1 && accepted[0].Cand.Pref > 0 {
+			// Every one of these fits the track; which can be had sooner matters more than a
+			// second's difference in length.
+			sort.SliceStable(accepted, func(i, j int) bool { return accepted[i].Cand.Pref < accepted[j].Cand.Pref })
+		}
 		debugf("%s / %s: %d accepted, %d rejected", t, name, len(accepted), len(rejected))
 		if len(accepted) == 0 {
 			note(label + ": " + describeRejection(rejected))
@@ -1133,6 +1155,9 @@ func (m *Manager) finish(j *Job, gen int, res result) {
 		j.mu.Unlock()
 	case res.state == JobDone:
 		j.state, j.rec, j.lastErr, j.rounds = JobDone, res.rec, "", 0
+		if p := res.rec.Path; p != "" && m.Soulseek() != nil {
+			go m.shares.add(p) // shared on Soulseek when the downloads folder is
+		}
 		j.mu.Unlock()
 	case res.state == JobWaiting && res.pendingOn != "":
 		j.state, j.lastErr, j.retryAt, j.pendingOn = JobWaiting, res.reason, res.retryAt, res.pendingOn
@@ -1718,6 +1743,15 @@ func (m *Manager) SourceStatus() []SourceStatus {
 		h := m.healthOf(sc.Name)
 		s := SourceStatus{Name: sc.Name, Label: sourceLabels[sc.Name], Route: normalizeRoute(sc.Route), Enabled: sc.Enabled,
 			Problem: m.srcErr[sc.Name], Note: m.srcNote[sc.Name], Paused: h.paused, Searches: h.searches, Found: h.found, Downloads: h.downloads, DlFails: h.dlFails}
+		if sc.Name == "soulseek" && sc.Enabled && s.Problem == "" && m.slsk != nil {
+			st := m.slsk.State()
+			switch {
+			case st.Connecting:
+				s.Note = "connecting to the Soulseek server"
+			case !st.Online:
+				s.Problem = firstNonEmpty(st.Problem, "offline")
+			}
+		}
 		if time.Now().Before(h.until) {
 			s.Until, s.Reason = h.until, h.reason
 		}

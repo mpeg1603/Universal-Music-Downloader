@@ -32,6 +32,9 @@ type Candidate struct {
 	// Unsearched: handed out without a search (found in another track's torrent). If it
 	// doesn't work out, the source is searched properly before it's given up on.
 	Unsearched bool
+	// Pref, when set (1 first), is the source's own order of preference among results that
+	// fit: Soulseek puts users who can send right away, and fast, first.
+	Pref int
 }
 
 var accentFolder = strings.NewReplacer(

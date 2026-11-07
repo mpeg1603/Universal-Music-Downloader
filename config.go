@@ -101,10 +101,10 @@ type Config struct {
 	TorrentTimeout Duration      `json:"torrent_timeout"`
 	IndexerTimeout Duration      `json:"indexer_timeout"`
 
-	VKToken     string      `json:"vk_token,omitempty"`
-	YandexToken string      `json:"yandex_token,omitempty"`
-	Bandcamp    BandcampCfg `json:"bandcamp"`
-	Slskd       SlskdConfig `json:"slskd"`
+	VKToken     string         `json:"vk_token,omitempty"`
+	YandexToken string         `json:"yandex_token,omitempty"`
+	Bandcamp    BandcampCfg    `json:"bandcamp"`
+	Soulseek    SoulseekConfig `json:"soulseek"`
 }
 
 // Duration is a time.Duration written as "30m" in JSON.
@@ -124,20 +124,20 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return err
 }
 
-var allSources = []string{"bandcamp", "archive", "yandex", "vk", "slskd", "audius", "youtube_music", "soundcloud", "youtube", "torrent"}
+var allSources = []string{"bandcamp", "archive", "yandex", "vk", "soulseek", "audius", "youtube_music", "soundcloud", "youtube", "torrent"}
 
 var sourceLabels = map[string]string{
 	"bandcamp": "Bandcamp", "archive": "Internet Archive", "youtube_music": "YouTube Music",
 	"soundcloud": "SoundCloud", "youtube": "YouTube", "torrent": "Torrent", "vk": "VK", "yandex": "Yandex Music",
-	"audius": "Audius", "slskd": "Soulseek",
+	"audius": "Audius", "soulseek": "Soulseek",
 }
 
 // Sources added in a later version go into your order before the first of these you have
 // (else at the end): Soulseek (often lossless) before torrents and the streaming sites,
 // Audius (MP3 320) before YouTube and SoundCloud.
 var newSourcePlace = map[string][]string{
-	"slskd":  {"torrent", "audius", "youtube_music", "youtube", "soundcloud"},
-	"audius": {"youtube_music", "youtube", "soundcloud"},
+	"soulseek": {"torrent", "audius", "youtube_music", "youtube", "soundcloud"},
+	"audius":   {"youtube_music", "youtube", "soundcloud"},
 }
 
 var sourceDefaultRoute = map[string]string{"vk": routeDirect, "yandex": routeDirect}
@@ -162,7 +162,7 @@ func defaultConfig() Config {
 		Bandcamp:       BandcampCfg{Country: "United States", Postcode: "10001"},
 	}
 	for _, n := range allSources {
-		enabled := n != "vk" && n != "yandex" && n != "torrent" && n != "slskd"
+		enabled := n != "vk" && n != "yandex" && n != "torrent" && n != "soulseek"
 		c.Sources = append(c.Sources, SourceCfg{Name: n, Enabled: enabled, Route: sourceDefaultRoute[n]})
 	}
 	return c
@@ -240,6 +240,11 @@ func (c *Config) fillDefaults() {
 	}
 	have := map[string]bool{}
 	var srcs []SourceCfg
+	for i := range c.Sources {
+		if c.Sources[i].Name == "slskd" { // Soulseek used to go through slskd; now it's built in
+			c.Sources[i].Name = "soulseek"
+		}
+	}
 	for _, s := range c.Sources {
 		if sourceLabels[s.Name] != "" && !have[s.Name] {
 			have[s.Name] = true
@@ -339,7 +344,7 @@ func (c *Config) validate() error {
 			return fmt.Errorf("%s: %w", sourceLabels[s.Name], err)
 		}
 	}
-	return nil
+	return c.Soulseek.validate()
 }
 
 // checkDataDir makes sure the app's own files (state, caches, temporary files) don't end up

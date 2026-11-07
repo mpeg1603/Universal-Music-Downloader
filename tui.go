@@ -21,7 +21,7 @@ import (
 
 var tabs = []struct{ name, title string }{
 	{"queue", "Queue"}, {"playlists", "Playlists"}, {"library", "Library"},
-	{"sources", "Sources"}, {"settings", "Settings"}, {"log", "Log"},
+	{"sources", "Sources"}, {"soulseek", "Soulseek"}, {"settings", "Settings"}, {"log", "Log"},
 }
 
 var queueFilters = []struct{ name, title string }{
@@ -65,8 +65,12 @@ type tui struct {
 	srcDetail *tview.TextView
 	srcs      []SourceStatus
 
+	// soulseek
+	sk *slskUI
+
 	// settings
-	settings *tview.Form
+	settings     *tview.Form
+	slskFieldIdx int // the first Soulseek field in the settings
 
 	// log
 	logView   *tview.TextView
@@ -113,6 +117,7 @@ func (ui *tui) build() {
 	ui.body.AddPage("playlists", ui.buildPlaylists(), true, false)
 	ui.body.AddPage("library", ui.buildLibrary(), true, false)
 	ui.body.AddPage("sources", ui.buildSources(), true, false)
+	ui.body.AddPage("soulseek", ui.buildSoulseek(), true, false)
 	ui.body.AddPage("settings", ui.buildSettings(), true, false)
 	ui.body.AddPage("log", ui.buildLog(), true, false)
 	main := tview.NewFlex().SetDirection(tview.FlexRow).
@@ -179,6 +184,8 @@ func (ui *tui) focusPage() {
 		ui.app.SetFocus(ui.libTable)
 	case "sources":
 		ui.app.SetFocus(ui.srcTable)
+	case "soulseek":
+		ui.focusSoulseek()
 	case "settings":
 		// On the Save button, so number keys still switch tabs; Tab/↑ go into the fields.
 		ui.settings.SetFocus(ui.settings.GetFormItemCount())
@@ -204,11 +211,11 @@ func (ui *tui) globalKeys(ev *tcell.EventKey) *tcell.EventKey {
 	if len(ui.modals) > 0 {
 		return ev
 	}
-	if k := ev.Key(); k >= tcell.KeyF1 && k <= tcell.KeyF6 {
+	if k := ev.Key(); k >= tcell.KeyF1 && k < tcell.KeyF1+tcell.Key(len(tabs)) {
 		ui.show(tabs[k-tcell.KeyF1].name)
 		return nil
 	}
-	if r := ev.Rune(); ev.Key() == tcell.KeyRune && ev.Modifiers()&tcell.ModAlt != 0 && r >= '1' && r <= '6' {
+	if r := ev.Rune(); ev.Key() == tcell.KeyRune && ev.Modifiers()&tcell.ModAlt != 0 && r >= '1' && r < '1'+rune(len(tabs)) {
 		ui.show(tabs[r-'1'].name)
 		return nil
 	}
@@ -216,7 +223,7 @@ func (ui *tui) globalKeys(ev *tcell.EventKey) *tcell.EventKey {
 		return ev
 	}
 	switch r := ev.Rune(); {
-	case r >= '1' && r <= '6':
+	case r >= '1' && r < '1'+rune(len(tabs)):
 		ui.show(tabs[r-'1'].name)
 		return nil
 	case r == 'q':
@@ -574,8 +581,16 @@ func (ui *tui) refresh() {
 	ui.header.SetText(line1 + "\n" + line2)
 
 	var tb strings.Builder
+	unread := 0
+	if c := ui.m.Soulseek(); c != nil {
+		unread = c.chat.Unread()
+	}
 	for i, t := range tabs {
-		fmt.Fprintf(&tb, ` ["%s"][::b]%d[::-] %s[""] `, t.name, i+1, t.title)
+		title := t.title
+		if t.name == "soulseek" && unread > 0 {
+			title += fmt.Sprintf(" [yellow](%d)[-]", unread)
+		}
+		fmt.Fprintf(&tb, ` ["%s"][::b]%d[::-] %s[""] `, t.name, i+1, title)
 	}
 	ui.tabBar.SetText(tb.String())
 	ui.tabBar.Highlight(ui.current)
@@ -589,6 +604,8 @@ func (ui *tui) refresh() {
 		ui.refreshLibrary()
 	case "sources":
 		ui.refreshSources()
+	case "soulseek":
+		ui.refreshSoulseek()
 	case "log":
 		ui.refreshLog()
 	}
@@ -596,12 +613,13 @@ func (ui *tui) refresh() {
 }
 
 func (ui *tui) footerText() string {
-	common := "  [::d]1-6/Alt+1-6/F1-F6 tabs · [ ] bandwidth −/+ · P pause all · q quit[::-]"
+	common := "  [::d]1-7/Alt+1-7/F1-F7 tabs · [ ] bandwidth −/+ · P pause all · q quit[::-]"
 	hints := map[string]string{
 		"queue":     " [::b]Enter[::-] details  [::b]c[::-] cancel  [::b]r[::-] restart  [::b]p[::-] do next  [::b]R[::-] retry all failed  [::b]f[::-] filter  [::b]/[::-] search  [::b]o[::-] sort",
 		"playlists": " [::b]a[::-] add file/link  [::b]d[::-] remove  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]Enter[::-] show tracks  [::b]Tab[::-] switch list  [::b]R[::-] re-read",
 		"library":   " [::b]a[::-] add folder  [::b]d[::-] remove  [::b]s[::-] rescan  [::b]t[::-] quality threshold",
 		"sources":   " [::b]space[::-] on/off  [::b]K J[::-] move up/down  [::b]Enter[::-] settings  [::b]e[::-] route  [::b]p[::-] pause/resume  [::b]b[::-] paste Bandcamp links",
+		"soulseek":  " [::b]Tab[::-] transfers/chats/message  [::b]n[::-] message someone  [::b]j[::-] join a room  [::b]l[::-] leave/close chat  [::b]m[::-] message user  [::b]x[::-] stop upload  [::b]B[::-] ban  [::b]o[::-] port check  [::b]R[::-] reconnect",
 		"settings":  " [::b]Tab ↑ ↓[::-] move between fields  [::b]Esc[::-] leave a field  Save applies the changes right away",
 		"log":       " [::b]↑ ↓ PgUp PgDn[::-] scroll  [::b]End[::-] follow  [::b]v[::-] details " + onOff(verbose),
 	}
@@ -1385,7 +1403,7 @@ var sourceHelp = map[string]string{
 	"youtube":       "Regular YouTube uploads (Opus ~130 kbps). Shares the bot-check pause and cookies with YouTube Music.",
 	"torrent":       "Your Jackett or Prowlarr indexers, downloaded with aria2c (only the file needed). Indexers that keep failing are left out for a while instead of slowing every search.",
 	"audius":        "Audius, an open platform where artists upload their own music (much independent electronic music). Full tracks as MP3 320; no account needed. Tracks for paying fans only are left out.",
-	"slskd":         "Soulseek, through your own slskd (github.com/slskd/slskd), which runs the Soulseek client with your account: people share their music folders, often in FLAC. Needs slskd's address, an API key and its downloads folder (Enter). Files stay in slskd's downloads folder too. Its speed isn't counted against the bandwidth setting: set slskd's own limit.",
+	"soulseek":      "Soulseek, a file-sharing network where people share their music folders, often in FLAC. The client is built in: it needs only your Soulseek account (Enter: Settings → Soulseek; a new name and password make a new account). Searches are paced and only a few files are requested at once, as the network asks. While it's on you share your library (see the Soulseek tab), chat and keep a wishlist: tracks no source had are searched for again now and then.",
 }
 
 func (ui *tui) refreshSourceDetail() {
@@ -1520,6 +1538,12 @@ func (ui *tui) sourceSettings() {
 		ui.bandcampSettings(c.Bandcamp, normalizeRoute(c.source(name).Route))
 		return
 	}
+	if name == "soulseek" { // its settings are many: they're in the Settings tab
+		ui.show("settings")
+		ui.settings.SetFocus(ui.slskFieldIdx + 1)
+		ui.app.SetFocus(ui.settings)
+		return
+	}
 	form := tview.NewForm()
 	close := func() { ui.closeModal("srcsettings") }
 	var apply []func(*Config)
@@ -1586,13 +1610,6 @@ func (ui *tui) sourceSettings() {
 		secret("Token", c.VKToken, func(c *Config, v string) { c.VKToken = v })
 		form.AddButton("Log in to get a token…", func() { close(); ui.vkLogin() })
 		height = 11
-	case "slskd":
-		text("slskd address", firstNonEmpty(c.Slskd.URL, "http://localhost:5030"), 50, func(c *Config, v string) { c.Slskd.URL = v })
-		secret("API key", c.Slskd.APIKey, func(c *Config, v string) { c.Slskd.APIKey = v })
-		text("slskd's downloads folder", firstNonEmpty(c.Slskd.Downloads, defaultSlskdDownloads()), 60, func(c *Config, v string) { c.Slskd.Downloads = v })
-		form.AddTextView("", "In slskd.yml: web → authentication → api_keys → a key (16+ characters) with role readwrite; the "+
-			"downloads folder is directories → downloads (default ~/.local/share/slskd/downloads).", 0, 3, false, false)
-		height = 16
 	case "yandex":
 		secret("OAuth token", c.YandexToken, func(c *Config, v string) { c.YandexToken = v })
 		form.AddTextView("How to get it", "Open "+yandexTokenURL+" in your browser, log in, then copy the access_token=… value from the address bar.", 0, 4, false, false)
@@ -1837,7 +1854,7 @@ func (ui *tui) vkLogin() {
 // --- settings ---------------------------------------------------------------------------------
 
 func (ui *tui) buildSettings() tview.Primitive {
-	ui.settings = tview.NewForm()
+	ui.settings = tview.NewForm().SetItemPadding(0)
 	ui.settings.SetBorder(true).SetTitle(" Settings ")
 	ui.settings.SetCancelFunc(func() { // Esc leaves the field
 		ui.settings.SetFocus(ui.settings.GetFormItemCount())
@@ -1902,6 +1919,7 @@ func (ui *tui) fillSettings() {
 	if d, err := detectPhysicalInterface(); err == nil {
 		iface.SetPlaceholder(d)
 	}
+	ui.slskSettings(c, &apply, text, number)
 	f.AddButton("Save", func() {
 		trial := ui.m.Config() // check every field first, so nothing is saved half-way
 		for _, a := range apply {
@@ -1923,6 +1941,104 @@ func (ui *tui) fillSettings() {
 		ui.message("Settings", "Saved and applied.")
 	})
 	f.AddButton("Undo changes", func() { ui.fillSettings() })
+	f.AddButton("Import Soulseek settings from Nicotine+", ui.importNicotine)
+}
+
+// slskSettings adds the Soulseek settings to the settings form.
+func (ui *tui) slskSettings(c Config, apply *[]func(*Config) error, text func(string, string, int, func(*Config, string) error) *tview.InputField,
+	number func(string, float64, int, func(*Config, float64))) {
+	f := ui.settings
+	sk := c.Soulseek
+	ui.slskFieldIdx = f.GetFormItemCount()
+	f.AddTextView("[::b]Soulseek[::-]", "your account, sharing and limits (turn the source on in the Sources tab)", 0, 1, true, false)
+	text("Soulseek username", sk.Username, 30, func(c *Config, s string) error { c.Soulseek.Username = s; return nil })
+	pass := sk.Password
+	f.AddPasswordField("Soulseek password", sk.Password, 30, '*', func(t string) { pass = t })
+	*apply = append(*apply, func(c *Config) error { c.Soulseek.Password = pass; return nil })
+	text("Soulseek server", sk.server(), 30, func(c *Config, s string) error {
+		if s == slskDefaultServer {
+			s = ""
+		}
+		c.Soulseek.Server = s
+		return nil
+	})
+	number("Listening port", float64(sk.port()), 6, func(c *Config, v float64) {
+		c.Soulseek.Port = int(v)
+		if c.Soulseek.Port == slskDefaultPort {
+			c.Soulseek.Port = 0
+		}
+	})
+	upnp := !sk.NoUPnP
+	f.AddCheckbox("Ask the router to forward the port (UPnP)", upnp, func(b bool) { upnp = b })
+	*apply = append(*apply, func(c *Config) error { c.Soulseek.NoUPnP = !upnp; return nil })
+	number("Soulseek downloads at once (1-4)", float64(sk.downloads()), 3, func(c *Config, v float64) { c.Soulseek.Downloads = int(v) })
+	number("Seconds between Soulseek searches (3 or more)", sk.searchGap().Seconds(), 5, func(c *Config, v float64) { c.Soulseek.SearchGap = v })
+	text("Give up waiting in a user's queue after", fmtDurationShort(sk.queueWait()), 8, func(c *Config, s string) error {
+		d, err := time.ParseDuration(s)
+		if err != nil || d < time.Minute {
+			return fmt.Errorf("give up waiting in a user's queue after: a duration like 5m (at least 1m)")
+		}
+		c.Soulseek.QueueWait = Duration(d)
+		return nil
+	})
+	share := !sk.NoShare
+	f.AddCheckbox("Share files", share, func(b bool) { share = b })
+	*apply = append(*apply, func(c *Config) error { c.Soulseek.NoShare = !share; return nil })
+	shares := text("Shared folders (; between them; empty: library + downloads)", strings.Join(sk.Shares, "; "), 70, func(c *Config, s string) error {
+		c.Soulseek.Shares = splitBy(s, ";")
+		return nil
+	})
+	var defaults []string
+	for _, r := range c.shareRoots() {
+		defaults = append(defaults, r.Path)
+	}
+	if len(sk.Shares) == 0 {
+		shares.SetPlaceholder(strings.Join(defaults, "; "))
+	}
+	number("Upload slots", float64(sk.uploadSlots()), 3, func(c *Config, v float64) { c.Soulseek.UploadSlots = int(v) })
+	number("Upload speed limit, KB/s (0: none)", float64(sk.UploadKBps), 7, func(c *Config, v float64) { c.Soulseek.UploadKBps = int(v) })
+	number("Queue limit per user, files", float64(sk.queueFiles()), 6, func(c *Config, v float64) { c.Soulseek.QueueFiles = int(v) })
+	number("Queue limit per user, MB", float64(sk.queueMB()), 7, func(c *Config, v float64) { c.Soulseek.QueueMB = int(v) })
+	text("Banned users (comma-separated)", strings.Join(sk.Banned, ", "), 60, func(c *Config, s string) error {
+		c.Soulseek.Banned = splitList(s)
+		return nil
+	})
+	text("Chat rooms to join (comma-separated)", strings.Join(sk.Rooms, ", "), 60, func(c *Config, s string) error {
+		c.Soulseek.Rooms = splitList(s)
+		return nil
+	})
+	text("Description others see", sk.Description, 60, func(c *Config, s string) error { c.Soulseek.Description = s; return nil })
+}
+
+func fmtDurationShort(d time.Duration) string {
+	s := d.String()
+	s = strings.TrimSuffix(s, "0s")
+	return strings.TrimSuffix(s, "0m")
+}
+
+// importNicotine copies the account, port, shared folders and limits from Nicotine+.
+func (ui *tui) importNicotine() {
+	cur := ui.m.Config().Soulseek
+	got, err := importNicotine(cur)
+	if err != nil {
+		ui.message("Nicotine+", err.Error())
+		return
+	}
+	if !ui.update(func(c *Config) {
+		c.Soulseek = got
+		if got.configured() {
+			c.setSource("soulseek", true)
+		}
+	}) {
+		return
+	}
+	ui.fillSettings()
+	shares := "your library and downloads folders"
+	if len(got.Shares) > 0 {
+		shares = strings.Join(got.Shares, "; ")
+	}
+	ui.message("Imported from Nicotine+", fmt.Sprintf("Account %s, port %d, sharing %s, %d upload slots. The Soulseek source is on.\n\n"+
+		"Don't run Nicotine+ with the same account at the same time: each logs the other out.", got.Username, got.port(), shares, got.uploadSlots()))
 }
 
 // --- log ------------------------------------------------------------------------------------

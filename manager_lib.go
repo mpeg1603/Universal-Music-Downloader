@@ -277,6 +277,9 @@ func (m *Manager) scanLibrary(announce bool) {
 	}
 	logf("%s", msg)
 	m.reevaluateLibrary()
+	if m.Soulseek() != nil {
+		m.shareFolders(m.Config(), true) // the shared files' details come from the scan
+	}
 }
 
 // Rescan scans the library again (in the background).

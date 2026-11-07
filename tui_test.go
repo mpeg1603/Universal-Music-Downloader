@@ -88,10 +88,11 @@ func TestTUIPages(t *testing.T) {
 		'2': {"Playlist files", "/tmp/playlists.csv", "Liked Songs"},
 		'3': {"Good enough quality", "No library folders yet"},
 		'4': {"Sources, tried top to bottom", "Bandcamp", "Yandex Music", "direct"},
-		'5': {"Downloads folder", "Bandwidth target", "Save"},
-		'6': {"Log"},
+		'5': {"Soulseek is off", "Settings → Soulseek", "Chats"},
+		'6': {"Downloads folder", "Bandwidth target", "Soulseek username", "Upload slots", "Save", "Import Soulseek settings from Nicotine+"},
+		'7': {"Log"},
 	}
-	for _, k := range []rune{'2', '3', '4', '5', '6'} {
+	for _, k := range []rune{'2', '3', '4', '5', '6', '7'} {
 		key(k)
 		text = show()
 		for _, want := range pages[k] {
@@ -101,7 +102,7 @@ func TestTUIPages(t *testing.T) {
 		}
 	}
 	// Bandwidth keys work anywhere outside text fields.
-	key('6')
+	key('7')
 	key(']')
 	key(']')
 	time.Sleep(100 * time.Millisecond)
