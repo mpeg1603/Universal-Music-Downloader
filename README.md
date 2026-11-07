@@ -79,36 +79,68 @@ separately ("Searches at once"), ahead of the downloads, so they never sit idle.
 ## Getting started
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader .
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader ./cmd/spotify-downloader
 ./spotify-downloader
 ```
 
-1. **Playlists** tab (`2`): `a` adds a playlist file. Any of:
+1. **Search** tab (`2`): type what you want in **Find** (`/`), or `a` adds a playlist file. Files
+   can be:
    - CSV files from [Exportify](https://exportify.net), TuneMyMusic and similar tools (a file, a
      folder of them, or a zip);
    - Spotify's own data export (spotify.com → Account → Privacy → Download your data → *Account
      data*), as the zip; it includes Liked Songs;
-   - a text file with one `Artist - Title` per line;
+   - a plain-text list of tracks, albums and artists (see *Finding music* below);
    - a public Spotify playlist or album link (only its first 100 tracks).
 2. **Library** tab (`3`): `a` adds your music folders; `t` sets the quality threshold.
-3. **Settings** tab (`5`): the downloads folder (default `~/Music/SpotifyDownloads`), format,
+3. **Settings** tab (`6`): the downloads folder (default `~/Music/SpotifyDownloads`), format,
    bandwidth. **Save** applies them.
 4. Watch the **Queue** tab (`1`).
+
+## Finding music: by name, and plain-text lists
+
+In the Search tab, **Find** takes what you'd say: `Artist - Title`, `Title - Artist`,
+`Artist - Album`, or just `Artist`. It's looked up in Deezer's catalog (free, no account) and
+the results are listed best first: tracks, albums and artists. `Enter` on one adds it to the
+queue, ahead of everything else:
+
+- a **track**: that song;
+- an **album**: all its tracks;
+- an **artist**: the whole discography: albums, EPs and singles, each song once (the album's
+  version rather than the single's or a reissue's; compilations and other artists' songs on
+  splits are left out). You're asked first.
+
+Each addition becomes a playlist of its own (`Search: Artist - Album`) in the Playlists list,
+so it can be turned off, given a priority, or removed again (`d`; files already downloaded
+stay). To be sure which is meant, start with `track:`, `album:` or `artist:`.
+
+**Plain-text lists** (`.txt`, added with `a`) take one of those per line: `Artist - Title`,
+`Title - Artist`, `album: Artist - Album`, `Artist` (the discography); `#` starts a comment.
+Each line is looked up the same way (the answers are kept for a month, so a list isn't looked
+up again on every start); a line nothing fits is read as `Artist - Title`. Without a
+connection to Deezer the lines are read as `Artist - Title`.
 
 ## The app
 
 | Tab | What's there | Keys |
 |---|---|---|
-| `1` Queue | every track: state, progress, speed, quality | `Enter` details (every source tried and why it didn't work), `c` cancel, `r` restart (search again from the first source; for a downloaded or in-library track, download again), `p` do next, `R` retry everything not found, `f` filter, `/` search, `o` sort |
-| `2` Playlists | your playlist files, and the playlists in them | `a` add, `d` remove, `space` on/off, `+` `-` priority (higher goes first), `Enter` show its tracks, `R` read the files again |
+| `1` Queue | every track: state, progress, speed, quality | `Enter` details (every source tried and why it didn't work), `c` cancel, `r` restart (search again from the first source; for a downloaded or in-library track, download again), `p` do next, `R` retry everything not found, `f` filter, `o` sort, `O` reverse the order, `/` find in the queue, `Esc` show everything |
+| `2` Search | find music by name; your playlist files, and the playlists in them | `/` find, `Enter` add a result (or show a playlist's tracks), `Tab` next list, `a` add a file, `d` remove, `space` on/off, `+` `-` priority (higher goes first), `R` read the files again |
 | `3` Library | library folders, scan status, threshold | `a` add folder (suggestions show as you type: `↑` `↓` pick, `Tab` completes, `Enter` accepts, `Esc` closes), `d` remove, `s` rescan, `t` threshold |
-| `4` Sources | the sources in order, their route, state and counts; torrent indexers | `space` on/off, `K` `J` move up/down, `Enter` settings (tokens, cookies, email, Jackett), `e` route, `p` pause/resume, `b` paste Bandcamp download links |
-| `5` Soulseek | the connection, what you share, transfers both ways, chat (private and rooms) | `Tab` transfers → chats → message line, `n` message someone, `j` join a room, `l` leave a room / close a chat, `m` message a transfer's user, `x` stop an upload, `B` ban a user, `o` check your port, `R` reconnect |
-| `6` Settings | downloads folder, format, layout, threshold, bandwidth, parallel downloads and searches; Soulseek account, sharing and limits | `Tab`/arrows move, `Esc` leaves a field, **Save** applies |
+| `4` Sources | the sources in order, their route, state and counts; torrent indexers | `space` on/off, `K` `J` move up/down, `Enter` settings (route, tokens, cookies, email, Jackett, the Soulseek account), `e` route, `p` pause/resume, `b` paste Bandcamp download links |
+| `5` Soulseek | the connection and what you share; searching Soulseek by hand; transfers both ways; chat (private and rooms) | `/` search, `Enter` download the file, `d` download its whole folder, `Tab` next pane, `n` message someone, `j` join a room, `l` leave a room / close a chat, `m` message a user, `x` stop an upload, `B` ban a user, `o` check your port, `R` reconnect |
+| `6` Settings | downloads folder, format, layout, threshold, bandwidth, parallel downloads and searches | `Tab`/arrows move, `Esc` leaves a field, **Save** applies |
 | `7` Log | what happened | `v` detailed log, `End` follow |
 
 Anywhere: `1`–`7` (or `Alt+1`–`7`, `F1`–`F7`) switch tabs, `[` `]` lower/raise the bandwidth,
 `P` pauses/resumes everything, `q` quits.
+
+**Queue filters and sorting.** `f` lists what can be shown, with how many tracks each:
+everything, to do, in progress, queued, moved to the front, to be retried, downloaded,
+downloaded lossless or lossy, downloaded to replace a worse library copy, in your library,
+in your library below the threshold, not found, cancelled, added from the Search tab, and
+downloaded from each source. `o` sorts by playlist order, state, artist, title, album, length,
+quality, source, progress, priority or when it finished; `O` reverses the order. `/` narrows
+it to tracks whose artist, title or album contains what you type; `Esc` shows everything again.
 
 **Pause** (`P`) stops everything right away: searches and downloads in progress are stopped and
 go back to the front of the queue (they continue from the source they were at), torrents are
@@ -160,14 +192,16 @@ no connection to Spotify.
 
 ## Routes: VPN or direct, per source
 
-Each source has a route (`e` in the Sources tab):
+Each source has a route (`e` in the Sources tab, or the top of its settings): pick the type,
+and for a proxy fill in its address, port and (if it needs one) its login.
 
 - **system**: your system's routing (with a VPN on, through the VPN);
 - **direct**: bound to your physical network interface (Wi-Fi/Ethernet), bypassing the VPN's
   tunnel. Detected automatically (the interface whose default route has a gateway), or set in
   Settings. Done per connection inside the app (`SO_BINDTODEVICE` on Linux, no root needed);
   your system's routes, DNS and VPN settings aren't touched;
-- a **proxy**: `socks5://user:pass@host:port` or `http://host:port`.
+- a **SOCKS5** or **HTTP proxy**: address (host name or IP), port, and optionally a user and
+  password. (The settings file keeps it as `socks5://user:pass@host:port`.)
 
 Yandex Music and VK default to **direct**, since they need a Russian address.
 
@@ -175,9 +209,10 @@ Yandex Music and VK default to **direct**, since they need a Russian address.
 
 Soulseek is a file-sharing network for music (people share their music folders, often in
 FLAC). The client is built into the app; nothing else needs to be installed. It needs your
-Soulseek account: Settings (`6`) → **Soulseek username** and **password** (a name nobody uses
-yet makes a new account on first login; there's no way to reset a forgotten password, so
-keep it). If you use Nicotine+, **Import Soulseek settings from Nicotine+** copies its account,
+Soulseek account: Sources (`4`) → Soulseek → `Enter` → **Username** and **Password** (a name
+nobody uses yet makes a new account on first login; there's no way to reset a forgotten
+password, so keep it). The same window holds the route, port, limits, sharing and chat
+rooms. If you use Nicotine+, **Import from Nicotine+** copies its account,
 port, shared folders and upload limits (Nicotine+'s files are only read). Then turn the
 Soulseek source on in the Sources tab (`space`). Don't run another Soulseek client with the
 same account at the same time: each logs the other out (the app then stays offline until you
@@ -215,6 +250,12 @@ wishlist: the server lets each client search for one wishlist item every 12 minu
 privileged users), and the app does, in turn; when something fits, the track is tried on
 Soulseek again. The Soulseek tab shows private messages (the tab title counts unread ones) and
 chat rooms; rooms you join are joined again next time.
+
+**Searching by hand.** The Soulseek tab's search (`/`) lists the files others share, users who
+can send right away first, with size, quality and length. `Enter` downloads a file, `d` the
+whole folder it's in (its subfolders too). These go to the downloads folder under `Soulseek/`
+as they are (not renamed or tagged), wait their turn with the other Soulseek downloads, and
+show in the Transfers list.
 
 The client speaks the protocol as documented by Nicotine+ (doc/SLSKPROTOCOL.md) and logs in
 as an experimental client (major version 177), as new clients are asked to.
@@ -318,7 +359,15 @@ setup or scripts). `--config FILE` and `--data DIR` use another settings file an
 You need Go 1.22 or newer.
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader .
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o spotify-downloader.exe .
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader ./cmd/spotify-downloader
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o spotify-downloader.exe ./cmd/spotify-downloader
 go test ./...      # needs ffmpeg; the torrent tests also use aria2c if installed
 ```
+
+The code is in three parts:
+
+- `internal/core`: the backend: playlists, library, sources, Soulseek, the queue, settings.
+  Frontends use it only through `core.Backend` (`internal/core/api.go`): methods and the
+  plain views they return.
+- `internal/tui`: the terminal app, one file per tab.
+- `cmd/spotify-downloader`: the program: options, the headless mode, and starting the app.

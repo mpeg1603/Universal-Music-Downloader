@@ -1,0 +1,448 @@
+package core
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+const userAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
+
+// SourceError is an expected failure; its message ends up in the failure report.
+// Unavailable marks network trouble, so the track is tried again later. Blocked means the
+// site refuses us for now (bot check, rate limit, captcha): the source pauses for a while.
+type SourceError struct {
+	Msg         string
+	Unavailable bool
+	Blocked     bool
+	// Pending: the source has the track but waits for something from you (such as Bandcamp's
+	// emailed link); the track waits too, instead of being taken from a worse source.
+	Pending bool
+	Retry   time.Duration // for Pending: when to look again (unless woken earlier)
+}
+
+func (e *SourceError) Error() string { return e.Msg }
+
+func failf(format string, args ...any) error {
+	return &SourceError{Msg: fmt.Sprintf(format, args...)}
+}
+
+func unavailablef(format string, args ...any) error {
+	return &SourceError{Msg: fmt.Sprintf(format, args...), Unavailable: true}
+}
+
+func blockedf(format string, args ...any) error {
+	return &SourceError{Msg: fmt.Sprintf(format, args...), Unavailable: true, Blocked: true}
+}
+
+func isUnavailable(err error) bool {
+	var se *SourceError
+	return errors.As(err, &se) && se.Unavailable
+}
+
+func pendingf(retry time.Duration, format string, args ...any) error {
+	return &SourceError{Msg: fmt.Sprintf(format, args...), Pending: true, Retry: retry}
+}
+
+func isPending(err error) (time.Duration, bool) {
+	var se *SourceError
+	if errors.As(err, &se) && se.Pending {
+		return se.Retry, true
+	}
+	return 0, false
+}
+
+func isBlocked(err error) bool {
+	var se *SourceError
+	return errors.As(err, &se) && se.Blocked
+}
+
+// isChallenge recognizes the "checking your browser" pages bot protection serves instead of
+// the real page. This program doesn't try to get past them; the source just pauses.
+func isChallenge(body []byte) bool {
+	head := body[:min(len(body), 4096)]
+	for _, s := range []string{"<title>Client Challenge</title>", "/_fs-ch-", "<title>Just a moment...</title>", "cf-chl-", "captcha-delivery.com"} {
+		if bytes.Contains(head, []byte(s)) {
+			return true
+		}
+	}
+	return false
+}
+
+func describeNetErr(err error) string {
+	var netErr net.Error
+	var tlsErr *tls.RecordHeaderError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "timed out"
+	case errors.As(err, &tlsErr), strings.Contains(err.Error(), "tls:"):
+		return "TLS connection failed"
+	default:
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			return "DNS lookup failed"
+		}
+		return "connection failed"
+	}
+}
+
+// rateLimiter spaces requests at least `interval` apart across goroutines. With a max set,
+// it adapts: each "slow down" (HTTP 429) doubles the interval, up to max; a run of answers
+// without one brings it back down to base, a step at a time.
+type rateLimiter struct {
+	mu       sync.Mutex
+	interval time.Duration
+	base     time.Duration
+	max      time.Duration // 0: fixed interval
+	next     time.Time
+	okRun    int
+	slowedAt time.Time
+}
+
+func newAdaptiveLimiter(base, max time.Duration) *rateLimiter {
+	return &rateLimiter{interval: base, base: base, max: max}
+}
+
+// slowDown is called when the site says we're too fast. The answers to requests already
+// under way at the time say it too; only one per interval counts.
+func (r *rateLimiter) slowDown() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.max <= 0 {
+		return
+	}
+	r.okRun = 0
+	if time.Since(r.slowedAt) < max(r.interval, time.Second) {
+		return
+	}
+	r.slowedAt = time.Now()
+	r.interval = min(max(2*r.interval, time.Second), r.max)
+	debugf("rate limit: now %s between requests", r.interval)
+}
+
+// ok is called for each answer that wasn't a "slow down".
+func (r *rateLimiter) ok() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.max <= 0 || r.interval <= r.base {
+		return
+	}
+	if r.okRun++; r.okRun >= 20 {
+		r.okRun = 0
+		r.interval = max(r.base, r.interval*4/5)
+	}
+}
+
+// backlog is how long a request made now would wait for its turn.
+func (r *rateLimiter) backlog() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return max(0, time.Until(r.next))
+}
+
+func (r *rateLimiter) wait(ctx context.Context) error {
+	r.mu.Lock()
+	if r.interval <= 0 {
+		r.mu.Unlock()
+		return nil
+	}
+	now := time.Now()
+	start := r.next
+	if start.Before(now) {
+		start = now
+	}
+	r.next = start.Add(r.interval)
+	r.mu.Unlock()
+	select {
+	case <-time.After(time.Until(start)):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type HTTP struct {
+	Name    string
+	client  *http.Client
+	limiter *rateLimiter
+	retries int
+	timeout time.Duration // per attempt
+	ua      string
+}
+
+func newHTTP(name string, interval time.Duration) *HTTP {
+	return newRoutedHTTP(name, interval, RouteSystem)
+}
+
+// newRoutedHTTP makes a client whose connections take route (see netroute.go).
+func newRoutedHTTP(name string, interval time.Duration, route string) *HTTP {
+	return &HTTP{
+		Name:    name,
+		client:  &http.Client{Transport: router.Transport(route)},
+		limiter: &rateLimiter{interval: interval},
+		retries: 4,
+		timeout: 90 * time.Second,
+		ua:      userAgent,
+	}
+}
+
+type request struct {
+	method  string
+	url     string
+	body    []byte
+	headers map[string]string
+}
+
+// do sends a request and returns the whole body, retrying network errors, 429 and 5xx.
+func (h *HTTP) do(ctx context.Context, req request) (int, []byte, error) {
+	if req.method == "" {
+		req.method = "GET"
+	}
+	for attempt := 0; ; attempt++ {
+		if err := h.limiter.wait(ctx); err != nil {
+			return 0, nil, err
+		}
+		rctx, cancel := context.WithTimeout(ctx, h.timeout)
+		r, err := http.NewRequestWithContext(rctx, req.method, req.url, bytes.NewReader(req.body))
+		if err != nil {
+			cancel()
+			return 0, nil, err
+		}
+		r.Header.Set("User-Agent", h.ua)
+		for k, v := range req.headers {
+			r.Header.Set(k, v)
+		}
+		resp, err := h.client.Do(r)
+		var body []byte
+		if err == nil {
+			body, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		cancel()
+		if err == nil && resp.StatusCode == 429 {
+			h.limiter.slowDown()
+		} else if err == nil {
+			h.limiter.ok()
+		}
+		retryable := err != nil || resp.StatusCode == 429 || resp.StatusCode >= 500
+		if !retryable {
+			return resp.StatusCode, body, nil
+		}
+		if ctx.Err() != nil {
+			return 0, nil, ctx.Err()
+		}
+		if attempt >= h.retries-1 {
+			if err != nil {
+				return 0, nil, unavailablef("%s unreachable (%s)", h.Name, describeNetErr(err))
+			}
+			if resp.StatusCode == 429 {
+				return 0, nil, blockedf("%s is rate-limiting us (HTTP 429)", h.Name)
+			}
+			return 0, nil, unavailablef("%s answered HTTP %d", h.Name, resp.StatusCode)
+		}
+		delay := time.Duration(1<<attempt) * time.Second
+		if err == nil {
+			if s, perr := strconv.Atoi(resp.Header.Get("Retry-After")); perr == nil {
+				delay = min(time.Duration(s)*time.Second, 2*time.Minute)
+			}
+		}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		}
+	}
+}
+
+func (h *HTTP) get(ctx context.Context, u string) (int, []byte, error) {
+	return h.do(ctx, request{url: u})
+}
+
+func (h *HTTP) getJSON(ctx context.Context, u string, out any) error {
+	status, body, err := h.get(ctx, u)
+	if err != nil {
+		return err
+	}
+	if isChallenge(body) {
+		return blockedf("%s is showing its bot check page to this connection", h.Name)
+	}
+	if status != 200 {
+		return failf("%s answered HTTP %d", h.Name, status)
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return failf("%s sent an unreadable answer", h.Name)
+	}
+	return nil
+}
+
+func (h *HTTP) postJSON(ctx context.Context, u string, payload any, headers map[string]string, out any) error {
+	body, _ := json.Marshal(payload)
+	hdr := map[string]string{"Content-Type": "application/json"}
+	for k, v := range headers {
+		hdr[k] = v
+	}
+	status, resp, err := h.do(ctx, request{method: "POST", url: u, body: body, headers: hdr})
+	if err != nil {
+		return err
+	}
+	if isChallenge(resp) {
+		return blockedf("%s is showing its bot check page to this connection", h.Name)
+	}
+	if status != 200 {
+		return failf("%s answered HTTP %d", h.Name, status)
+	}
+	if err := json.Unmarshal(resp, out); err != nil {
+		return failf("%s sent an unreadable answer", h.Name)
+	}
+	return nil
+}
+
+// download streams url into dir/<stem><ext>, taking the extension from the response.
+func (h *HTTP) download(ctx context.Context, u, dir, stem string) (string, error) {
+	for attempt := 0; ; attempt++ {
+		if err := h.limiter.wait(ctx); err != nil {
+			return "", err
+		}
+		p, err := h.downloadOnce(ctx, u, dir, stem)
+		if err == nil || !isUnavailable(err) || ctx.Err() != nil || attempt == h.retries-1 {
+			return p, err
+		}
+		time.Sleep(time.Duration(1<<attempt) * time.Second)
+	}
+}
+
+func (h *HTTP) downloadOnce(ctx context.Context, u, dir, stem string) (string, error) {
+	r, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return "", err
+	}
+	r.Header.Set("User-Agent", h.ua)
+	resp, err := h.client.Do(r)
+	if err != nil {
+		return "", unavailablef("%s download failed (%s)", h.Name, describeNetErr(err))
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == 403 || resp.StatusCode == 404 || resp.StatusCode == 410:
+		return "", failf("%s refused the download (HTTP %d)", h.Name, resp.StatusCode)
+	case resp.StatusCode != 200:
+		return "", unavailablef("%s download failed (HTTP %d)", h.Name, resp.StatusCode)
+	}
+	dest := filepath.Join(dir, stem+extensionFor(resp, u))
+	part := dest + ".part"
+	f, err := os.Create(part)
+	if err != nil {
+		return "", err
+	}
+	var body io.Reader = bw.Reader(ctx, resp.Body)
+	if task := taskFrom(ctx); task != nil {
+		body = &countingReader{r: body, task: task, total: max(resp.ContentLength, 0)}
+	}
+	_, err = io.Copy(f, body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(part)
+		return "", unavailablef("%s download broke off (%s)", h.Name, describeNetErr(err))
+	}
+	return dest, os.Rename(part, dest)
+}
+
+// countingReader reports download progress to a task.
+type countingReader struct {
+	r           io.Reader
+	task        *Task
+	done, total int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.done += int64(n)
+	c.task.setProgress(c.done, c.total)
+	return n, err
+}
+
+var reFilename = regexp.MustCompile(`filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?`)
+
+func extensionFor(resp *http.Response, u string) string {
+	name := ""
+	if m := reFilename.FindStringSubmatch(resp.Header.Get("Content-Disposition")); m != nil {
+		name = m[1] + m[2]
+		if n, err := url.PathUnescape(name); err == nil {
+			name = n
+		}
+	} else if pu, err := url.Parse(u); err == nil {
+		name = pu.Path
+	}
+	if ext := strings.ToLower(path.Ext(name)); ext != "" && len(ext) <= 6 {
+		return ext
+	}
+	ctype, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if exts, _ := mime.ExtensionsByType(ctype); len(exts) > 0 {
+		return exts[0]
+	}
+	return ".bin"
+}
+
+// ttlCache remembers successful answers for ttl (errors aren't kept). With more than max
+// entries, the expired ones go, then all of them.
+type ttlCache[T any] struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	max     int
+	entries map[string]ttlEntry[T]
+}
+
+type ttlEntry[T any] struct {
+	val T
+	at  time.Time
+}
+
+func (c *ttlCache[T]) get(key string, f func() (T, error)) (T, error) {
+	c.mu.Lock()
+	if e, ok := c.entries[key]; ok && time.Since(e.at) < c.ttl {
+		c.mu.Unlock()
+		return e.val, nil
+	}
+	c.mu.Unlock()
+	v, err := f()
+	if err != nil {
+		return v, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = map[string]ttlEntry[T]{}
+	}
+	if len(c.entries) >= c.max {
+		for k, e := range c.entries {
+			if time.Since(e.at) >= c.ttl {
+				delete(c.entries, k)
+			}
+		}
+		if len(c.entries) >= c.max {
+			c.entries = map[string]ttlEntry[T]{}
+		}
+	}
+	c.entries[key] = ttlEntry[T]{v, time.Now()}
+	return v, nil
+}
