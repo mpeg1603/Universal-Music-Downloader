@@ -104,11 +104,58 @@ func describeNetErr(err error) string {
 	}
 }
 
-// rateLimiter spaces requests at least `interval` apart across goroutines.
+// rateLimiter spaces requests at least `interval` apart across goroutines. With a max set,
+// it adapts: each "slow down" (HTTP 429) doubles the interval, up to max; a run of answers
+// without one brings it back down to base, a step at a time.
 type rateLimiter struct {
 	mu       sync.Mutex
 	interval time.Duration
+	base     time.Duration
+	max      time.Duration // 0: fixed interval
 	next     time.Time
+	okRun    int
+	slowedAt time.Time
+}
+
+func newAdaptiveLimiter(base, max time.Duration) *rateLimiter {
+	return &rateLimiter{interval: base, base: base, max: max}
+}
+
+// slowDown is called when the site says we're too fast. The answers to requests already
+// under way at the time say it too; only one per interval counts.
+func (r *rateLimiter) slowDown() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.max <= 0 {
+		return
+	}
+	r.okRun = 0
+	if time.Since(r.slowedAt) < max(r.interval, time.Second) {
+		return
+	}
+	r.slowedAt = time.Now()
+	r.interval = min(max(2*r.interval, time.Second), r.max)
+	debugf("rate limit: now %s between requests", r.interval)
+}
+
+// ok is called for each answer that wasn't a "slow down".
+func (r *rateLimiter) ok() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.max <= 0 || r.interval <= r.base {
+		return
+	}
+	if r.okRun++; r.okRun >= 20 {
+		r.okRun = 0
+		r.interval = max(r.base, r.interval*4/5)
+	}
+}
+
+// backlog is how long a request made now would wait for its turn.
+func (r *rateLimiter) backlog() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return max(0, time.Until(r.next))
 }
 
 func (r *rateLimiter) wait(ctx context.Context) error {
@@ -190,6 +237,11 @@ func (h *HTTP) do(ctx context.Context, req request) (int, []byte, error) {
 			resp.Body.Close()
 		}
 		cancel()
+		if err == nil && resp.StatusCode == 429 {
+			h.limiter.slowDown()
+		} else if err == nil {
+			h.limiter.ok()
+		}
 		retryable := err != nil || resp.StatusCode == 429 || resp.StatusCode >= 500
 		if !retryable {
 			return resp.StatusCode, body, nil
@@ -349,4 +401,48 @@ func extensionFor(resp *http.Response, u string) string {
 		return exts[0]
 	}
 	return ".bin"
+}
+
+// ttlCache remembers successful answers for ttl (errors aren't kept). With more than max
+// entries, the expired ones go, then all of them.
+type ttlCache[T any] struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	max     int
+	entries map[string]ttlEntry[T]
+}
+
+type ttlEntry[T any] struct {
+	val T
+	at  time.Time
+}
+
+func (c *ttlCache[T]) get(key string, f func() (T, error)) (T, error) {
+	c.mu.Lock()
+	if e, ok := c.entries[key]; ok && time.Since(e.at) < c.ttl {
+		c.mu.Unlock()
+		return e.val, nil
+	}
+	c.mu.Unlock()
+	v, err := f()
+	if err != nil {
+		return v, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = map[string]ttlEntry[T]{}
+	}
+	if len(c.entries) >= c.max {
+		for k, e := range c.entries {
+			if time.Since(e.at) >= c.ttl {
+				delete(c.entries, k)
+			}
+		}
+		if len(c.entries) >= c.max {
+			c.entries = map[string]ttlEntry[T]{}
+		}
+	}
+	c.entries[key] = ttlEntry[T]{v, time.Now()}
+	return v, nil
 }

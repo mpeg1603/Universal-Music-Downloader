@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
@@ -52,7 +53,8 @@ type Job struct {
 	task       *Task
 	source     string // the source being searched or downloaded from
 	tried      map[string]bool
-	reasons    []string
+	notes      []jobNote // what each source said, kept across rounds (see start)
+	reasons    []string  // their texts, for the app
 	lastErr    string
 	lib        []*LibFile // the library's copies, best first
 	needBetter bool       // a library copy exists but is below the threshold
@@ -67,6 +69,15 @@ type Job struct {
 	rounds     int
 	pendingOn  string // Waiting for something from you for this source (Bandcamp's emailed link)
 	started    time.Time
+	converting bool // downloaded, being converted and tagged: a pause lets it finish
+}
+
+// jobNote is one source's answer for a job. Skips (paused or busy sources) only matter for
+// the round they happened in; answers of sources that were done with stay in the report.
+type jobNote struct {
+	src  string
+	text string
+	skip bool
 }
 
 type JobView struct {
@@ -140,11 +151,14 @@ type Manager struct {
 	srcMu    sync.RWMutex
 	sources  []Source
 	srcErr   map[string]string
+	srcNote  map[string]string // something to know about a working source (e.g. its cookies)
 	health   map[string]*sourceHealth
 	torrent  *TorrentSource
 	torKey   string
 	ytdlpBin string
 	bcMail   *bandcampMail // Bandcamp's emailed download links
+	cookies  *ytCookies    // your YouTube login, for yt-dlp
+	cookieID string        // the settings cookies was made from
 
 	searchGate *gate
 	dlGate     *gate
@@ -176,7 +190,7 @@ type Manager struct {
 func newManager(cfgPath, dataDir string, cfg Config) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{cfgPath: cfgPath, dataDir: dataDir, cfg: cfg, ctx: ctx, cancel: cancel,
-		jobs: map[string]*Job{}, srcErr: map[string]string{}, health: map[string]*sourceHealth{},
+		jobs: map[string]*Job{}, srcErr: map[string]string{}, srcNote: map[string]string{}, health: map[string]*sourceHealth{},
 		inputErrs: map[string]string{}, claimed: map[string]string{}, wakeCh: make(chan struct{}, 1),
 		searchGate: newGate(cfg.SearchWorkers), dlGate: newGate(cfg.MaxDownloads), deezer: newDeezer(),
 		bcMail: newBandcampMail(filepath.Join(dataDir, "bandcamp-emails.json"))}
@@ -422,9 +436,9 @@ func (m *Manager) initialTarget(c Config) int {
 
 func sourcesChanged(a, b Config) bool {
 	ja, jb := fmt.Sprint(a.Sources, a.Torznab, a.Cookies, a.CookiesFromBrowser, a.YtDlpPath, a.VKToken,
-		a.YandexToken, a.Bandcamp, a.Format, a.TorrentTimeout, a.IndexerTimeout, a.YouTubePace, a.DirectInterface),
+		a.YandexToken, a.Bandcamp, a.Format, a.TorrentTimeout, a.IndexerTimeout, a.YouTubePace, a.DirectInterface, a.Slskd),
 		fmt.Sprint(b.Sources, b.Torznab, b.Cookies, b.CookiesFromBrowser, b.YtDlpPath, b.VKToken,
-			b.YandexToken, b.Bandcamp, b.Format, b.TorrentTimeout, b.IndexerTimeout, b.YouTubePace, b.DirectInterface)
+			b.YandexToken, b.Bandcamp, b.Format, b.TorrentTimeout, b.IndexerTimeout, b.YouTubePace, b.DirectInterface, b.Slskd)
 	return ja != jb
 }
 
@@ -454,13 +468,14 @@ func (m *Manager) rebuildSources() {
 	tools := *m.tools
 	tools.YtDlp = bin
 	pace := time.Duration(cfg.YouTubePace * float64(time.Second))
+	cookies := m.youtubeCookies(cfg, bin)
 	for _, sc := range cfg.Sources {
 		if !sc.Enabled {
 			continue
 		}
 		route := normalizeRoute(sc.Route)
 		yt := func() *YtDlp {
-			return newYtDlp(&tools, cfg.Cookies, cfg.CookiesFromBrowser, m.proxy.URL(route))
+			return newYtDlp(&tools, cookies, m.proxy.URL(route))
 		}
 		switch sc.Name {
 		case "bandcamp":
@@ -509,6 +524,14 @@ func (m *Manager) rebuildSources() {
 				continue
 			}
 			list = append(list, newYandex(cfg.YandexToken, route))
+		case "audius":
+			list = append(list, newAudius(route))
+		case "slskd":
+			if !cfg.Slskd.configured() {
+				errs[sc.Name] = "needs your slskd address and API key (Sources → Soulseek)"
+				continue
+			}
+			list = append(list, newSlskd(cfg.Slskd, cfg.Format, route))
 		}
 	}
 	m.srcMu.Lock()
@@ -528,6 +551,42 @@ func (m *Manager) rebuildSources() {
 	}
 	logf("Sources, in order: %s", strings.Join(labels, ", "))
 	m.wake()
+}
+
+// youtubeCookies returns the cookies yt-dlp gets, made anew when their settings changed; a new
+// one is checked for a YouTube login in the background (the Sources tab shows what's wrong).
+func (m *Manager) youtubeCookies(cfg Config, bin string) *ytCookies {
+	id := strings.Join([]string{cfg.Cookies, cfg.CookiesFromBrowser, bin}, "\x00")
+	m.srcMu.Lock()
+	defer m.srcMu.Unlock()
+	if m.cookieID == id {
+		return m.cookies
+	}
+	m.cookieID = id
+	m.cookies = newYtCookies(cfg.Cookies, cfg.CookiesFromBrowser, bin, filepath.Join(m.dataDir, "tmp", "cookies"))
+	delete(m.srcNote, "youtube")
+	delete(m.srcNote, "youtube_music")
+	if c := m.cookies; c != nil {
+		if cfg.Cookies != "" && cfg.CookiesFromBrowser != "" {
+			logf("YouTube: using %s; the cookies file %s is not used while a browser is set", c.describe(), cfg.Cookies)
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(m.ctx, 2*time.Minute)
+			defer cancel()
+			problem := c.check(ctx)
+			m.srcMu.Lock()
+			if m.cookies == c {
+				m.srcNote["youtube"], m.srcNote["youtube_music"] = problem, problem
+			}
+			m.srcMu.Unlock()
+			if problem != "" {
+				logf("YouTube cookies: %s", problem)
+			} else {
+				logf("YouTube: logged in with %s", c.describe())
+			}
+		}()
+	}
+	return m.cookies
 }
 
 func (m *Manager) setupTorrentIfNeeded(cfg Config) {
@@ -638,6 +697,9 @@ func (m *Manager) recordResult(src Source, err error, search bool) {
 		h.until, h.reason = time.Now().Add(d), err.Error()
 		logf("%s: %s; pausing it for %s", src.Label(), err, fmtWait(d))
 	case isUnavailable(err):
+		if time.Now().Before(h.until) {
+			return // already paused: requests that were under way don't make it longer
+		}
 		h.fails++
 		if h.fails >= 5 {
 			d := backoffSteps[min(h.level, len(backoffSteps)-1)]
@@ -739,7 +801,16 @@ func (m *Manager) start(j *Job) {
 	if j.tried == nil {
 		j.tried = map[string]bool{}
 	}
-	j.reasons = nil
+	var keep []jobNote
+	for _, n := range j.notes {
+		if j.tried[n.src] && !n.skip {
+			keep = append(keep, n)
+		}
+	}
+	j.notes, j.reasons = keep, nil
+	for _, n := range keep {
+		j.reasons = append(j.reasons, n.text)
+	}
 	task := j.task
 	j.mu.Unlock()
 	m.wg.Add(1)
@@ -755,6 +826,7 @@ type result struct {
 	state     JobState
 	reason    string
 	transient bool
+	counted   bool // a source failed (not just paused or busy): counts toward giving up
 	retryAt   time.Time
 	pendingOn string // Waiting on you, not on a source: no give-up count
 	rec       Record
@@ -769,10 +841,22 @@ func (j *Job) setState(gen int, s JobState, source string) {
 	j.mu.Unlock()
 }
 
-func (j *Job) addReason(r string) {
+func (j *Job) addNote(src, text string, skip bool) {
 	j.mu.Lock()
-	j.reasons = append(j.reasons, r)
+	j.notes = append(j.notes, jobNote{src, text, skip})
+	j.reasons = append(j.reasons, text)
 	j.mu.Unlock()
+}
+
+// noteText is the report of everything the sources said.
+func (j *Job) noteText() string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	var parts []string
+	for _, n := range j.notes {
+		parts = append(parts, n.text)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // process takes one job through the sources until it's downloaded or none is left.
@@ -814,24 +898,22 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 	}
 	j.mu.Unlock()
 
-	var reasons []string
-	transient := false
+	transient, counted := false, false
 	var retryAt time.Time
 	skipped := map[string]bool{}
 	failed := map[string]bool{} // candidates that didn't work out, not to be tried again in this run
-	note := func(r string) {
-		reasons = append(reasons, r)
-		j.addReason(r)
-	}
+	var name string
+	note := func(r string) { j.addNote(name, r, false) }
 	for {
 		if ctx.Err() != nil {
 			return result{aborted: true}
 		}
-		src := m.nextSource(j, needBetter, libQ, note, &transient, &retryAt, skipped)
+		src := m.nextSource(j, needBetter, libQ, &transient, &retryAt, skipped)
 		if src == nil {
 			break
 		}
-		name, label := src.Name(), src.Label()
+		var label string
+		name, label = src.Name(), src.Label()
 		j.setState(gen, JobSearching, name)
 		task.setStage("waiting to search " + label)
 		if err := m.searchGate.acquire(ctx, j.priority()+1); err != nil {
@@ -851,7 +933,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 		if err != nil {
 			note(label + ": " + err.Error())
 			if isUnavailable(err) {
-				transient = true
+				transient, counted = true, true
 				m.markTried(j, name, false)
 			} else {
 				m.markTried(j, name, true)
@@ -908,17 +990,19 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			release()
 			m.wake()
 			var rec Record
-			if err == nil {
+			if err == nil && ctx.Err() == nil {
 				task.setStage("converting")
+				j.setConverting(true)
 				rec, err = m.finalize(ctx, j, raw, mt, workdir, cfg)
+				j.setConverting(false)
 			}
-			if ctx.Err() != nil {
-				return result{aborted: true}
-			}
-			if err == nil {
+			if err == nil && rec.Status == "downloaded" { // done, even if stopped meanwhile
 				m.recordResult(src, nil, false)
 				debugf("%s <- %s %s (score %.0f)", t, name, mt.Cand.URL, mt.Score)
 				return result{state: JobDone, rec: rec}
+			}
+			if ctx.Err() != nil {
+				return result{aborted: true}
 			}
 			if wait, ok := isPending(err); ok {
 				note(label + ": " + err.Error())
@@ -928,7 +1012,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			m.recordResult(src, err, false)
 			note(label + ": " + err.Error())
 			if isUnavailable(err) {
-				srcTransient, transient = true, true
+				srcTransient, transient, counted = true, true, true
 				break
 			}
 			failed[ck] = true
@@ -941,14 +1025,23 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			m.markTried(j, name, !srcTransient)
 		}
 	}
-	reason := strings.Join(reasons, "; ")
+	reason := j.noteText()
 	if reason == "" {
 		reason = "no sources enabled"
+		if len(m.currentSources()) > 0 {
+			reason = "no source left to try (r searches all of them again)"
+		}
 	}
 	if transient {
-		return result{state: JobWaiting, reason: reason, transient: true, retryAt: retryAt}
+		return result{state: JobWaiting, reason: reason, transient: true, counted: counted, retryAt: retryAt}
 	}
 	return result{state: JobFailed, reason: reason}
+}
+
+func (j *Job) setConverting(v bool) {
+	j.mu.Lock()
+	j.converting = v
+	j.mu.Unlock()
 }
 
 func (m *Manager) markTried(j *Job, name string, done bool) {
@@ -959,9 +1052,14 @@ func (m *Manager) markTried(j *Job, name string, done bool) {
 	}
 }
 
+// busyLimit: a source whose requests would wait longer than this for their turn (its pace
+// after rate limits, see rateLimiter) is skipped for now, like a paused one, instead of
+// holding up searches.
+const busyLimit = 20 * time.Second
+
 // nextSource returns the first source in priority order the job hasn't been through yet,
-// noting the ones skipped because they're paused.
-func (m *Manager) nextSource(j *Job, needBetter bool, libQ Quality, note func(string), transient *bool, retryAt *time.Time, skipped map[string]bool) Source {
+// noting the ones skipped because they're paused or busy.
+func (m *Manager) nextSource(j *Job, needBetter bool, libQ Quality, transient *bool, retryAt *time.Time, skipped map[string]bool) Source {
 	j.mu.Lock()
 	tried := make(map[string]bool, len(j.tried))
 	for k, v := range j.tried {
@@ -975,25 +1073,38 @@ func (m *Manager) nextSource(j *Job, needBetter bool, libQ Quality, note func(st
 		}
 		if needBetter {
 			if c, ok := src.(qualityCapper); ok && !better(c.MaxQuality(), libQ) {
-				note(fmt.Sprintf("%s: offers at most %s, not better than your library copy (%s)", src.Label(), c.MaxQuality(), libQ))
+				j.addNote(name, fmt.Sprintf("%s: offers at most %s, not better than your library copy (%s)", src.Label(), c.MaxQuality(), libQ), false)
 				m.markTried(j, name, true)
 				continue
 			}
+		}
+		later := func(until time.Time) {
+			if !until.IsZero() && (retryAt.IsZero() || until.Before(*retryAt)) {
+				*retryAt = until
+			}
+			skipped[src.Label()] = true
+			*transient = true
 		}
 		if cool, until, why := m.cooling(name); cool {
 			if !skipped[src.Label()] {
 				when := "for now"
 				if !until.IsZero() {
 					when = "until " + until.Format("15:04")
-					if retryAt.IsZero() || until.Before(*retryAt) {
-						*retryAt = until
-					}
 				}
-				note(fmt.Sprintf("%s: paused %s (%s)", src.Label(), when, why))
-				skipped[src.Label()] = true
+				j.addNote(name, fmt.Sprintf("%s: paused %s (%s)", src.Label(), when, why), true)
+				later(until)
 			}
 			*transient = true
 			continue
+		}
+		if b, ok := src.(interface{ busy() time.Duration }); ok {
+			if wait := b.busy(); wait > busyLimit || skipped[src.Label()] {
+				if !skipped[src.Label()] {
+					j.addNote(name, fmt.Sprintf("%s: busy (requests wait %s for their turn); tried again later", src.Label(), fmtWait(wait)), true)
+					later(time.Now().Add(wait))
+				}
+				continue
+			}
 		}
 		return src
 	}
@@ -1014,6 +1125,9 @@ func (m *Manager) finish(j *Job, gen int, res result) {
 		j.state, j.lastErr = JobCancelled, "cancelled by you"
 		j.mu.Unlock()
 		m.state.markCancelled(key)
+	case res.aborted && why == "pause": // first in line when you resume
+		j.state, j.bump = JobQueued, m.bumpSeq.Add(1)
+		j.mu.Unlock()
 	case res.aborted:
 		j.state = JobQueued // app stopping, or restarted
 		j.mu.Unlock()
@@ -1025,17 +1139,22 @@ func (m *Manager) finish(j *Job, gen int, res result) {
 		j.mu.Unlock()
 		m.state.markFailed(key, res.reason, true)
 	case res.state == JobWaiting:
-		j.rounds++
+		// Only rounds in which a source failed count toward giving up: one that just waits
+		// for a paused source waits as long as it takes.
+		if res.counted {
+			j.rounds++
+		}
 		if j.rounds > 8 {
 			j.state, j.lastErr = JobFailed, res.reason+" (gave up after several tries; restart it to try again)"
 			j.mu.Unlock()
 			m.state.markFailed(key, res.reason, true)
 			break
 		}
-		wait := time.Duration(math.Min(float64(5*time.Minute)*math.Pow(2, float64(j.rounds-1)), float64(time.Hour)))
+		wait := time.Duration(math.Min(float64(5*time.Minute)*math.Pow(2, float64(max(j.rounds, 1)-1)), float64(time.Hour)))
 		at := time.Now().Add(wait)
 		if !res.retryAt.IsZero() && res.retryAt.Before(at) {
-			at = res.retryAt.Add(5 * time.Second)
+			// Spread out: the tracks waiting for a source shouldn't all come back the same second.
+			at = res.retryAt.Add(5*time.Second + time.Duration(rand.Int64N(int64(2*time.Minute))))
 		}
 		j.state, j.lastErr, j.retryAt, j.pendingOn = JobWaiting, res.reason, at, ""
 		j.mu.Unlock()
@@ -1464,7 +1583,7 @@ func (m *Manager) Restart(key string) {
 		j.force = true
 	}
 	j.gen++ // results of the run in progress are ignored
-	j.state, j.tried, j.reasons, j.lastErr, j.rounds, j.retryAt = JobQueued, map[string]bool{}, nil, "", 0, time.Time{}
+	j.state, j.tried, j.notes, j.reasons, j.lastErr, j.rounds, j.retryAt = JobQueued, map[string]bool{}, nil, nil, "", 0, time.Time{}
 	j.bump = m.bumpSeq.Add(1)
 	j.mu.Unlock()
 	m.wake()
@@ -1498,20 +1617,49 @@ func (m *Manager) RetryFailed(includeCancelled bool) int {
 	for _, k := range keys {
 		j := m.job(k)
 		j.mu.Lock()
-		j.state, j.tried, j.reasons, j.rounds, j.retryAt = JobQueued, map[string]bool{}, nil, 0, time.Time{}
+		j.state, j.tried, j.notes, j.reasons, j.rounds, j.retryAt = JobQueued, map[string]bool{}, nil, nil, 0, time.Time{}
 		j.mu.Unlock()
 	}
 	m.wake()
 	return len(keys)
 }
 
+// SetPaused pauses (or resumes) everything: searches and downloads in progress stop and go
+// back to the front of the queue, where they continue from the source they were at when you
+// resume; torrents are paused in aria2c, keeping what they have. Tracks being converted
+// finish.
 func (m *Manager) SetPaused(p bool) {
-	m.paused.Store(p)
-	if p {
-		logf("Paused: no new searches or downloads start (the ones in progress finish)")
-	} else {
-		logf("Resumed")
+	if m.paused.Swap(p) == p {
+		return
 	}
+	m.srcMu.RLock()
+	tor := m.torrent
+	m.srcMu.RUnlock()
+	if !p {
+		if tor != nil {
+			tor.pause(false)
+		}
+		logf("Resumed")
+		m.wake()
+		return
+	}
+	if tor != nil {
+		tor.pause(true)
+	}
+	n := 0
+	m.jobsMu.Lock()
+	for _, j := range m.order {
+		j.mu.Lock()
+		keep := j.converting || j.state == JobDownloading && j.source == "torrent"
+		if j.cancel != nil && j.cancelWhy == "" && !keep {
+			j.cancelWhy = "pause"
+			j.cancel()
+			n++
+		}
+		j.mu.Unlock()
+	}
+	m.jobsMu.Unlock()
+	logf("Paused: %d searches and downloads stopped (they continue first when you resume), torrents paused", n)
 	m.wake()
 }
 
@@ -1553,6 +1701,7 @@ type SourceStatus struct {
 	Name, Label, Route string
 	Enabled            bool
 	Problem            string // why it can't be used
+	Note               string // something to know while it works (e.g. its cookies have no login)
 	Paused             bool
 	Until              time.Time
 	Reason             string
@@ -1568,7 +1717,7 @@ func (m *Manager) SourceStatus() []SourceStatus {
 	for _, sc := range cfg.Sources {
 		h := m.healthOf(sc.Name)
 		s := SourceStatus{Name: sc.Name, Label: sourceLabels[sc.Name], Route: normalizeRoute(sc.Route), Enabled: sc.Enabled,
-			Problem: m.srcErr[sc.Name], Paused: h.paused, Searches: h.searches, Found: h.found, Downloads: h.downloads, DlFails: h.dlFails}
+			Problem: m.srcErr[sc.Name], Note: m.srcNote[sc.Name], Paused: h.paused, Searches: h.searches, Found: h.found, Downloads: h.downloads, DlFails: h.dlFails}
 		if time.Now().Before(h.until) {
 			s.Until, s.Reason = h.until, h.reason
 		}

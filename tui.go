@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -80,6 +82,17 @@ func runTUI(m *Manager) error {
 		defer tick.Stop()
 		for range tick.C {
 			ui.app.QueueUpdateDraw(ui.refresh)
+		}
+	}()
+	// Closing the terminal, or `kill`, quits the way q does: the terminal is put back in order
+	// and the tracks in progress continue next time.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	go func() {
+		if _, ok := <-signals; ok {
+			logf("Quitting (asked by a signal)")
+			ui.app.Stop()
 		}
 	}()
 	ui.refresh()
@@ -1336,6 +1349,8 @@ func (ui *tui) refreshSources() {
 			status, scolor = "paused by you (p)", tcell.ColorYellow
 		case !s.Until.IsZero():
 			status, scolor = "paused until "+s.Until.Format("15:04")+": "+s.Reason, tcell.ColorOrange
+		case s.Note != "":
+			status, scolor = "ok, but "+s.Note, tcell.ColorYellow
 		}
 		route := s.Route
 		cells := []*tview.TableCell{
@@ -1369,6 +1384,8 @@ var sourceHelp = map[string]string{
 	"soundcloud":    "Public SoundCloud tracks; 30-second previews are detected and rejected.",
 	"youtube":       "Regular YouTube uploads (Opus ~130 kbps). Shares the bot-check pause and cookies with YouTube Music.",
 	"torrent":       "Your Jackett or Prowlarr indexers, downloaded with aria2c (only the file needed). Indexers that keep failing are left out for a while instead of slowing every search.",
+	"audius":        "Audius, an open platform where artists upload their own music (much independent electronic music). Full tracks as MP3 320; no account needed. Tracks for paying fans only are left out.",
+	"slskd":         "Soulseek, through your own slskd (github.com/slskd/slskd), which runs the Soulseek client with your account: people share their music folders, often in FLAC. Needs slskd's address, an API key and its downloads folder (Enter). Files stay in slskd's downloads folder too. Its speed isn't counted against the bandwidth setting: set slskd's own limit.",
 }
 
 func (ui *tui) refreshSourceDetail() {
@@ -1381,6 +1398,9 @@ func (ui *tui) refreshSourceDetail() {
 	fmt.Fprintf(&b, "[::b]%s[::-] · route: %s\n%s\n", s.Label, tview.Escape(describeRoute(s.Route)), tview.Escape(sourceHelp[s.Name]))
 	if s.Problem != "" {
 		fmt.Fprintf(&b, "\n[red]%s[-]\n", tview.Escape(s.Problem))
+	}
+	if s.Note != "" {
+		fmt.Fprintf(&b, "\n[yellow]%s[-]\n", tview.Escape(s.Note))
 	}
 	if s.Reason != "" {
 		fmt.Fprintf(&b, "\n[orange]Paused until %s: %s[-] (p resumes it now)\n", s.Until.Format("15:04"), tview.Escape(s.Reason))
@@ -1543,8 +1563,10 @@ func (ui *tui) sourceSettings() {
 			}
 		})
 		text("yt-dlp program (empty: download it automatically)", c.YtDlpPath, 60, func(c *Config, v string) { c.YtDlpPath = v })
-		form.AddTextView("", "Your browser's YouTube login (cookies) is the best fix for \"sign in to confirm you're not a bot\". yt-dlp reads them from the browser each time; nothing is stored here.", 0, 3, false, false)
-		height = 19
+		form.AddTextView("", "Your browser's YouTube login (cookies) is the best fix for \"sign in to confirm you're not a bot\". "+
+			"They're read from the browser every 10 minutes (YouTube's, Google's and SoundCloud's only) and each yt-dlp run gets a "+
+			"temporary copy: your browser and your cookies file are never written to. A browser, when set, is used instead of the file.", 0, 4, false, false)
+		height = 20
 	case "torrent":
 		text("Jackett / Prowlarr address(es), comma-separated", strings.Join(c.Torznab.Feeds, ", "), 60, func(c *Config, v string) { c.Torznab.Feeds = splitList(v) })
 		secret("API key", c.Torznab.Key, func(c *Config, v string) { c.Torznab.Key = v })
@@ -1564,6 +1586,13 @@ func (ui *tui) sourceSettings() {
 		secret("Token", c.VKToken, func(c *Config, v string) { c.VKToken = v })
 		form.AddButton("Log in to get a token…", func() { close(); ui.vkLogin() })
 		height = 11
+	case "slskd":
+		text("slskd address", firstNonEmpty(c.Slskd.URL, "http://localhost:5030"), 50, func(c *Config, v string) { c.Slskd.URL = v })
+		secret("API key", c.Slskd.APIKey, func(c *Config, v string) { c.Slskd.APIKey = v })
+		text("slskd's downloads folder", firstNonEmpty(c.Slskd.Downloads, defaultSlskdDownloads()), 60, func(c *Config, v string) { c.Slskd.Downloads = v })
+		form.AddTextView("", "In slskd.yml: web → authentication → api_keys → a key (16+ characters) with role readwrite; the "+
+			"downloads folder is directories → downloads (default ~/.local/share/slskd/downloads).", 0, 3, false, false)
+		height = 16
 	case "yandex":
 		secret("OAuth token", c.YandexToken, func(c *Config, v string) { c.YandexToken = v })
 		form.AddTextView("How to get it", "Open "+yandexTokenURL+" in your browser, log in, then copy the access_token=… value from the address bar.", 0, 4, false, false)

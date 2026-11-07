@@ -342,6 +342,7 @@ type torrentManager struct {
 	started int     // aria2c downloads started, for the log and tests
 	added   int     // times files were added to a running download (which restarts it), for tests
 	limit   float64 // overall speed limit (bytes/s), applied when aria2c (re)starts
+	paused  bool    // everything paused (by you); downloads started meanwhile start paused
 }
 
 type torrentJob struct {
@@ -573,12 +574,40 @@ func (m *torrentManager) apply(job *torrentJob) {
 	job.pending = map[int]bool{}
 }
 
+// setPaused pauses (or resumes) every torrent download in aria2c. Their time limits don't
+// run while they're paused.
+func (m *torrentManager) setPaused(p bool) {
+	m.mu.Lock()
+	m.paused = p
+	running := false
+	for _, job := range m.jobs {
+		running = running || job.gid != ""
+	}
+	m.mu.Unlock()
+	if !running || !m.aria.alive() {
+		return
+	}
+	method := "aria2.unpauseAll"
+	if p {
+		method = "aria2.forcePauseAll"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := m.aria.call(ctx, method); err != nil {
+		logf("Torrents: %s didn't work: %v", method, err)
+	}
+}
+
 func (m *torrentManager) startDownload(job *torrentJob) {
 	job.dir = filepath.Join(m.dir, fmt.Sprintf("%s.%d", job.id, m.started+1))
 	files := indexList(job.pending)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	gid, err := m.aria.addTorrent(ctx, job.data, map[string]string{"dir": job.dir, "select-file": files})
+	opts := map[string]string{"dir": job.dir, "select-file": files}
+	if m.paused {
+		opts["pause"] = "true"
+	}
+	gid, err := m.aria.addTorrent(ctx, job.data, opts)
 	if err != nil {
 		debugf("torrent %s: aria2c refused it: %v", job.id, err)
 		m.failWaiters(job, func(w *fileWaiter) bool { return job.pending[w.index] }, failf("aria2c refused the torrent: %v", err))
@@ -646,6 +675,9 @@ func (m *torrentManager) poll(job *torrentJob) {
 		}
 		f := files[w.index]
 		switch {
+		case m.paused:
+			w.task.setStage("paused")
+			w.activeSince = time.Time{} // the time limit starts again on resume
 		case st.Status == "waiting" || st.Status == "paused":
 			w.task.setStage("queued behind other torrents")
 		case st.CompletedLength == 0:
@@ -662,7 +694,7 @@ func (m *torrentManager) poll(job *torrentJob) {
 		}
 		if p, ok := job.complete[w.index]; ok {
 			m.resolve(job, w, p, nil)
-		} else if !w.activeSince.IsZero() && now.Sub(w.activeSince) > m.timeout {
+		} else if !m.paused && !w.activeSince.IsZero() && now.Sub(w.activeSince) > m.timeout {
 			m.resolve(job, w, "", failf("torrent download didn't finish within %s (raise --torrent-timeout?)", m.timeout))
 		}
 	}

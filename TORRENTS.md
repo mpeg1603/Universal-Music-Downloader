@@ -221,9 +221,12 @@ For each track:
 1. **Search**, from most to least specific, until something fits:
    1. `Album Artist + Album`, with edition details left out (*Turn On The Bright Lights: The
       Tenth Anniversary Edition (Remastered)* is searched as *Turn On The Bright Lights*), since
-      indexers only find torrents whose names contain every word you search for;
+      indexers only find torrents whose names contain every word you search for; for a
+      compilation (album artist *Various Artists*), just the album;
    2. `Artist + Title`, for singles;
-   3. the artist alone, for discographies and albums named differently on the indexer.
+   3. the album artist alone, when it's someone else than the track's artist (a remix on the
+      remixer's album, a guest on someone's record): their discographies;
+   4. the artist alone, for discographies and albums named differently on the indexer.
 
    Punctuation that trips up search engines (`: ( ) [ ] /` …) is left out. Each search is made
    once and reused for the album's other tracks; results are also kept on disk for 12 hours,
@@ -271,7 +274,13 @@ cap (Settings) covers torrents too: aria2c gets what the other downloads leave o
 
 Results that only have a **magnet link** need aria2c to fetch the torrent's file list from other
 peers first, which can take up to 50 seconds; results with a `.torrent` file are looked into
-first. Fetched `.torrent` files are kept between runs.
+first. Fetched `.torrent` files are kept between runs. A torrent whose file list couldn't be
+had (no peers answered its magnet link, its link was broken) is left alone for 12 hours, also
+across restarts: before, the same dead torrent was asked for again for every track it might
+hold.
+
+**Pause** (`P`) pauses the torrents in aria2c; they keep what they have, and their time limit
+starts again when you resume.
 
 ## Tuning
 
@@ -302,7 +311,7 @@ Sources tab shows each indexer's last error; the Log tab (`v` for details) and t
 | `couldn't get the torrent file` | The indexer refused the download: it's behind Cloudflare (step 5) or your login on that site expired (re-enter it in Jackett/Prowlarr). |
 | `N torrents found; the M best-matching ones don't contain this track` | Normal for rarer music: the album isn't on your indexers in a form that contains this track. More indexers help. The log lists which torrents were looked into. |
 | `Jackett: NAME: error 900: …` / `answered HTTP 400` | That indexer failed inside Jackett (login expired, Cloudflare, site down, proxy). Fix it in Jackett (**Test** shows the same error). After three failures it's left out for a while; the Sources tab shows when it's tried again. |
-| `no peers answered for the magnet link` | The torrent is dead or your network blocks BitTorrent. Other results are tried for the next track. |
+| `no peers answered for the magnet link` | The torrent is dead or your network blocks BitTorrent. Other results are tried for the next track; this one is left alone for 12 hours (`… (tried 2h ago)`). |
 | `no peer sent any data for 3 minutes (dead torrent?)` / `the torrent download stalled` | Dead or nearly dead torrent; the next-best one is tried right away. Retry later with `r` (one track) or `R` (all) in the Queue tab. |
 | `didn't finish within 30m` | Slow swarm: raise "Give up on a torrent download after". |
 | `every torrent indexer is paused after repeated errors` | All indexers failed three times in a row; tracks wait and are retried when the first one comes back. |

@@ -44,9 +44,23 @@ type Bandcamp struct {
 	mail      *bandcampMail // nil: no email address set
 }
 
+// Bandcamp answers HTTP 429 to a steady request every half second within minutes, and then
+// for a long while; requests are spaced a second apart, more after a 429 (shared by all
+// Bandcamp sources made from changed settings).
+var bandcampPace = newAdaptiveLimiter(time.Second, 20*time.Second)
+
+// Pages and searches are remembered for a while: an album's page is needed for each of its
+// tracks, and a track waiting for another source searches again later.
+var (
+	bandcampPages    = &ttlCache[*tralbum]{ttl: 12 * time.Hour, max: 20000}
+	bandcampSearches = &ttlCache[[]Candidate]{ttl: 12 * time.Hour, max: 50000}
+)
+
 func newBandcamp(cacheDir, format, route string, mail *bandcampMail) *Bandcamp {
+	h := newRoutedHTTP("Bandcamp", 0, route)
+	h.limiter = bandcampPace
 	return &Bandcamp{
-		http:      newRoutedHTTP("Bandcamp", 500*time.Millisecond, route),
+		http:      h,
 		cacheDir:  filepath.Join(cacheDir, "bandcamp"),
 		encodings: bandcampEncodings[format],
 		locks:     map[string]*sync.Mutex{},
@@ -75,7 +89,17 @@ func encodingQuality(enc string) Quality {
 	return Quality{}
 }
 
+// busy is how long a request would wait for its turn now; the scheduler skips Bandcamp for a
+// while rather than have searches queue up for it.
+func (b *Bandcamp) busy() time.Duration { return b.http.limiter.backlog() }
+
 func (b *Bandcamp) Search(ctx context.Context, t *Track) ([]Candidate, error) {
+	return searchUntilFound(ctx, t, songQueries(t, 2), func(q string) ([]Candidate, error) {
+		return bandcampSearches.get(strings.ToLower(q)+"\x00"+b.encodings[0], func() ([]Candidate, error) { return b.search(ctx, q) })
+	})
+}
+
+func (b *Bandcamp) search(ctx context.Context, query string) ([]Candidate, error) {
 	var res struct {
 		Auto struct {
 			Results []struct {
@@ -89,7 +113,7 @@ func (b *Bandcamp) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 		} `json:"auto"`
 	}
 	err := b.http.postJSON(ctx, "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic", map[string]any{
-		"search_text": t.Artists[0] + " " + searchTitle(t.Title), "search_filter": "t", "full_page": false, "fan_id": nil,
+		"search_text": query, "search_filter": "t", "full_page": false, "fan_id": nil,
 	}, nil, &res)
 	if err != nil {
 		return nil, err
@@ -126,6 +150,10 @@ func dataAttr(page []byte, attr string, out any) bool {
 }
 
 func (b *Bandcamp) tralbum(ctx context.Context, u string) (*tralbum, error) {
+	return bandcampPages.get(u, func() (*tralbum, error) { return b.fetchTralbum(ctx, u) })
+}
+
+func (b *Bandcamp) fetchTralbum(ctx context.Context, u string) (*tralbum, error) {
 	status, body, err := b.http.get(ctx, u)
 	if err != nil {
 		return nil, err

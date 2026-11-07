@@ -32,29 +32,26 @@ type qualityCapper interface {
 // --- yt-dlp --------------------------------------------------------------------------------
 
 type YtDlp struct {
-	bin   string
-	args  []string
-	pacer *rateLimiter // spaces out requests to a site that flags busy clients (YouTube)
+	bin     string
+	args    []string
+	cookies *ytCookies   // your YouTube login; each run gets its own copy (see cookies.go)
+	pacer   *rateLimiter // spaces out requests to a site that flags busy clients (YouTube)
 }
 
 // youtubePacer is shared by YouTube and YouTube Music: they're one site as far as bot checks go.
 var youtubePacer = &rateLimiter{}
 
-func newYtDlp(tools *Tools, cookies, cookiesFromBrowser, proxy string) *YtDlp {
-	args := []string{"--no-warnings", "--no-progress", "--socket-timeout", "30", "--retries", "3", "--ignore-config"}
+// newYtDlp runs yt-dlp with cookies (nil: none) through proxy. Warnings aren't silenced:
+// yt-dlp's "your cookies are no longer valid" ends up in the log with the error it explains.
+func newYtDlp(tools *Tools, cookies *ytCookies, proxy string) *YtDlp {
+	args := []string{"--no-progress", "--socket-timeout", "30", "--retries", "3", "--ignore-config"}
 	for _, rt := range tools.JSRuntimes {
 		args = append(args, "--js-runtimes", rt)
-	}
-	if cookies != "" {
-		args = append(args, "--cookies", expandHome(cookies))
-	}
-	if cookiesFromBrowser != "" {
-		args = append(args, "--cookies-from-browser", cookiesFromBrowser)
 	}
 	if proxy != "" {
 		args = append(args, "--proxy", proxy)
 	}
-	return &YtDlp{bin: tools.YtDlp, args: args}
+	return &YtDlp{bin: tools.YtDlp, args: args, cookies: cookies}
 }
 
 // paced makes every yt-dlp run wait for its turn, at least interval apart, and space the
@@ -78,12 +75,7 @@ var (
 )
 
 func ytdlpError(stderr string, err error) error {
-	msg := ""
-	for _, line := range strings.Split(reANSI.ReplaceAllString(stderr, ""), "\n") {
-		if strings.HasPrefix(line, "ERROR:") {
-			msg = strings.TrimSpace(strings.TrimPrefix(line, "ERROR:"))
-		}
-	}
+	msg := lastErrorLine(stderr)
 	if msg == "" {
 		msg = fmt.Sprintf("yt-dlp failed (%v)", err)
 	}
@@ -98,7 +90,7 @@ func ytdlpError(stderr string, err error) error {
 			if strings.Contains(low, "soundcloud") {
 				return blockedf("SoundCloud is rate-limiting us")
 			}
-			return blockedf("YouTube asked to sign in (bot check); in Settings, set \"Cookies from browser\" to a browser where you're logged in to YouTube")
+			return blockedf("YouTube asked to sign in (bot check)")
 		}
 	}
 	for _, s := range unreachable {
@@ -118,8 +110,18 @@ func (y *YtDlp) run(ctx context.Context, extra ...string) ([]byte, error) {
 			return nil, err
 		}
 	}
+	args := append([]string{}, y.args...)
+	if y.cookies != nil {
+		path, remove, err := y.cookies.copyFor(ctx)
+		defer remove()
+		if path != "" {
+			args = append(args, "--cookies", path)
+		} else if err != nil {
+			debugf("yt-dlp runs without cookies: %v", err)
+		}
+	}
 	var stdout, stderr bytes.Buffer
-	cmd := command(ctx, y.bin, append(append([]string{}, y.args...), extra...)...)
+	cmd := command(ctx, y.bin, append(args, extra...)...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if task := taskFrom(ctx); task != nil {
 		// Download progress comes as lines we asked for with --progress-template (see download).
@@ -131,7 +133,11 @@ func (y *YtDlp) run(ctx context.Context, extra ...string) ([]byte, error) {
 			return nil, ctx.Err()
 		}
 		debugf("yt-dlp %q failed: %s", extra, stderr.String())
-		return nil, ytdlpError(stderr.String(), err)
+		err := ytdlpError(stderr.String(), err)
+		if isBlocked(err) && strings.HasPrefix(err.Error(), "YouTube") {
+			err = blockedf("%s; %s", err, y.cookies.botCheckAdvice(ctx))
+		}
+		return nil, err
 	}
 	return stdout.Bytes(), nil
 }
@@ -238,10 +244,8 @@ func (s *YouTubeMusic) Search(ctx context.Context, t *Track) ([]Candidate, error
 	if t.ISRC != "" {
 		queries = append(queries, t.ISRC)
 	}
-	queries = append(queries, t.Artists[0]+" "+searchTitle(t.Title))
-	seen := map[string]bool{}
-	var out []Candidate
-	for _, q := range queries {
+	queries = append(queries, songQueries(t, 3)...)
+	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) {
 		var resp any
 		err := s.http.postJSON(ctx, "https://music.youtube.com/youtubei/v1/search?prettyPrint=false", map[string]any{
 			"context": map[string]any{"client": map[string]any{"clientName": "WEB_REMIX", "clientVersion": "1.20251020.01.00", "hl": "en", "gl": "US"}},
@@ -251,14 +255,8 @@ func (s *YouTubeMusic) Search(ctx context.Context, t *Track) ([]Candidate, error
 		if err != nil {
 			return nil, err
 		}
-		for _, c := range parseYTMusicResults(resp) {
-			if !seen[c.URL] {
-				seen[c.URL] = true
-				out = append(out, c)
-			}
-		}
-	}
-	return out, nil
+		return parseYTMusicResults(resp), nil
+	})
 }
 
 var reClock = regexp.MustCompile(`^\d+:\d{2}(?::\d{2})?$`)
@@ -322,7 +320,15 @@ func (s *YouTube) Download(ctx context.Context, c Candidate, t *Track, workdir s
 }
 
 func (s *YouTube) Search(ctx context.Context, t *Track) ([]Candidate, error) {
-	query := t.Artists[0] + " - " + searchTitle(t.Title)
+	queries := songQueries(t, 3)
+	if len(queries) > 0 && !strings.Contains(queries[0], " - ") && len(t.Artists) > 0 {
+		// Uploads are mostly titled "Artist - Title".
+		queries[0] = t.Artists[0] + " - " + strings.TrimSpace(strings.TrimPrefix(queries[0], t.Artists[0]))
+	}
+	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) { return s.search(ctx, q) })
+}
+
+func (s *YouTube) search(ctx context.Context, query string) ([]Candidate, error) {
 	var resp any
 	err := s.http.postJSON(ctx, "https://www.youtube.com/youtubei/v1/search?prettyPrint=false", map[string]any{
 		"context": map[string]any{"client": map[string]any{"clientName": "WEB", "clientVersion": "2.20251020.00.00", "hl": "en", "gl": "US"}},
@@ -384,7 +390,11 @@ func (s *SoundCloud) Label() string       { return "SoundCloud" }
 func (s *SoundCloud) MaxQuality() Quality { return Quality{Codec: "aac", Kbps: 160} }
 
 func (s *SoundCloud) Search(ctx context.Context, t *Track) ([]Candidate, error) {
-	entries, err := s.ytdlp.search(ctx, "scsearch8:"+t.Artists[0]+" "+searchTitle(t.Title))
+	return searchUntilFound(ctx, t, songQueries(t, 3), func(q string) ([]Candidate, error) { return s.search(ctx, q) })
+}
+
+func (s *SoundCloud) search(ctx context.Context, query string) ([]Candidate, error) {
+	entries, err := s.ytdlp.search(ctx, "scsearch8:"+query)
 	if err != nil {
 		return nil, err
 	}

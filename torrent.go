@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -676,13 +677,15 @@ func queryText(s string) string {
 
 type torrentQuery struct {
 	text    string
+	artist  string   // who the torrent should be by ("": the track's first artist)
 	targets []string // names the torrent should resemble besides the artist (album, title)
 	edition string   // the full album name; its extra words ("Anniversary", "Deluxe") are a plus
 	inspect int      // how many of the best results to look into
 }
 
 // torrentQueries lists the searches to try for a track, from most to least specific: its
-// album (what most music torrents are), the song (singles), then the artist alone
+// album by its album artist (what most music torrents are; just the album's name for a
+// compilation), the song (singles), then the album artist and the artist alone
 // (discographies, and albums the track list names differently from the indexer).
 func torrentQueries(t *Track) []torrentQuery {
 	var out []torrentQuery
@@ -695,24 +698,37 @@ func torrentQueries(t *Track) []torrentQuery {
 		}
 	}
 	title := searchTitle(t.Title)
+	album := baseAlbum(t.Album)
 	hasAlbum := t.Album != "" && !strings.EqualFold(searchTitle(t.Album), title)
+	albumArtist := t.AlbumArtistStr()
+	compilation := variousArtists(albumArtist)
 	if hasAlbum {
-		add(torrentQuery{t.AlbumArtistStr() + " " + baseAlbum(t.Album), []string{baseAlbum(t.Album)}, t.Album, 5})
+		if compilation {
+			add(torrentQuery{text: album, artist: albumArtist, targets: []string{album}, edition: t.Album, inspect: 5})
+		} else {
+			add(torrentQuery{text: albumArtist + " " + album, artist: albumArtist, targets: []string{album}, edition: t.Album, inspect: 5})
+		}
 	}
-	add(torrentQuery{t.Artists[0] + " " + title, []string{title, baseAlbum(t.Album)}, "", 5})
+	add(torrentQuery{text: t.Artists[0] + " " + title, targets: []string{title, album}, inspect: 5})
 	// All of the artist's torrents: look further down the list, since many of them fit the
 	// name equally well (they're mostly shared with the artist's other tracks anyway).
-	switch normalize(t.Artists[0]) {
-	case "unknown artist", "various artists", "various", "va":
+	if !hasAlbum {
+		if !variousArtists(t.Artists[0]) {
+			add(torrentQuery{text: t.Artists[0], targets: []string{title}, inspect: 10})
+		}
 		return out
 	}
-	if hasAlbum { // release names don't mention album tracks, so only the album counts
-		add(torrentQuery{t.Artists[0], []string{baseAlbum(t.Album)}, t.Album, 10})
-	} else {
-		add(torrentQuery{t.Artists[0], []string{title}, "", 10})
+	// Release names don't mention album tracks, so only the album counts.
+	if !compilation && !strings.EqualFold(albumArtist, t.Artists[0]) {
+		add(torrentQuery{text: albumArtist, artist: albumArtist, targets: []string{album}, edition: t.Album, inspect: 10})
+	}
+	if !variousArtists(t.Artists[0]) {
+		add(torrentQuery{text: t.Artists[0], targets: []string{album}, edition: t.Album, inspect: 10})
 	}
 	return out
 }
+
+func (q torrentQuery) by(t *Track) string { return firstNonEmpty(q.artist, t.Artists[0]) }
 
 var (
 	reLosslessWords = wordRe(`flac|lossless|alac|ape|wavpack|wv|wav`)
@@ -925,6 +941,13 @@ func (s *TorrentSource) MaxQuality() Quality { return Quality{Codec: "flac", Los
 // Close stops aria2c.
 func (s *TorrentSource) Close() { s.dl.close() }
 
+// pause pauses (or resumes) the torrent downloads, keeping what they have.
+func (s *TorrentSource) pause(p bool) {
+	if d, ok := s.dl.(interface{ setPaused(bool) }); ok {
+		d.setPaused(p)
+	}
+}
+
 func (s *TorrentSource) feedStatus() []feedStatus {
 	var out []feedStatus
 	for _, f := range s.feeds {
@@ -1080,7 +1103,7 @@ func (s *TorrentSource) Search(ctx context.Context, t *Track) ([]Candidate, erro
 			seen[r.id()] = true
 		}
 		var picks []torrentResult
-		for _, r := range rankTorrents(results, t.Artists[0], q, s.lossless) {
+		for _, r := range rankTorrents(results, q.by(t), q, s.lossless) {
 			if len(picks) < q.inspect && !inspected[r.id()] {
 				inspected[r.id()] = true
 				picks = append(picks, r)
@@ -1258,7 +1281,7 @@ func (s *TorrentSource) alongside(c Candidate, from *Track, tracks []*Track) map
 func (s *TorrentSource) considers(t *Track, title string) bool {
 	r := []torrentResult{{Title: title, Seeders: -1}}
 	for _, q := range torrentQueries(t) {
-		if len(rankTorrents(r, t.Artists[0], q, s.lossless)) > 0 {
+		if len(rankTorrents(r, q.by(t), q, s.lossless)) > 0 {
 			return true
 		}
 	}
@@ -1329,6 +1352,11 @@ func (s *TorrentSource) expect(c Candidate, coming bool) {
 	}
 }
 
+// deadFor is how long a torrent whose file list couldn't be had (no peers for its magnet
+// link, a broken link) is left alone, across restarts: trying again every few minutes, for
+// each track it might hold, was most of what torrent searching did.
+const deadFor = 12 * time.Hour
+
 // meta gets a result's .torrent (from its link, or a magnet's metadata via aria2c) and file list.
 func (s *TorrentSource) meta(ctx context.Context, r torrentResult) (*torrentMeta, error) {
 	return s.metas.get(ctx, r.id(), func() (*torrentMeta, error) {
@@ -1339,12 +1367,24 @@ func (s *TorrentSource) meta(ctx context.Context, r torrentResult) (*torrentMeta
 				return &torrentMeta{file: p, files: files, sizes: sizes}, nil
 			}
 		}
+		dead := strings.TrimSuffix(p, ".torrent") + ".dead"
+		if st, err := os.Stat(dead); err == nil && time.Since(st.ModTime()) < deadFor {
+			why, _ := os.ReadFile(dead)
+			return nil, failf("%s (tried %s ago)", why, fmtWait(time.Since(st.ModTime()).Round(time.Minute)))
+		}
+		markDead := func(err error) {
+			if os.MkdirAll(s.dir, 0o755) == nil {
+				writeFileAtomic(dead, []byte(err.Error()))
+			}
+		}
 		data, err := s.torrentBytes(context.WithoutCancel(ctx), r)
 		if err != nil {
+			markDead(err)
 			return nil, err
 		}
 		files, sizes, err := torrentFileList(data)
 		if err != nil {
+			markDead(err)
 			return nil, err
 		}
 		if err := os.MkdirAll(s.dir, 0o755); err != nil {
@@ -1384,20 +1424,31 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 	if s.aria2c == "" {
 		return nil, failf("“%s” only has a magnet link, which needs aria2c", r.Title)
 	}
-	// Only a magnet link: ask the swarm for the torrent's metadata.
+	// Only a magnet link: ask the swarm for the torrent's metadata. Several of these run at
+	// once: each gets its own ports and DHT table (a copy of aria2c's), so they don't fight
+	// over them.
 	tmp, err := os.MkdirTemp("", "spotify-downloader-meta-")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
+	dht := filepath.Join(tmp, "dht.dat")
+	if home, err := os.UserHomeDir(); err == nil {
+		if data, err := os.ReadFile(filepath.Join(home, ".cache", "aria2", "dht.dat")); err == nil {
+			os.WriteFile(dht, data, 0o600)
+		}
+	}
+	port := 20000 + mrand.IntN(40000)
 	mctx, cancel := context.WithTimeout(ctx, 50*time.Second)
 	defer cancel()
 	out, err := command(mctx, s.aria2c, "--dir="+tmp, "--bt-metadata-only=true", "--bt-save-metadata=true",
 		"--bt-stop-timeout=45", "--dht-entry-point=dht.transmissionbt.com:6881", "--bt-tracker-connect-timeout=15",
-		"--bt-tracker-timeout=30", "--summary-interval=0", "--console-log-level=error", "--download-result=hide", magnet).CombinedOutput()
+		"--bt-tracker-timeout=30", "--listen-port="+strconv.Itoa(port), "--dht-listen-port="+strconv.Itoa(port+1),
+		"--dht-file-path="+dht, "--summary-interval=0", "--show-console-readout=false", "--console-log-level=error",
+		"--download-result=hide", magnet).CombinedOutput()
 	matches, _ := filepath.Glob(filepath.Join(tmp, "*.torrent"))
 	if len(matches) == 0 {
-		debugf("aria2c metadata fetch for %q failed: %v %s", r.Title, err, out)
+		debugf("aria2c metadata fetch for %q failed: %v %s", r.Title, err, lastLines(string(out), 2))
 		return nil, failf("no peers answered for the magnet link of “%s”", r.Title)
 	}
 	return os.ReadFile(matches[0])
@@ -1529,4 +1580,15 @@ func explainFeedError(err error, hint func(string, ...any)) {
 		hint("nothing answered there: is Jackett/Prowlarr running? (systemctl status jackett, or prowlarr)")
 		hint("default addresses: Jackett http://127.0.0.1:9117, Prowlarr http://127.0.0.1:9696")
 	}
+}
+
+// lastLines is the last n non-empty lines of a program's output.
+func lastLines(out string, n int) string {
+	var lines []string
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return strings.Join(lines[max(0, len(lines)-n):], " / ")
 }

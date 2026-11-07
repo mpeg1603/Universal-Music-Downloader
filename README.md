@@ -18,10 +18,18 @@ Tried top to bottom for each track; the order is yours to change (Sources tab).
 | **Internet Archive** | Items published under a license (Creative Commons, public domain); no live tapes. | FLAC / MP3 |
 | **Yandex Music** *(optional)* | Your own account (token). Full tracks need Plus. Reached directly, not through your VPN. | FLAC (Plus) / MP3 320 |
 | **VK** *(optional)* | Your own account (token). Reached directly, not through your VPN. | MP3 up to 320 |
+| **Soulseek** *(optional)* | Your own [slskd](https://github.com/slskd/slskd) (the Soulseek client as a service, with your account): people share their music folders. See **Soulseek** below. | often FLAC |
+| **Audius** | An open platform where artists upload their own music (much independent electronic music); free API, no account. Tracks only for paying fans are left out. | MP3 320 |
 | **YouTube Music** | Official "song" uploads, found by ISRC and by artist + title. | Opus ~130 |
 | **SoundCloud** | Public tracks; 30-second previews are rejected. | MP3 128 / AAC |
 | **YouTube** | Regular uploads. | Opus ~130 |
 | **Torrent** *(optional)* | Your Jackett or Prowlarr, downloaded with aria2c (only the file needed). See **[TORRENTS.md](TORRENTS.md)**. | often FLAC |
+
+Each source is searched with a few queries, the next one only when the ones before found
+nothing that fits: artist + title (with the version, e.g. "… The Midnight Remix", when the title
+names one), album artist + title, title + the other credited artists, title + album. Torrents
+are searched by album artist + album (just the album for a compilation), artist + title, then
+the album artist and the artist alone (discographies).
 
 Every result is checked before it's used: title, artist and length must match; *live*,
 *remix*, *cover*, *sped up* and similar versions are rejected unless your track is that
@@ -99,7 +107,14 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader .
 | `6` Log | what happened | `v` detailed log, `End` follow |
 
 Anywhere: `1`–`6` (or `Alt+1`–`6`, `F1`–`F6`) switch tabs, `[` `]` lower/raise the bandwidth,
-`P` pauses/resumes everything, `q` quits. Quitting stops the tracks in progress; they continue
+`P` pauses/resumes everything, `q` quits.
+
+**Pause** (`P`) stops everything right away: searches and downloads in progress are stopped and
+go back to the front of the queue (they continue from the source they were at), torrents are
+paused in aria2c and keep what they have, and nothing new starts. Tracks being converted
+finish. `P` again resumes.
+
+Quitting (`q`, closing the terminal, or `kill`) stops the tracks in progress; they continue
 next time. Reports are rewritten every few minutes and on quit.
 
 ### Reports
@@ -113,14 +128,28 @@ file or, for songs you already had, at your library copy.
 When a site pushes back (YouTube's "sign in to confirm you're not a bot", rate limits, VK
 captchas, Bandcamp's browser check), that source is **paused** for a while (2 minutes, then
 5, 15, 30, up to an hour) instead of being hammered; tracks that needed it wait ("⟳ retry
-later") and continue when it's back. Other sources carry on meanwhile. The Sources tab shows
-which source is paused, until when, and why; `p` resumes it early.
+later") and continue when it's back, spread out over a couple of minutes. Other sources carry
+on meanwhile. The Sources tab shows which source is paused, until when, and why; `p` resumes it
+early. A track only gives up after several rounds in which a source actually *failed*;
+waiting for a paused source doesn't count.
+
+Bandcamp rate-limits (HTTP 429) quickly: its requests are spaced a second apart, and after a
+429 twice as far each time (up to 20 s), coming back down as answers come in. When its
+requests would wait more than 20 s for their turn, tracks skip it for now (like a paused
+source) instead of holding up the other searches, and come back to it later.
 
 To keep YouTube from flagging you:
 
 - **Use your browser's YouTube login:** Sources → YouTube (or YouTube Music) → `Enter` →
-  *Cookies from browser* → your browser (where you're logged in to YouTube). yt-dlp reads the
-  cookies from the browser each time; nothing is stored. A `cookies.txt` file works too.
+  *Cookies from browser* → your browser (where you're logged in to YouTube). They're read from
+  the browser every 10 minutes (YouTube's, Google's and SoundCloud's cookies only), so cookies
+  the browser rotates are picked up, and each yt-dlp run gets a temporary copy. A `cookies.txt`
+  file works too, but YouTube invalidates exported cookies of a session that's still in use;
+  export them from a private window that you then close. A browser, when set, is used instead
+  of the file. Your browser and your cookies file are never written to (yt-dlp rewrites the
+  cookie file it's given, and YouTube's answers drop expired login cookies from it: given your
+  own file, that used to log you out). The Sources tab says when the cookies hold no YouTube
+  login.
 - YouTube requests are spaced out (2 seconds by default, "Seconds between YouTube requests").
 - If your VPN's address is flagged, you can give YouTube a different route (`e` in Sources).
 
@@ -140,6 +169,18 @@ Each source has a route (`e` in the Sources tab):
 - a **proxy**: `socks5://user:pass@host:port` or `http://host:port`.
 
 Yandex Music and VK default to **direct**, since they need a Russian address.
+
+## Soulseek
+
+Soulseek is a file-sharing network for music; [slskd](https://github.com/slskd/slskd) runs its
+client as a service (like Jackett for torrents) with your Soulseek account. In its `slskd.yml`,
+add an API key under `web: authentication: api_keys:` (16 or more characters, role
+`readwrite`). Then Sources → Soulseek → `Enter`: slskd's address (default
+`http://localhost:5030`), the API key, and slskd's downloads folder (`directories: downloads:`,
+default `~/.local/share/slskd/downloads`); `space` turns it on. Users who can send right away
+come first; one who hasn't started sending within 10 minutes is passed over for the next.
+Finished files are copied from slskd's downloads folder, which keeps its copy. slskd's speed
+isn't part of the bandwidth setting: set slskd's own limit.
 
 ## Yandex Music and VK
 

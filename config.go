@@ -104,6 +104,7 @@ type Config struct {
 	VKToken     string      `json:"vk_token,omitempty"`
 	YandexToken string      `json:"yandex_token,omitempty"`
 	Bandcamp    BandcampCfg `json:"bandcamp"`
+	Slskd       SlskdConfig `json:"slskd"`
 }
 
 // Duration is a time.Duration written as "30m" in JSON.
@@ -123,11 +124,20 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return err
 }
 
-var allSources = []string{"bandcamp", "archive", "yandex", "vk", "youtube_music", "soundcloud", "youtube", "torrent"}
+var allSources = []string{"bandcamp", "archive", "yandex", "vk", "slskd", "audius", "youtube_music", "soundcloud", "youtube", "torrent"}
 
 var sourceLabels = map[string]string{
 	"bandcamp": "Bandcamp", "archive": "Internet Archive", "youtube_music": "YouTube Music",
 	"soundcloud": "SoundCloud", "youtube": "YouTube", "torrent": "Torrent", "vk": "VK", "yandex": "Yandex Music",
+	"audius": "Audius", "slskd": "Soulseek",
+}
+
+// Sources added in a later version go into your order before the first of these you have
+// (else at the end): Soulseek (often lossless) before torrents and the streaming sites,
+// Audius (MP3 320) before YouTube and SoundCloud.
+var newSourcePlace = map[string][]string{
+	"slskd":  {"torrent", "audius", "youtube_music", "youtube", "soundcloud"},
+	"audius": {"youtube_music", "youtube", "soundcloud"},
 }
 
 var sourceDefaultRoute = map[string]string{"vk": routeDirect, "yandex": routeDirect}
@@ -152,7 +162,7 @@ func defaultConfig() Config {
 		Bandcamp:       BandcampCfg{Country: "United States", Postcode: "10001"},
 	}
 	for _, n := range allSources {
-		enabled := n != "vk" && n != "yandex" && n != "torrent"
+		enabled := n != "vk" && n != "yandex" && n != "torrent" && n != "slskd"
 		c.Sources = append(c.Sources, SourceCfg{Name: n, Enabled: enabled, Route: sourceDefaultRoute[n]})
 	}
 	return c
@@ -237,9 +247,17 @@ func (c *Config) fillDefaults() {
 		}
 	}
 	for _, s := range d.Sources {
-		if !have[s.Name] {
-			srcs = append(srcs, s)
+		if have[s.Name] {
+			continue
 		}
+		at := len(srcs)
+		for i, x := range srcs {
+			if containsString(newSourcePlace[s.Name], x.Name) {
+				at = i
+				break
+			}
+		}
+		srcs = append(srcs[:at], append([]SourceCfg{s}, srcs[at:]...)...)
 	}
 	c.Sources = srcs
 }
@@ -364,4 +382,13 @@ func saveConfig(path string, c Config) error {
 
 func (c *Config) playlistCfg(name string) PlaylistCfg {
 	return c.Playlists[name]
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
