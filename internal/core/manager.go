@@ -264,10 +264,7 @@ func (m *Manager) Start() error {
 	router.SetInterface(cfg.DirectInterface)
 	bw.SetCap(cfg.BandwidthMBps * 1e6)
 	m.setTarget(m.initialTarget(cfg))
-	tools, err := findBaseTools()
-	if err != nil {
-		return err
-	}
+	tools := findBaseTools()
 	m.tools = tools
 	m.index = newLibIndex(filepath.Join(m.dataDir, "library-index.json"), tools)
 	m.index.restrict(cfg.LibraryDirs)
@@ -293,6 +290,14 @@ func (m *Manager) Start() error {
 // setup does the slow parts of starting: yt-dlp, sources, playlists, library scan.
 func (m *Manager) setup() {
 	cfg := m.Config()
+	if m.tools.FFmpeg == "" { // before anything runs: jobs wait for ready
+		Logf("ffmpeg isn't installed; fetching it (once)…")
+		if ff, fp, err := fetchFFmpeg(m.ctx, ffmpegDir(), Logf); err != nil {
+			Logf("Couldn't fetch ffmpeg: %v. Downloads can't be converted or checked without it; install ffmpeg, or restart to try again.", err)
+		} else {
+			m.tools.FFmpeg, m.tools.FFprobe = ff, fp
+		}
+	}
 	if needsYtDlp(cfg) {
 		m.ensureYtDlp(cfg)
 	}

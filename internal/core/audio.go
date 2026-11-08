@@ -42,6 +42,9 @@ func targetExtension(format, codec string) string {
 
 // probe returns the audio codec, duration (seconds) and quality of a media file.
 func probe(ctx context.Context, tools *Tools, path string) (string, float64, Quality, error) {
+	if tools.FFprobe == "" {
+		return "", 0, Quality{}, errNoFFmpeg()
+	}
 	out, err := command(ctx, tools.FFprobe, "-v", "error", "-select_streams", "a:0",
 		"-show_entries", "stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,bit_rate,sample_fmt:format=duration,bit_rate",
 		"-of", "json", path).Output()
@@ -149,6 +152,9 @@ func convertAndTag(ctx context.Context, tools *Tools, src, dest, codec string, t
 		args = append(args, "-movflags", "+faststart")
 	}
 	args = append(args, dest)
+	if tools.FFmpeg == "" {
+		return errNoFFmpeg()
+	}
 	var stderr bytes.Buffer
 	cmd := command(ctx, tools.FFmpeg, args...)
 	cmd.Stderr = &stderr

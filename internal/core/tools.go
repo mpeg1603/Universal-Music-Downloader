@@ -17,30 +17,39 @@ import (
 	"time"
 )
 
-// External programs: ffmpeg/ffprobe (required) and yt-dlp (downloaded automatically).
+// External programs: ffmpeg/ffprobe (installed, or fetched: ffmpeg_fetch.go) and yt-dlp
+// (fetched).
 
 type Tools struct {
 	FFmpeg, FFprobe, YtDlp string
 	JSRuntimes             []string // passed to yt-dlp, which needs one for YouTube
 }
 
-// findBaseTools finds ffmpeg, ffprobe and a JavaScript runtime; yt-dlp is fetched
-// separately when a source needs it.
-func findBaseTools() (*Tools, error) {
+// findBaseTools finds ffmpeg and ffprobe (installed, or fetched before into the cache) and a
+// JavaScript runtime. Without ffmpeg, FFmpeg stays empty: the manager fetches it (fetchFFmpeg)
+// before anything needs it. yt-dlp is fetched separately when a source needs it.
+func findBaseTools() *Tools {
 	t := &Tools{}
-	var err error
-	if t.FFmpeg, err = exec.LookPath("ffmpeg"); err != nil {
-		return nil, fmt.Errorf("ffmpeg is not installed; install it first (e.g. `sudo pacman -S ffmpeg` or `sudo apt install ffmpeg`)")
-	}
-	if t.FFprobe, err = exec.LookPath("ffprobe"); err != nil {
-		return nil, fmt.Errorf("ffprobe is not installed; it normally comes with ffmpeg")
+	ff, err1 := exec.LookPath("ffmpeg")
+	fp, err2 := exec.LookPath("ffprobe")
+	if err1 == nil && err2 == nil {
+		t.FFmpeg, t.FFprobe = ff, fp
+	} else if ff, fp, ok := fetchedFFmpeg(ffmpegDir()); ok {
+		t.FFmpeg, t.FFprobe = ff, fp
 	}
 	for _, rt := range []string{"deno", "node", "bun"} {
 		if _, err := exec.LookPath(rt); err == nil {
 			t.JSRuntimes = append(t.JSRuntimes, rt)
 		}
 	}
-	return t, nil
+	return t
+}
+
+func ffmpegDir() string { return filepath.Join(defaultCacheDir(), "bin", "ffmpeg") }
+
+// errNoFFmpeg is what needs ffmpeg says when it's not there.
+func errNoFFmpeg() error {
+	return unavailablef("ffmpeg isn't available: it couldn't be downloaded (see the Log; it's tried again at the next start), and it isn't installed")
 }
 
 func lookPath(name string) (string, bool) {

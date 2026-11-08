@@ -6,7 +6,8 @@ discographies you search for, from many sources (Bandcamp, Soulseek, torrents, Y
 Spotify, and never writes to your library: new files go to their own downloads folder.
 
 It's self-contained: the Soulseek client, the BitTorrent client and the torrent site search
-(Jackett's public site definitions) are built in; only ffmpeg is needed next to it.
+(Jackett's public site definitions) are built in, and the programs it uses (ffmpeg, yt-dlp)
+are downloaded by the app when they aren't installed.
 
 Everything is set up and controlled inside the app: playlists, library folders, quality
 threshold, sources and their order, bandwidth, and every track (cancel, restart, do next).
@@ -93,7 +94,10 @@ with the number of transfers each way).
 
 ## Requirements
 
-- **ffmpeg** (`sudo pacman -S ffmpeg` / `sudo apt install ffmpeg`).
+- **ffmpeg**: the installed one is used; without one, the app downloads ffmpeg and ffprobe once
+  (the FFmpeg project's recommended static builds, [FFmpeg-Builds](https://github.com/FFmpeg-Builds/FFmpeg-Builds),
+  LGPL variant, about 135 MB, checksum-verified) into
+  `~/.cache/universal-music-downloader/bin/ffmpeg/`.
 - **yt-dlp** is downloaded automatically (official build, checksum-verified, refreshed weekly)
   into `~/.cache/universal-music-downloader/`. For YouTube it needs `node` or `deno`.
 - Nothing else: Soulseek, BitTorrent and the torrent site search are built in. Optional:
@@ -178,7 +182,7 @@ Anywhere: `1`–`7` (or `Alt+1`–`7`, `F1`–`F7`) switch tabs, `[` `]` lower/r
 `P` pauses/resumes everything, `q` quits.
 
 **Queue filters and sorting.** `f` lists what can be shown, with how many tracks each:
-everything, to do, in progress, queued, moved to the front, to be retried, downloaded,
+everything, to do, in progress, downloading now (without the searches), searching now, queued, moved to the front, to be retried, downloaded,
 downloaded lossless or lossy, downloaded to replace a worse library copy, in your library,
 in your library below the threshold, not found, cancelled, added from the Search tab, and
 downloaded from each source, library upgrades. `o` sorts by playlist order, state, artist, title, album, length,
@@ -469,7 +473,7 @@ You need Go 1.24 or newer.
 ```sh
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o universal-music-downloader ./cmd/universal-music-downloader
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o universal-music-downloader.exe ./cmd/universal-music-downloader
-go test ./...      # needs ffmpeg; no network needed
+go test ./...      # some tests need ffmpeg installed; no network needed
 ```
 
 The code is in three parts:

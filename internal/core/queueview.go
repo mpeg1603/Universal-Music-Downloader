@@ -14,6 +14,8 @@ var QueueFilters = []QueueOption{
 	{"all", "all tracks"},
 	{"todo", "to do (queued, in progress or retried later)"},
 	{"active", "in progress"},
+	{"downloading", "downloading now (no searches)"},
+	{"searching", "searching now"},
 	{"queued", "queued, not started yet"},
 	{"prioritized", "moved to the front (p)"},
 	{"waiting", "to be retried later"},
@@ -58,6 +60,10 @@ func MatchesFilter(v JobView, f string) bool {
 	switch f {
 	case "active":
 		return v.State.Active()
+	case "downloading":
+		return v.State == JobDownloading
+	case "searching":
+		return v.State == JobSearching
 	case "todo":
 		return v.State == JobQueued || v.State.Active() || v.State == JobWaiting
 	case "queued":

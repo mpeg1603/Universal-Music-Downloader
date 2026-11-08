@@ -77,7 +77,7 @@ func TestTUIPages(t *testing.T) {
 	if text = show(); !strings.Contains(text, "downloaded in lossless quality") {
 		t.Errorf("filter list:\n%s", text)
 	}
-	for i := 0; i < 6; i++ { // down to "downloaded"
+	for i := 0; i < 8; i++ { // down to "downloaded"
 		screen.InjectKey(tcell.KeyDown, 0, tcell.ModNone)
 	}
 	screen.InjectKey(tcell.KeyEnter, 0, tcell.ModNone)
