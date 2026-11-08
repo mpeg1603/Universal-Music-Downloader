@@ -271,6 +271,21 @@ func (p *fakeSlskPeer) readP(sc *slskConn) {
 			p.wantFile[token] = int64(size)
 			p.mu.Unlock()
 			sc.send(pmTransferResponse, (&slskMsg{}).u32(token).boolean(true))
+		case pmSharedFileListRequest:
+			dirs := map[string][]string{}
+			for path := range p.files {
+				i := strings.LastIndexByte(path, '\\')
+				dirs[path[:i]] = append(dirs[path[:i]], path)
+			}
+			m := (&slskMsg{}).u32(uint32(len(dirs)))
+			for dir, paths := range dirs {
+				m.str(dir).u32(uint32(len(paths)))
+				for _, path := range paths {
+					writeSlskFile(m, slskFile{Name: path[len(dir)+1:], Size: int64(len(p.files[path]))})
+				}
+			}
+			m.u32(0).u32(0)
+			sc.write(slskFrame(pmSharedFileListResponse, 4, slskCompress(m.b)))
 		case pmFolderContentsRequest:
 			token, folder := r.u32(), r.str()
 			m := (&slskMsg{}).u32(token).str(folder).u32(1).str(folder)
@@ -791,4 +806,64 @@ func TestSoulseekManualDownloads(t *testing.T) {
 	}
 	coverDest := filepath.Join(m.Config().OutputDir, "Soulseek", "RAM", "cover.jpg")
 	WaitFor(t, func() bool { got, _ := os.ReadFile(coverDest); return bytes.Equal(got, cover) })
+}
+
+// A user who sends fast and in good quality gets asked for the queue's other tracks they share.
+func TestSoulseekSeederAffinity(t *testing.T) {
+	tools := NeedFFmpeg(t)
+	flac, err := os.ReadFile(sine(t, filepath.Join(t.TempDir(), "x.flac"), 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newFakeSlskServer(t)
+	peer := newFakeSlskPeer(t, "remote")
+	peer.files[`Music\Deftones\White Pony\01 - Feiticeira.flac`] = flac
+	peer.files[`Music\Deftones\White Pony\02 - Digital Bath.flac`] = flac
+	var mu sync.Mutex
+	var searches []string
+	srv.onSearch = func(token uint32, text string) {
+		mu.Lock()
+		searches = append(searches, text)
+		mu.Unlock()
+		if strings.Contains(text, "Feiticeira") {
+			peer.answerSearch(token)
+		}
+	}
+	c := testSlskClient(t, srv, nil, nil)
+	srv.mu.Lock()
+	srv.addrs["remote"] = slskAddr{ip: net.IPv4(127, 0, 0, 1), port: peer.port()}
+	srv.mu.Unlock()
+	peer.clientAt = net.JoinHostPort("127.0.0.1", strconv.Itoa(c.listenPort()))
+	a := MakeTrack("Feiticeira", []string{"Deftones"}, "White Pony", 4)
+	b := MakeTrack("Digital Bath", []string{"Deftones"}, "White Pony", 4)
+	a.Key, b.Key = "a", "b"
+	src := newSoulseekSource(c, "flac")
+	lib := newLibrary()
+	lib.add("list", b) // searched (and not found) first
+	lib.add("list", a)
+	m := TestManager(t, tools, []Source{src}, lib, func(c *Config) { c.Format, c.SearchWorkers = "flac", 1 })
+	src.goodSeeder = func(user string, speed float64) { m.seederAffinity(user, speed) }
+	m.srcMu.Lock()
+	m.slsk, m.slskSrc = c, src
+	m.srcMu.Unlock()
+	RunManager(t, m)
+	deadline := time.Now().Add(20 * time.Second)
+	for v, _ := m.JobView("b"); v.State != JobDone; v, _ = m.JobView("b") {
+		if time.Now().After(deadline) {
+			va, _ := m.JobView("a")
+			mu.Lock()
+			lines, _ := AppLog.Snapshot()
+			var log []string
+			for _, l := range lines[max(0, len(lines)-25):] {
+				log = append(log, l.Text)
+			}
+			t.Fatalf("b: %v %s\na: %v %s\nsearches %q\nspeed %v\n%s", v.State, v.Reason, va.State, va.Rec.SourceURL, searches, c.lastSpeed("remote"), strings.Join(log, "\n"))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	v, _ := m.JobView("b")
+	if !strings.HasPrefix(v.Rec.SourceURL, "soulseek://remote/") {
+		t.Errorf("b came from %s", v.Rec.SourceURL)
+	}
+	peer.waitFor(pmSharedFileListRequest, 1)
 }

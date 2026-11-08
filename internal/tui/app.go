@@ -45,6 +45,9 @@ type tui struct {
 
 	// search
 	findField                   *tview.InputField
+	fArtist, fAlbum             *tview.InputField
+	fTrack, fYear               *tview.InputField
+	resultRows                  []int // results table row → result (-1: a heading)
 	findInfo                    *tview.TextView
 	resultsTable                *tview.Table
 	results                     []core.MusicResult
@@ -554,6 +557,9 @@ func (ui *tui) refresh() {
 	if o.Torrent > 1000 {
 		speed += fmt.Sprintf(", torrents %s", core.FmtRate(o.Torrent))
 	}
+	if o.SlskOn && (o.SlskDown > 1000 || o.SlskUp > 1000) {
+		speed += fmt.Sprintf(", soulseek ⇣%s ⇡%s", core.FmtRate(o.SlskDown), core.FmtRate(o.SlskUp))
+	}
 	todo := o.Counts[core.JobQueued] + o.Counts[core.JobSearching] + o.Counts[core.JobReady] + o.Counts[core.JobDownloading]
 	line1 := fmt.Sprintf(" [::b]spotify-downloader[::-]  %s   ⇣ %s   downloads %d/%d", state, speed, o.DlUsed, o.DlLimit)
 	if o.DlWaiting > 0 {
@@ -614,7 +620,7 @@ func (ui *tui) footerText() string {
 	hints := map[string]string{
 		"queue":    " [::b]Enter[::-] details  [::b]c[::-] cancel  [::b]r[::-] restart  [::b]p[::-] do next  [::b]R[::-] retry all failed  [::b]f[::-] filter  [::b]o[::-] sort  [::b]O[::-] reverse  [::b]/[::-] find in queue  [::b]Esc[::-] show all",
 		"search":   " [::b]/[::-] find music  [::b]Enter[::-] add result / show playlist  [::b]Tab[::-] next list  [::b]a[::-] add file/link  [::b]d[::-] remove  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]R[::-] re-read",
-		"library":  " [::b]a[::-] add folder  [::b]d[::-] remove  [::b]s[::-] rescan  [::b]t[::-] quality threshold",
+		"library":  " [::b]a[::-] add folder  [::b]d[::-] remove  [::b]s[::-] rescan  [::b]t[::-] quality threshold  [::b]u[::-] upgrade files below a quality",
 		"sources":  " [::b]space[::-] on/off  [::b]K J[::-] move up/down  [::b]Enter[::-] settings  [::b]e[::-] route  [::b]p[::-] pause/resume  [::b]b[::-] paste Bandcamp links",
 		"soulseek": " [::b]/[::-] search  [::b]Enter[::-] download  [::b]d[::-] folder  [::b]Tab[::-] next pane  [::b]n[::-] message  [::b]j[::-] join room  [::b]l[::-] leave/close  [::b]m[::-] message user  [::b]x[::-] stop upload  [::b]B[::-] ban  [::b]o[::-] port  [::b]R[::-] reconnect",
 		"settings": " [::b]Tab ↑ ↓[::-] move between fields  [::b]Esc[::-] leave a field  Save applies the changes right away",

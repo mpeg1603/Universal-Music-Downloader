@@ -35,6 +35,9 @@ type SourceError struct {
 	// emailed link); the track waits too, instead of being taken from a worse source.
 	Pending bool
 	Retry   time.Duration // for Pending: when to look again (unless woken earlier)
+	// Busy: the source would make the track wait (its few slots are taken) while bandwidth is
+	// to spare; the track goes on to the next sources and comes back to this one later.
+	Busy bool
 }
 
 func (e *SourceError) Error() string { return e.Msg }
@@ -49,6 +52,15 @@ func unavailablef(format string, args ...any) error {
 
 func blockedf(format string, args ...any) error {
 	return &SourceError{Msg: fmt.Sprintf(format, args...), Unavailable: true, Blocked: true}
+}
+
+func busyf(format string, args ...any) error {
+	return &SourceError{Msg: fmt.Sprintf(format, args...), Busy: true}
+}
+
+func isBusy(err error) bool {
+	var se *SourceError
+	return errors.As(err, &se) && se.Busy
 }
 
 func isUnavailable(err error) bool {

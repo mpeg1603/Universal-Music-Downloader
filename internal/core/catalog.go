@@ -24,6 +24,7 @@ import (
 type MusicResult struct {
 	Kind     string  // "track", "album" or "artist"
 	ID       int64   // Deezer's
+	AlbumID  int64   // the album of a track (an album's own ID)
 	Title    string  // the track's or album's title; the artist's name for an artist
 	Artist   string  // for tracks and albums
 	Album    string  // for tracks
@@ -44,38 +45,103 @@ func (r MusicResult) String() string {
 }
 
 var (
-	reKindPrefix = regexp.MustCompile(`(?i)^\s*(track|song|album|artist|discography)\s*:\s*`)
-	reMusicDash  = regexp.MustCompile(`\s+[-–—]\s+`)
+	reTag       = regexp.MustCompile(`(?i)(?:^|\s)(track|song|title|album|artist|discography|year)\s*:\s*`)
+	reMusicDash = regexp.MustCompile(`\s+[-–—]\s+`)
+	reYears     = regexp.MustCompile(`^(\d{4})(?:\s*[-–]\s*(\d{4}))?$`)
 )
 
-// musicQuery is what was typed: an optional kind ("track:", "album:", "artist:") and one or
-// two parts around " - ".
+// musicQuery is what was typed: free text (one or two parts around " - "), and fields given
+// with tags (artist:, album:, track:, year:).
 type musicQuery struct {
-	kind string
-	a, b string
+	kind                       string // track, album or artist when it's clear ("" any)
+	a, b                       string // the free text, split around " - " (b empty without)
+	artist, album, track, year string
+}
+
+func (q musicQuery) tagged() bool {
+	return q.artist != "" || q.album != "" || q.track != "" || q.year != ""
+}
+
+func tagName(k string) string {
+	switch k = strings.ToLower(k); k {
+	case "song", "title":
+		return "track"
+	case "discography":
+		return "artist"
+	}
+	return k
 }
 
 func parseMusicQuery(s string) musicQuery {
+	s = strings.TrimSpace(s)
 	var q musicQuery
-	if m := reKindPrefix.FindStringSubmatch(s); m != nil {
-		q.kind = strings.ToLower(m[1])
-		switch q.kind {
-		case "song":
-			q.kind = "track"
-		case "discography":
-			q.kind = "artist"
+	locs := reTag.FindAllStringSubmatchIndex(s, -1)
+	free := s
+	if len(locs) > 0 {
+		free = s[:locs[0][0]]
+	}
+	type tag struct{ k, v string }
+	var tags []tag
+	for i, l := range locs {
+		end := len(s)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
 		}
-		s = s[len(m[0]):]
+		tags = append(tags, tag{tagName(s[l[2]:l[3]]), strings.Trim(strings.TrimSpace(s[l[1]:end]), `"'`)})
 	}
-	parts := reMusicDash.Split(strings.TrimSpace(s), 2)
-	q.a = strings.TrimSpace(parts[0])
-	if len(parts) == 2 {
-		q.b = strings.TrimSpace(parts[1])
+	split := func(text string) (string, string) {
+		parts := reMusicDash.Split(strings.TrimSpace(text), 2)
+		if len(parts) == 2 {
+			return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		}
+		return strings.TrimSpace(parts[0]), ""
 	}
-	if q.kind == "artist" && q.b != "" {
-		q.a, q.b = q.a+" - "+q.b, ""
+	// "album: Artist - Album": one kind in front of "A - B" says which it is.
+	if strings.TrimSpace(free) == "" && len(tags) == 1 && tags[0].k != "year" && reMusicDash.MatchString(tags[0].v) {
+		q.kind = tags[0].k
+		if q.kind == "artist" {
+			q.a = tags[0].v
+		} else {
+			q.a, q.b = split(tags[0].v)
+		}
+		return q
+	}
+	for _, t := range tags {
+		switch t.k {
+		case "artist":
+			q.artist = t.v
+		case "album":
+			q.album = t.v
+		case "track":
+			q.track = t.v
+		case "year":
+			q.year = t.v
+		}
+	}
+	q.a, q.b = split(free)
+	switch {
+	case q.track != "":
+		q.kind = "track"
+	case q.album != "", q.year != "" && q.artist != "":
+		q.kind = "album"
+	case q.artist != "" && q.a == "":
+		q.kind = "artist"
 	}
 	return q
+}
+
+// years is the range a year field asks for (0, 0: any).
+func (q musicQuery) years() (int, int) {
+	m := reYears.FindStringSubmatch(strings.TrimSpace(q.year))
+	if m == nil {
+		return 0, 0
+	}
+	from, _ := strconv.Atoi(m[1])
+	to := from
+	if m[2] != "" {
+		to, _ = strconv.Atoi(m[2])
+	}
+	return min(from, to), max(from, to)
 }
 
 // sim is how alike two names are (0-100); unlike a plain token-set match, extra words count
@@ -146,46 +212,61 @@ func (d *Deezer) search(ctx context.Context, kind, q string, limit int, out any)
 	return d.get(ctx, fmt.Sprintf(d.base+"/%s?limit=%d&q=%s", path, limit, url.QueryEscape(q)), out)
 }
 
-// SearchMusic finds tracks, albums and artists fitting what was typed, best first.
+// SearchMusic finds tracks, albums and artists fitting what was typed, best first. Besides
+// "A - B" text, artist:, album:, track: and year: fields narrow it down; each is matched
+// loosely (a typo or a missing word still fits).
 func (d *Deezer) SearchMusic(ctx context.Context, text string) ([]MusicResult, error) {
 	q := parseMusicQuery(text)
-	if q.a == "" {
+	words := strings.Join(nonEmpty(q.artist, q.album, q.track, q.a, q.b), " ")
+	if words == "" {
 		return nil, nil
 	}
 	want := func(kind string) bool { return q.kind == "" || q.kind == kind }
-	// Deezer's field searches (artist:"…" track:"…") find nothing any more, so plain words
-	// are searched, and what comes back is scored against both readings of "A - B".
-	type ask struct {
-		kind, query string
-		orders      [][2]string // artist, title ("" artist: the whole text against both)
-	}
-	var asks []ask
-	if q.b == "" {
-		for _, k := range []string{"artist", "album", "track"} {
-			if want(k) {
-				asks = append(asks, ask{k, q.a, [][2]string{{"", q.a}}})
-			}
-		}
-	} else {
-		orders := [][2]string{{q.a, q.b}, {q.b, q.a}}
-		for _, k := range []string{"track", "album"} {
-			if want(k) {
-				asks = append(asks, ask{k, q.a + " " + q.b, orders})
-			}
-		}
-	}
-	score := func(a ask, artist, title string) float64 {
-		best := 0.0
-		for _, o := range a.orders {
-			var s float64
-			if o[0] == "" {
-				s = max(sim(o[1], artist+" "+title), titleSim(o[1], title)-5)
+	// Deezer's field searches (artist:"…" track:"…") find nothing any more, so plain words are
+	// searched, and what comes back is scored here.
+	score := func(kind, artist, title, album string) float64 {
+		var parts []float64
+		if q.artist != "" {
+			if kind == "artist" {
+				parts = append(parts, sim(q.artist, title))
 			} else {
-				s = 0.45*sim(o[0], artist) + 0.55*titleSim(o[1], title)
+				parts = append(parts, sim(q.artist, artist))
 			}
-			best = max(best, s)
 		}
-		return best
+		if q.album != "" {
+			switch kind {
+			case "album":
+				parts = append(parts, titleSim(q.album, title))
+			case "track":
+				parts = append(parts, titleSim(q.album, album))
+			}
+		}
+		if q.track != "" && kind == "track" {
+			parts = append(parts, titleSim(q.track, title))
+		}
+		if q.a != "" {
+			var free float64
+			if q.b == "" {
+				name := artist + " " + title
+				if kind == "artist" {
+					name = title
+				}
+				free = max(sim(q.a, name), titleSim(q.a, title)-5)
+			} else {
+				for _, o := range [][2]string{{q.a, q.b}, {q.b, q.a}} {
+					free = max(free, 0.45*sim(o[0], artist)+0.55*titleSim(o[1], title))
+				}
+			}
+			parts = append(parts, free)
+		}
+		if len(parts) == 0 {
+			return 50
+		}
+		var sum float64
+		for _, p := range parts {
+			sum += p
+		}
+		return sum / float64(len(parts))
 	}
 	var mu sync.Mutex
 	best := map[string]MusicResult{}
@@ -198,38 +279,34 @@ func (d *Deezer) SearchMusic(ctx context.Context, text string) ([]MusicResult, e
 		mu.Unlock()
 	}
 	var firstErr error
-	for _, a := range asks {
-		switch a.kind {
-		case "artist":
-			var res struct{ Data []dzArtist }
-			if err := d.search(ctx, "artist", a.query, 6, &res); err != nil {
-				firstErr = err
-				continue
-			}
-			for i, x := range res.Data {
-				// Popular artists first among equally fitting names.
-				keep(MusicResult{Kind: "artist", ID: x.ID, Title: x.Name, Count: x.NbAlbum, Score: sim(a.query, x.Name) - float64(i)*0.1})
-			}
-		case "album":
-			var res struct{ Data []dzAlbum }
-			if err := d.search(ctx, "album", a.query, 15, &res); err != nil {
-				firstErr = err
-				continue
-			}
-			for i, x := range res.Data {
-				keep(MusicResult{Kind: "album", ID: x.ID, Title: x.Title, Artist: x.Artist.Name, Year: year(x.ReleaseDate),
-					Count: x.NbTracks, Score: score(a, x.Artist.Name, x.Title) - float64(i)*0.1})
-			}
-		case "track":
-			var res struct{ Data []dzTrack }
-			if err := d.search(ctx, "track", a.query, 15, &res); err != nil {
-				firstErr = err
-				continue
-			}
-			for i, x := range res.Data {
-				keep(MusicResult{Kind: "track", ID: x.ID, Title: x.Title, Artist: x.Artist.Name, Album: x.Album.Title,
-					Duration: x.Duration, Score: score(a, x.Artist.Name, x.Title) - float64(i)*0.1})
-			}
+	if want("artist") && (q.b == "" || q.kind == "artist") && q.album == "" && q.track == "" {
+		var res struct{ Data []dzArtist }
+		if err := d.search(ctx, "artist", FirstNonEmpty(q.artist, q.a), 6, &res); err != nil {
+			firstErr = err
+		}
+		for i, x := range res.Data {
+			// Popular artists first among equally fitting names.
+			keep(MusicResult{Kind: "artist", ID: x.ID, Title: x.Name, Count: x.NbAlbum, Score: score("artist", "", x.Name, "") - float64(i)*0.1})
+		}
+	}
+	if want("album") {
+		var res struct{ Data []dzAlbum }
+		if err := d.search(ctx, "album", words, 15, &res); err != nil {
+			firstErr = err
+		}
+		for i, x := range res.Data {
+			keep(MusicResult{Kind: "album", ID: x.ID, AlbumID: x.ID, Title: x.Title, Artist: x.Artist.Name, Year: year(x.ReleaseDate),
+				Count: x.NbTracks, Score: score("album", x.Artist.Name, x.Title, "") - float64(i)*0.1})
+		}
+	}
+	if want("track") {
+		var res struct{ Data []dzTrack }
+		if err := d.search(ctx, "track", words, 15, &res); err != nil {
+			firstErr = err
+		}
+		for i, x := range res.Data {
+			keep(MusicResult{Kind: "track", ID: x.ID, AlbumID: x.Album.ID, Title: x.Title, Artist: x.Artist.Name, Album: x.Album.Title,
+				Duration: x.Duration, Score: score("track", x.Artist.Name, x.Title, x.Album.Title) - float64(i)*0.1})
 		}
 	}
 	if len(best) == 0 && firstErr != nil {
@@ -239,8 +316,38 @@ func (d *Deezer) SearchMusic(ctx context.Context, text string) ([]MusicResult, e
 	for _, r := range best {
 		out = append(out, r)
 	}
+	sortResults(out, q)
+	// Search answers don't say when an album came out: look that up for the best ones.
+	d.fillYears(ctx, out[:min(len(out), 14)])
+	if from, to := q.years(); from > 0 {
+		for i := range out {
+			y, _ := strconv.Atoi(out[i].Year)
+			switch {
+			case out[i].Kind == "artist":
+			case y == 0:
+				out[i].Score -= 5
+			case y < from || y > to:
+				out[i].Score -= 40
+			}
+		}
+		sortResults(out, q)
+	}
+	return out[:min(len(out), 30)], nil
+}
+
+func nonEmpty(list ...string) []string {
+	var out []string
+	for _, s := range list {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func sortResults(out []MusicResult, q musicQuery) {
 	rank := map[string]int{"artist": 0, "album": 1, "track": 2}
-	if q.b != "" {
+	if q.b != "" || q.track != "" {
 		rank = map[string]int{"track": 0, "album": 1, "artist": 2}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -249,7 +356,33 @@ func (d *Deezer) SearchMusic(ctx context.Context, text string) ([]MusicResult, e
 		}
 		return rank[out[i].Kind] < rank[out[j].Kind]
 	})
-	return out[:min(len(out), 30)], nil
+}
+
+// fillYears looks up the release year of the results' albums (kept for later searches).
+func (d *Deezer) fillYears(ctx context.Context, rs []MusicResult) {
+	for i := range rs {
+		r := &rs[i]
+		if r.Year != "" || r.AlbumID == 0 {
+			continue
+		}
+		d.mu.Lock()
+		y, ok := d.years[r.AlbumID]
+		d.mu.Unlock()
+		if !ok {
+			var al dzAlbum
+			if err := d.get(ctx, fmt.Sprintf(d.base+"/album/%d", r.AlbumID), &al); err != nil {
+				return
+			}
+			y = year(al.ReleaseDate)
+			d.mu.Lock()
+			if d.years == nil {
+				d.years = map[int64]string{}
+			}
+			d.years[r.AlbumID] = y
+			d.mu.Unlock()
+		}
+		r.Year = y
+	}
 }
 
 // Expand turns a result into the tracks to download, and names the list ("Artist - Album").

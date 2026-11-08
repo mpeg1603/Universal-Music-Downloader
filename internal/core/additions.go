@@ -2,9 +2,12 @@ package core
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -15,20 +18,34 @@ import (
 // addition is a playlist of its own ("Search: Artist - Album"), kept in the data folder, so
 // it can be turned off, prioritized or removed like the others.
 
-const additionPrefix = "Search: "
+const (
+	additionPrefix = "Search: "
+	upgradePrefix  = "Upgrade: "
+)
 
 type Addition struct {
-	ID     string    `json:"id"` // kind:deezer id
-	Kind   string    `json:"kind"`
-	Name   string    `json:"name"`
-	Added  time.Time `json:"added"`
-	Tracks []*Track  `json:"tracks"`
+	ID        string    `json:"id"` // kind:deezer id, or upgrade:threshold
+	Kind      string    `json:"kind"`
+	Name      string    `json:"name"`
+	Added     time.Time `json:"added"`
+	Tracks    []*Track  `json:"tracks,omitempty"`
+	Threshold Threshold `json:"threshold,omitempty"` // an upgrade's: library files below it are downloaded again
 }
 
-func (a *Addition) Playlist() string { return additionPrefix + a.Name }
+func (a *Addition) Playlist() string {
+	if a.Kind == "upgrade" {
+		return upgradePrefix + a.Name
+	}
+	return additionPrefix + a.Name
+}
 
-// IsAddition tells whether a playlist came from the Search tab.
-func IsAddition(playlist string) bool { return strings.HasPrefix(playlist, additionPrefix) }
+// IsAddition tells whether a playlist came from the Search tab or a library upgrade.
+func IsAddition(playlist string) bool {
+	return strings.HasPrefix(playlist, additionPrefix) || IsUpgrade(playlist)
+}
+
+// IsUpgrade tells whether a playlist is a library upgrade.
+func IsUpgrade(playlist string) bool { return strings.HasPrefix(playlist, upgradePrefix) }
 
 type additions struct {
 	mu   sync.Mutex
@@ -58,11 +75,15 @@ func (a *additions) all() []*Addition {
 	return append([]*Addition(nil), a.list...)
 }
 
-// mergeInto adds every addition's tracks to lib.
-func (a *additions) mergeInto(lib *Library) {
-	for _, ad := range a.all() {
+// mergeAdditions adds every addition's tracks to lib (an upgrade's come from the library scan).
+func (m *Manager) mergeAdditions(lib *Library) {
+	for _, ad := range m.adds.all() {
+		tracks := ad.Tracks
+		if ad.Kind == "upgrade" {
+			tracks = m.upgradeTracks(ad.Threshold)
+		}
 		lib.playlist(ad.Playlist())
-		for _, t := range ad.Tracks {
+		for _, t := range tracks {
 			c := *t
 			lib.add(ad.Playlist(), &c)
 		}
@@ -165,5 +186,125 @@ func (m *Manager) Additions() []AdditionStatus {
 		out = append(out, AdditionStatus{Playlist: a.Playlist(), Kind: a.Kind, Tracks: len(a.Tracks), Added: a.Added})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Added.After(out[j].Added) })
+	return out
+}
+
+// --- upgrading the library ------------------------------------------------------------------
+
+// libraryBelow lists the library files (with an artist and title) below a quality level.
+func (m *Manager) libraryBelow(th Threshold) []*LibFile {
+	if m.index == nil {
+		return nil
+	}
+	roots := m.Config().LibraryDirs
+	var out []*LibFile
+	for _, f := range m.index.all() {
+		if f.Title != "" && f.Artist != "" && underAny(f.Path, roots) && !th.meets(f.Q) {
+			out = append(out, f)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+// UpgradeCounts says how many library files are below each quality level.
+func (m *Manager) UpgradeCounts() map[Threshold]int {
+	out := map[Threshold]int{}
+	if m.index == nil {
+		return out
+	}
+	roots := m.Config().LibraryDirs
+	files := m.index.all()
+	for _, th := range Thresholds {
+		if th.Name == "any" {
+			continue
+		}
+		for _, f := range files {
+			if f.Title != "" && f.Artist != "" && underAny(f.Path, roots) && !th.Name.meets(f.Q) {
+				out[th.Name]++
+			}
+		}
+	}
+	return out
+}
+
+func (m *Manager) upgradeTracks(th Threshold) []*Track {
+	var out []*Track
+	for _, f := range m.libraryBelow(th) {
+		sum := sha1.Sum([]byte(f.Path))
+		t := &Track{Key: "lib:" + hex.EncodeToString(sum[:8]), Title: f.Title, Artists: splitArtistTag(f.Artist),
+			AlbumArtist: f.AlbumArtist, Album: f.Album, DurationMs: int(f.Duration * 1000), ISRC: f.ISRC}
+		out = append(out, t)
+	}
+	return out
+}
+
+// splitArtistTag splits an artist tag holding several ("A; B", "A / B").
+func splitArtistTag(s string) []string {
+	var out []string
+	for _, p := range reTagArtistSep.Split(s, -1) {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{s}
+	}
+	return out
+}
+
+var reTagArtistSep = regexp.MustCompile(`\s*(?:;|\s/\s|\x00)\s*`)
+
+// UpgradeLibrary queues every library file below th to be downloaded again in better quality
+// (a download only counts when it's clearly better than your copy, which stays as it is). It
+// returns the new playlist and its size; running it again refreshes it.
+func (m *Manager) UpgradeLibrary(th Threshold) (string, int, error) {
+	if th.min() <= 0 || th == "any" {
+		return "", 0, fmt.Errorf("pick a quality level to upgrade to")
+	}
+	tracks := m.upgradeTracks(th)
+	if len(tracks) == 0 {
+		return "", 0, fmt.Errorf("no library files below %s", th)
+	}
+	label := string(th)
+	for _, t := range Thresholds {
+		if t.Name == th {
+			label = strings.SplitN(t.Label, " (", 2)[0]
+		}
+	}
+	ad := &Addition{ID: "upgrade:" + string(th), Kind: "upgrade", Name: "below " + label, Added: time.Now(), Threshold: th}
+	m.adds.mu.Lock()
+	for i, x := range m.adds.list {
+		if x.ID == ad.ID {
+			m.adds.list = append(m.adds.list[:i], m.adds.list[i+1:]...)
+			break
+		}
+	}
+	m.adds.list = append(m.adds.list, ad)
+	err := m.adds.saveLocked()
+	m.adds.mu.Unlock()
+	if err != nil {
+		return "", 0, err
+	}
+	m.libMu.Lock()
+	m.full.playlist(ad.Playlist())
+	for _, t := range tracks {
+		m.full.add(ad.Playlist(), t)
+	}
+	m.libMu.Unlock()
+	m.saveLibrary()
+	m.rebuildJobs()
+	Logf("Library upgrade: %d files below %s queued (%s)", len(tracks), label, ad.Playlist())
+	return ad.Playlist(), len(tracks), nil
+}
+
+// upgradeThresholds maps upgrade playlists to the quality their tracks must reach.
+func (m *Manager) upgradeThresholds() map[string]Threshold {
+	out := map[string]Threshold{}
+	for _, a := range m.adds.all() {
+		if a.Kind == "upgrade" {
+			out[a.Playlist()] = a.Threshold
+		}
+	}
 	return out
 }

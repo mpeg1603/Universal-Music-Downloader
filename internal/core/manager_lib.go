@@ -31,7 +31,7 @@ func (m *Manager) importInputs() {
 			Logf("Couldn't read %s: %v", in.Path, err)
 		}
 	}
-	m.adds.mergeInto(lib)
+	m.mergeAdditions(lib)
 	m.libMu.Lock()
 	if old := m.full; old != nil {
 		for k, t := range lib.Tracks { // keep earlier Deezer lookups
@@ -94,6 +94,7 @@ func (m *Manager) makeJobs() {
 	recs := m.state.all()
 	members := map[string][]string{}
 	prio := map[string]int{}
+	upTh := m.upgradeThresholds()
 	for _, p := range lib.Playlists {
 		pr := cfg.Playlists[p.Name].Priority
 		for _, k := range p.Keys {
@@ -117,6 +118,12 @@ func (m *Manager) makeJobs() {
 			j.Track = t
 		}
 		j.idx, j.playlists, j.prio = i, members[t.Key], prio[t.Key]
+		j.minQuality = ""
+		for _, p := range j.playlists {
+			if th, ok := upTh[p]; ok && (j.minQuality == "" || th.min() > j.minQuality.min()) {
+				j.minQuality = th
+			}
+		}
 		j.mu.Unlock()
 		jobs[t.Key] = j
 		order = append(order, j)
@@ -216,6 +223,9 @@ func (m *Manager) reevaluateLibrary() {
 func (m *Manager) checkJob(j *Job, th Threshold) bool {
 	j.mu.Lock()
 	st, force, t := j.state, j.force, j.Track
+	if j.minQuality != "" && j.minQuality.min() > th.min() {
+		th = j.minQuality // an upgrade asks for more than your threshold
+	}
 	j.mu.Unlock()
 	if st.Active() || st == JobDone || st == JobCancelled || force {
 		return false

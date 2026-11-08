@@ -43,6 +43,8 @@ type Backend interface {
 	// Your library.
 	LibraryStatus() LibScanStatus
 	Rescan()
+	UpgradeCounts() map[Threshold]int // library files below each quality level
+	UpgradeLibrary(th Threshold) (playlist string, tracks int, err error)
 
 	// Sources.
 	SourceStatus() []SourceStatus

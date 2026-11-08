@@ -70,6 +70,9 @@ func (ui *tui) fillSettings() {
 	number("Most downloads at once", float64(c.MaxDownloads), 4, func(c *core.Config, v float64) { c.MaxDownloads = int(v) })
 	number("Searches at once", float64(c.SearchWorkers), 4, func(c *core.Config, v float64) { c.SearchWorkers = int(v) })
 	number("Results to try per source", float64(c.TriesPerSrc), 4, func(c *core.Config, v float64) { c.TriesPerSrc = max(1, int(v)) })
+	jump := !c.NoQueueJump
+	f.AddCheckbox("Skip busy sources while bandwidth is to spare", jump, func(b bool) { jump = b })
+	apply = append(apply, func(c *core.Config) error { c.NoQueueJump = !jump; return nil })
 	enrich := c.Enrich
 	f.AddCheckbox("Look up missing details on Deezer", c.Enrich, func(b bool) { enrich = b })
 	apply = append(apply, func(c *core.Config) error { c.Enrich = enrich; return nil })

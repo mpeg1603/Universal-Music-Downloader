@@ -217,6 +217,8 @@ type slskClient struct {
 	dialing    map[string]*slskDial
 	searches   map[uint32]*slskSearch
 	folderWait map[uint32]chan []slskFile // FolderContents waiting for answers
+	browseWait map[string]chan []slskFile // Browse waiting for users' file lists
+	speeds     map[string]float64         // the last download speed from each user (bytes/s)
 	downloads  map[string]*slskDownload
 	userLocks  map[string]chan struct{}
 	ups        *slskUploads
@@ -242,7 +244,7 @@ func newSlskClient(cfg SoulseekConfig, route string, shares *slskShares) *slskCl
 		dlGate: newGate(cfg.MaxDownloads()), upLimit: &slskThrottle{}, reconnect: make(chan struct{}, 1),
 		token: rand.Uint32N(1 << 30), privileged: map[string]bool{}, addrs: map[string]slskAddr{},
 		addrWait: map[string][]chan slskAddr{}, pending: map[uint32]*slskConnReq{}, peers: map[string]*slskConn{},
-		dialing: map[string]*slskDial{}, searches: map[uint32]*slskSearch{}, folderWait: map[uint32]chan []slskFile{}, downloads: map[string]*slskDownload{},
+		dialing: map[string]*slskDial{}, searches: map[uint32]*slskSearch{}, folderWait: map[uint32]chan []slskFile{}, browseWait: map[string]chan []slskFile{}, speeds: map[string]float64{}, downloads: map[string]*slskDownload{},
 		userLocks: map[string]chan struct{}{}, wishEvery: 12 * time.Minute,
 		searchPace: &rateLimiter{interval: cfg.SearchInterval()}, searchMin: 4 * time.Second, searchMax: 12 * time.Second, searchSem: make(chan struct{}, 2),
 		answerSem: make(chan struct{}, 12), handshakes: make(chan struct{}, 64)}

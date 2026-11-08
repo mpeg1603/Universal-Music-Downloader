@@ -47,6 +47,10 @@ func newAria2(bin string) *aria2 {
 	return &aria2{bin: bin, client: &http.Client{Timeout: 30 * time.Second}}
 }
 
+// jumpStall: a track that waits this long for a torrent that sends nothing goes on to later
+// sources, when queue jumping allows (see Manager.mayJump).
+const jumpStall = 3 * time.Minute
+
 // stallTimeout is how long a torrent may receive nothing before aria2c gives up on it.
 const stallTimeout = 3 * time.Minute
 
@@ -343,6 +347,9 @@ type torrentManager struct {
 	added   int     // times files were added to a running download (which restarts it), for tests
 	limit   float64 // overall speed limit (bytes/s), applied when aria2c (re)starts
 	paused  bool    // everything paused (by you); downloads started meanwhile start paused
+	// jump says whether a track may stop waiting for a torrent that sends nothing (queue
+	// jumping; see Manager.mayJump). nil: wait until the time limit.
+	jump func() bool
 }
 
 type torrentJob struct {
@@ -368,6 +375,7 @@ type torrentJob struct {
 }
 
 type fileWaiter struct {
+	since       time.Time // when it was asked for
 	index       int
 	dest        string
 	task        *Task
@@ -423,7 +431,7 @@ func (m *torrentManager) fetch(ctx context.Context, torrentFile string, index in
 		m.mu.Unlock()
 		return "", err
 	}
-	w := &fileWaiter{index: index, dest: dest, task: task, done: make(chan struct{})}
+	w := &fileWaiter{since: time.Now(), index: index, dest: dest, task: task, done: make(chan struct{})}
 	job.waiters = append(job.waiters, w)
 	if !job.selected[index] && !job.pending[index] {
 		job.pending[index] = true
@@ -694,6 +702,8 @@ func (m *torrentManager) poll(job *torrentJob) {
 		}
 		if p, ok := job.complete[w.index]; ok {
 			m.resolve(job, w, p, nil)
+		} else if st.CompletedLength == 0 && !m.paused && now.Sub(w.since) > jumpStall && m.jump != nil && m.jump() {
+			m.resolve(job, w, "", busyf("no peer sent anything for %s; bandwidth is to spare, so later sources go first", FmtWait(jumpStall)))
 		} else if !m.paused && !w.activeSince.IsZero() && now.Sub(w.activeSince) > m.timeout {
 			m.resolve(job, w, "", failf("torrent download didn't finish within %s (raise --torrent-timeout?)", m.timeout))
 		}

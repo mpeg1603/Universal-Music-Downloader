@@ -40,8 +40,10 @@ func (m *Manager) setupSoulseek(cfg Config) {
 	}
 	c := newSlskClient(cfg.Soulseek, NormalizeRoute(sc.Route), m.shares)
 	c.setWishlist(m.soulseekWish)
+	src := newSoulseekSource(c, cfg.Format)
+	src.jump, src.goodSeeder = m.mayJump, m.seederAffinity
 	m.srcMu.Lock()
-	m.slsk, m.slskKey, m.slskSrc = c, key, newSoulseekSource(c, cfg.Format)
+	m.slsk, m.slskKey, m.slskSrc = c, key, src
 	m.srcMu.Unlock()
 	m.shareFolders(cfg, false)
 	c.Start()
@@ -232,4 +234,118 @@ func (m *Manager) CheckSoulseekPort(ctx context.Context) (bool, int, error) {
 	}
 	ok, err := checkSoulseekPort(ctx, c.route, port)
 	return ok, port, err
+}
+
+// --- seeder affinity ------------------------------------------------------------------------
+
+// seederAffinity: a user just sent us a file fast and in good quality. While they're there,
+// their shared files are looked through (once in a while) for other tracks in the queue, and
+// those are lined up to come from them, one after another.
+func (m *Manager) seederAffinity(user string, speed float64) {
+	m.srcMu.Lock()
+	src, c := m.slskSrc, m.slsk
+	if m.browsed == nil {
+		m.browsed = map[string]time.Time{}
+	}
+	if src == nil || c == nil || time.Since(m.browsed[user]) < 30*time.Minute || m.browsing >= 2 {
+		m.srcMu.Unlock()
+		return
+	}
+	m.browsed[user] = time.Now()
+	m.browsing++
+	m.srcMu.Unlock()
+	defer func() {
+		m.srcMu.Lock()
+		m.browsing--
+		m.srcMu.Unlock()
+	}()
+	ctx, cancel := context.WithTimeout(m.ctx, 4*time.Minute)
+	defer cancel()
+	files, err := c.Browse(ctx, user)
+	if err != nil {
+		debugf("Soulseek: browsing %s: %v", user, err)
+		return
+	}
+	n := m.lineUp(src, user, files)
+	if n > 0 {
+		Logf("Soulseek: %s sends fast (%s) and shares %d more tracks of your queue; getting them from there", user, FmtRate(speed), n)
+	}
+}
+
+// lineUp finds queued tracks among a user's files and has them downloaded from that user.
+func (m *Manager) lineUp(src *Soulseek, user string, files []slskFile) int {
+	// Files by the folder names in their paths ("Deftones", "Deftones - White Pony"), so
+	// only tracks whose artist has a folder there are looked at.
+	byDir := map[string][]int{}
+	for i, f := range files {
+		parts := strings.Split(f.Name, `\`)
+		seen := map[string]bool{}
+		for _, p := range parts[:max(0, len(parts)-1)] {
+			for _, k := range []string{normalize(p), normalize(strings.SplitN(p, " - ", 2)[0])} {
+				if k != "" && !seen[k] {
+					seen[k] = true
+					byDir[k] = append(byDir[k], i)
+				}
+			}
+		}
+	}
+	m.jobsMu.Lock()
+	jobs := append([]*Job(nil), m.order...)
+	m.jobsMu.Unlock()
+	lined := 0
+	for _, j := range jobs {
+		j.mu.Lock()
+		st, t := j.state, j.Track
+		j.mu.Unlock()
+		if st != JobQueued && st != JobWaiting && st != JobFailed {
+			continue
+		}
+		var idx []int
+		for _, a := range append(append([]string{}, t.Artists...), t.AlbumArtist) {
+			idx = append(idx, byDir[normalize(a)]...)
+		}
+		if len(idx) == 0 {
+			continue
+		}
+		resp := slskResponse{User: user, FreeSlot: true}
+		for _, i := range idx {
+			resp.Files = append(resp.Files, files[i])
+		}
+		cands := src.candidates(t, []slskResponse{resp})
+		if accepted, _ := rank(t, cands); len(accepted) == 0 {
+			continue
+		}
+		for i := range cands {
+			cands[i].Unsearched = true // if it doesn't work out, Soulseek is searched as usual
+		}
+		src.remember(t.Key, cands)
+		m.preferSource(t.Key, "soulseek")
+		if lined++; lined >= 500 {
+			break
+		}
+	}
+	return lined
+}
+
+// preferSource lines a track up for a source: the ones before it are passed over this round
+// and it goes to the front of the queue.
+func (m *Manager) preferSource(key, name string) {
+	j := m.job(key)
+	if j == nil {
+		return
+	}
+	tried := map[string]bool{}
+	for _, s := range m.currentSources() {
+		if s.Name() == name {
+			break
+		}
+		tried[s.Name()] = true
+	}
+	j.mu.Lock()
+	if j.state == JobQueued || j.state == JobWaiting || j.state == JobFailed {
+		j.tried, j.state, j.lastErr, j.retryAt = tried, JobQueued, "", time.Time{}
+		j.bump = m.bumpSeq.Add(1)
+	}
+	j.mu.Unlock()
+	m.wake()
 }

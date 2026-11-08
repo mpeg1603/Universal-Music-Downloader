@@ -465,6 +465,17 @@ func abs(x float64) float64 {
 }
 
 // Size is how many files are indexed.
+// all lists every file the scan knows.
+func (ix *LibIndex) all() []*LibFile {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	out := make([]*LibFile, 0, len(ix.files))
+	for _, f := range ix.files {
+		out = append(out, f)
+	}
+	return out
+}
+
 // lookup returns what the scan found about the file at p (nil: not in the library).
 func (ix *LibIndex) lookup(p string) *LibFile {
 	ix.mu.RLock()

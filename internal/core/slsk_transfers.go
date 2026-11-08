@@ -142,6 +142,21 @@ func (c *slskClient) lockUser(ctx context.Context, user string) (func(), error) 
 	}
 }
 
+// downloadSpeed is how fast files are coming in from Soulseek now (bytes/s).
+func (c *slskClient) downloadSpeed() float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var sum float64
+	for _, d := range c.downloads {
+		d.mu.Lock()
+		if d.state == "downloading" {
+			sum += d.speed
+		}
+		d.mu.Unlock()
+	}
+	return sum
+}
+
 // busyUsers are the users we're downloading from (or waiting for) now.
 func (c *slskClient) busyUsers() map[string]bool {
 	c.mu.Lock()
@@ -332,6 +347,11 @@ func (c *slskClient) receive(ctx context.Context, fc *slskConn, d *slskDownload,
 		}
 	}
 	d.set("done")
+	if el := time.Since(d.started).Seconds(); el > 0 && done > have {
+		c.mu.Lock()
+		c.speeds[d.user] = float64(done-have) / el
+		c.mu.Unlock()
+	}
 	return done, f.Close()
 }
 

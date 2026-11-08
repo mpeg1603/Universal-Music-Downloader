@@ -55,6 +55,30 @@ func (c *slskClient) onPeer(sc *slskConn, code uint32, r *slskRead) {
 		if ch != nil {
 			ch <- files
 		}
+	case pmSharedFileListResponse:
+		c.mu.Lock()
+		ch := c.browseWait[user]
+		delete(c.browseWait, user)
+		c.mu.Unlock()
+		if ch == nil {
+			return // not asked for
+		}
+		data, err := slskDecompress(r.b, 512<<20)
+		if err != nil {
+			ch <- nil
+			return
+		}
+		r = &slskRead{b: data}
+		n := int(r.u32())
+		var files []slskFile
+		for i := 0; i < n && i < 200000 && r.err == nil; i++ {
+			dir := r.str()
+			for _, f := range readSlskFiles(r, 100000) {
+				f.Name = dir + `\` + f.Name
+				files = append(files, f)
+			}
+		}
+		ch <- files
 	case pmSharedFileListRequest:
 		var body []byte
 		if c.config().NoShare || c.isBanned(user) {
@@ -419,4 +443,44 @@ func (c *slskClient) FolderContents(ctx context.Context, user, folder string) ([
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// Browse asks user for the list of every file they share, with full paths.
+func (c *slskClient) Browse(ctx context.Context, user string) ([]slskFile, error) {
+	ch := make(chan []slskFile, 1)
+	c.mu.Lock()
+	if c.browseWait[user] != nil {
+		c.mu.Unlock()
+		return nil, failf("already browsing %s", user)
+	}
+	c.browseWait[user] = ch
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.browseWait[user] == ch {
+			delete(c.browseWait, user)
+		}
+		c.mu.Unlock()
+	}()
+	if err := c.sendPeer(ctx, user, pmSharedFileListRequest, &slskMsg{}); err != nil {
+		return nil, err
+	}
+	select {
+	case files := <-ch:
+		if files == nil {
+			return nil, failf("%s sent an unreadable file list", user)
+		}
+		return files, nil
+	case <-time.After(3 * time.Minute):
+		return nil, failf("%s didn't send their file list", user)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// lastSpeed is how fast the last download from user came in (bytes/s; 0: none yet).
+func (c *slskClient) lastSpeed(user string) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.speeds[user]
 }

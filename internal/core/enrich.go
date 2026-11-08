@@ -41,6 +41,9 @@ func needsEnrichment(t *Track) bool {
 type Deezer struct {
 	http *HTTP
 	base string // https://api.deezer.com (another for tests)
+
+	mu    sync.Mutex
+	years map[int64]string // album ID → release year
 }
 
 func newDeezer() *Deezer {

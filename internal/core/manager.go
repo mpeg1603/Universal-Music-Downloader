@@ -70,7 +70,8 @@ type Job struct {
 	rounds     int
 	pendingOn  string // Waiting for something from you for this source (Bandcamp's emailed link)
 	started    time.Time
-	converting bool // downloaded, being converted and tagged: a pause lets it finish
+	converting bool      // downloaded, being converted and tagged: a pause lets it finish
+	minQuality Threshold // a library upgrade's level, when stricter than your threshold
 }
 
 // jobNote is one source's answer for a job. Skips (paused or busy sources) only matter for
@@ -163,9 +164,11 @@ type Manager struct {
 	slsk     *slskClient   // the Soulseek client, while the source is on
 	slskKey  string        // the settings it logged in with
 	slskSrc  *Soulseek
-	shares   *slskShares // what's shared on Soulseek
-	shareKey string      // the folders scanned for it
-	wishPos  int         // where the Soulseek wishlist goes on
+	shares   *slskShares          // what's shared on Soulseek
+	shareKey string               // the folders scanned for it
+	wishPos  int                  // where the Soulseek wishlist goes on
+	browsed  map[string]time.Time // Soulseek users looked through for queued tracks (seederAffinity)
+	browsing int
 	manualDownloads
 	cookies  *ytCookies // your YouTube login, for yt-dlp
 	cookieID string     // the settings cookies was made from
@@ -646,6 +649,9 @@ func (m *Manager) setupTorrentIfNeeded(cfg Config) {
 	}
 	src := newTorrentSource(feeds, m.tools.Aria2c, filepath.Join(m.dataDir, "cache"), cfg.Format,
 		time.Duration(cfg.TorrentTimeout), time.Duration(cfg.IndexerTimeout))
+	if tm, ok := src.dl.(*torrentManager); ok {
+		tm.jump = m.mayJump
+	}
 	m.srcMu.Lock()
 	m.torrent = src
 	m.srcMu.Unlock()
@@ -991,7 +997,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 		m.srcMu.Lock()
 		m.healthOf(name).found++
 		m.srcMu.Unlock()
-		srcTransient, again := false, false
+		srcTransient, again, srcBusy := false, false, false
 		for _, mt := range accepted[:min(len(accepted), max(1, cfg.TriesPerSrc))] {
 			ck := mt.Cand.Source + "\x00" + mt.Cand.URL + "\x00" + mt.Cand.Ref
 			if failed[ck] {
@@ -1031,6 +1037,11 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			if ctx.Err() != nil {
 				return result{aborted: true}
 			}
+			if isBusy(err) { // its slots are taken: on to the next sources, back later
+				j.addNote(name, label+": "+err.Error(), true)
+				skipped[label], transient, srcBusy = true, true, true
+				break
+			}
 			if wait, ok := isPending(err); ok {
 				note(label + ": " + err.Error())
 				return result{state: JobWaiting, reason: label + ": " + err.Error(), transient: true,
@@ -1048,7 +1059,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 				break
 			}
 		}
-		if !again {
+		if !again && !srcBusy {
 			m.markTried(j, name, !srcTransient)
 		}
 	}
@@ -1079,6 +1090,24 @@ func (m *Manager) markTried(j *Job, name string, done bool) {
 	}
 }
 
+// jumpWait: with bandwidth to spare (see mayJump), a track that would wait longer than this
+// for a busy source goes on to the next ones instead (queue jumping).
+const jumpWait = 8 * time.Second
+
+// mayJump says whether tracks may skip busy sources now: queue jumping is on, and bandwidth
+// is to spare (under the cap; without one, download slots stand idle).
+func (m *Manager) mayJump() bool {
+	if m.Config().NoQueueJump {
+		return false
+	}
+	own, tor, capBps := bw.Speeds()
+	if capBps > 0 {
+		return own+tor < 0.85*capBps
+	}
+	used, limit, _ := m.dlGate.Stats()
+	return used < limit
+}
+
 // busyLimit: a source whose requests would wait longer than this for their turn (its pace
 // after rate limits, see rateLimiter) is skipped for now, like a paused one, instead of
 // holding up searches.
@@ -1096,6 +1125,10 @@ func (m *Manager) nextSource(j *Job, needBetter bool, libQ Quality, transient *b
 	for _, src := range m.currentSources() {
 		name := src.Name()
 		if tried[name] {
+			continue
+		}
+		if skipped[src.Label()] { // busy or paused this round: later
+			*transient = true
 			continue
 		}
 		if needBetter {
@@ -1125,11 +1158,9 @@ func (m *Manager) nextSource(j *Job, needBetter bool, libQ Quality, transient *b
 			continue
 		}
 		if b, ok := src.(interface{ busy() time.Duration }); ok {
-			if wait := b.busy(); wait > busyLimit || skipped[src.Label()] {
-				if !skipped[src.Label()] {
-					j.addNote(name, fmt.Sprintf("%s: busy (requests wait %s for their turn); tried again later", src.Label(), FmtWait(wait)), true)
-					later(time.Now().Add(wait))
-				}
+			if wait := b.busy(); wait > busyLimit || wait > jumpWait && m.mayJump() {
+				j.addNote(name, fmt.Sprintf("%s: busy (requests wait %s for their turn); tried again later", src.Label(), FmtWait(wait)), true)
+				later(time.Now().Add(wait))
 				continue
 			}
 		}
@@ -1788,6 +1819,8 @@ type Overview struct {
 	Checked, ToCheck int // the library check in progress
 	Lib              LibScanStatus
 	Free             int64
+	SlskOn           bool    // the Soulseek client runs
+	SlskDown, SlskUp float64 // its transfer speeds (bytes/s); downloads are part of Own too
 	OutputDir        string
 }
 
@@ -1802,6 +1835,11 @@ func (m *Manager) Overview() Overview {
 	o.Total = len(m.order)
 	m.jobsMu.Unlock()
 	o.Own, o.Torrent, o.Cap = bw.Speeds()
+	if c := m.slskClient(); c != nil {
+		o.SlskOn = true
+		o.SlskDown = c.downloadSpeed()
+		_, _, o.SlskUp = c.UploadCounts()
+	}
 	o.DlUsed, o.DlLimit, o.DlWaiting = m.dlGate.Stats()
 	o.SrUsed, o.SrLimit, _ = m.searchGate.Stats()
 	o.Paused, o.Ready, o.Importing = m.paused.Load(), m.ready.Load(), m.importing.Load()

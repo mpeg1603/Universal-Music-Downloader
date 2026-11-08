@@ -85,10 +85,13 @@ type Config struct {
 	Template    string   `json:"template"`
 
 	BandwidthMBps float64 `json:"bandwidth_mbps"` // 0: unlimited
-	MaxDownloads  int     `json:"max_downloads"`
-	SearchWorkers int     `json:"search_workers"`
-	TriesPerSrc   int     `json:"tries_per_source"`
-	Enrich        bool    `json:"enrich"`
+	// NoQueueJump keeps every track waiting for a busy source (Soulseek's few download slots, a
+	// torrent without peers) even while bandwidth is to spare.
+	NoQueueJump   bool `json:"no_queue_jumping,omitempty"`
+	MaxDownloads  int  `json:"max_downloads"`
+	SearchWorkers int  `json:"search_workers"`
+	TriesPerSrc   int  `json:"tries_per_source"`
+	Enrich        bool `json:"enrich"`
 
 	Sources            []SourceCfg `json:"sources"`
 	DirectInterface    string      `json:"direct_interface,omitempty"`

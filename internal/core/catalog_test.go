@@ -44,10 +44,13 @@ func fakeDeezer(t *testing.T) *httptest.Server {
 				out["data"] = []any{map[string]any{"id": 108, "title": "Get Lucky", "duration": 369, "artist": artist, "album": ram}}
 			}
 		case p == "/search/album":
-			if strings.Contains(q, "random access") {
+			switch {
+			case strings.Contains(q, "random access"):
 				out["data"] = []any{ram, albums[12]}
-			} else if strings.Contains(q, "lucky") {
+			case strings.Contains(q, "lucky"):
 				out["data"] = []any{albums[11]}
+			case strings.Contains(q, "daft"):
+				out["data"] = []any{ram, albums[11], albums[12]}
 			}
 		case p == "/search/artist":
 			if strings.Contains(q, "daft punk") {
@@ -88,16 +91,23 @@ func testDeezer(t *testing.T) *Deezer {
 
 func TestParseMusicQuery(t *testing.T) {
 	for in, want := range map[string]musicQuery{
-		"Daft Punk - Get Lucky":     {"", "Daft Punk", "Get Lucky"},
-		"album: Daft Punk – RAM":    {"album", "Daft Punk", "RAM"},
-		"Daft Punk":                 {"", "Daft Punk", ""},
-		"artist: Simon - Garfunkel": {"artist", "Simon - Garfunkel", ""},
-		"Song: Hey-Ya - OutKast":    {"track", "Hey-Ya", "OutKast"},
-		"  Discography:Daft Punk ":  {"artist", "Daft Punk", ""},
+		"Daft Punk - Get Lucky":                        {a: "Daft Punk", b: "Get Lucky"},
+		"album: Daft Punk – RAM":                       {kind: "album", a: "Daft Punk", b: "RAM"},
+		"Daft Punk":                                    {a: "Daft Punk"},
+		"artist: Simon - Garfunkel":                    {kind: "artist", a: "Simon - Garfunkel"},
+		"Song: Hey-Ya - OutKast":                       {kind: "track", a: "Hey-Ya", b: "OutKast"},
+		"  Discography:Daft Punk ":                     {kind: "artist", artist: "Daft Punk"},
+		"artist:radiohead album:ok computer year:1997": {kind: "album", artist: "radiohead", album: "ok computer", year: "1997"},
+		"creep artist:radiohead":                       {a: "creep", artist: "radiohead"},
+		`track:"get lucky" artist:daft punk`:           {kind: "track", track: "get lucky", artist: "daft punk"},
+		"artist:daft punk year:2010-2014":              {kind: "album", artist: "daft punk", year: "2010-2014"},
 	} {
 		if got := parseMusicQuery(in); got != want {
 			t.Errorf("%q: %+v, want %+v", in, got, want)
 		}
+	}
+	if from, to := parseMusicQuery("year:2014-2010").years(); from != 2010 || to != 2014 {
+		t.Errorf("years %d-%d", from, to)
 	}
 }
 
@@ -123,6 +133,16 @@ func TestSearchMusic(t *testing.T) {
 	}
 	if r := first("Daft Punk"); r.Kind != "artist" || r.ID != 27 {
 		t.Errorf("artist: %+v", r)
+	}
+
+	if r := first("artist:daft punk album:random acess"); r.Kind != "album" || r.ID != 10 || r.Year != "2013" {
+		t.Errorf("fields, with a typo: %+v", r)
+	}
+	if r := first("artist:daft punk year:2023"); r.Kind != "album" || r.ID != 12 {
+		t.Errorf("by year: %+v", r)
+	}
+	if r := first("Daft Punk - Get Lucky"); r.Year != "2013" {
+		t.Errorf("a track's year comes from its album: %+v", r)
 	}
 
 	tracks, name, err := d.Expand(ctx, MusicResult{Kind: "album", ID: 10}, nil)

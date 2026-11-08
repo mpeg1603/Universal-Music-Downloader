@@ -164,7 +164,19 @@ type Soulseek struct {
 
 	mu   sync.Mutex
 	hits map[string]slskHit // candidates a wishlist search found, by track
+	// jump says whether a download may skip the wait for a slot (queue jumping; see
+	// Manager.mayJump). nil: always wait.
+	jump func() bool
+	// goodSeeder hears about a user who just sent a file fast and in good quality.
+	goodSeeder func(user string, speed float64)
 }
+
+// A seeder is "good" when a file came at least this fast in at least this quality: worth
+// asking for more of the queue (see Manager.seederAffinity).
+const (
+	goodSeederSpeed = 250 << 10 // bytes/s
+	goodSeederKbps  = 256
+)
 
 type slskHit struct {
 	cands []Candidate
@@ -301,9 +313,19 @@ func (s *Soulseek) Download(ctx context.Context, c Candidate, t *Track, workdir 
 	if len(ext) > 8 {
 		ext = ""
 	}
+	if s.jump != nil && !c.Unsearched { // a track lined up for this user waits for them
+		used, limit, waiting := s.c.dlGate.Stats()
+		if (used >= limit || s.c.busyUsers()[user]) && s.jump() {
+			return "", busyf("its %d download slots are taken (%d tracks waiting); bandwidth is to spare, so later sources go first", limit, waiting)
+		}
+	}
 	dest := filepath.Join(workdir, "soulseek"+ext)
 	if err := s.c.Download(ctx, user, file, size, dest, taskFrom(ctx)); err != nil {
 		return "", err
+	}
+	if speed := s.c.lastSpeed(user); s.goodSeeder != nil && speed >= goodSeederSpeed &&
+		(c.Quality.Lossless || c.Quality.Kbps >= goodSeederKbps) {
+		go s.goodSeeder(user, speed)
 	}
 	return dest, nil
 }

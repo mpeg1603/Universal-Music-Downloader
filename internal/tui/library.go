@@ -54,6 +54,8 @@ func (ui *tui) buildLibrary() tview.Primitive {
 			ui.m.Rescan()
 		case 't':
 			ui.pickThreshold()
+		case 'u':
+			ui.pickUpgrade()
 		default:
 			if ev.Key() == tcell.KeyDelete && row >= 1 {
 				return tcell.NewEventKey(tcell.KeyRune, 'd', 0)
@@ -63,6 +65,38 @@ func (ui *tui) buildLibrary() tview.Primitive {
 		return nil
 	})
 	return tview.NewFlex().SetDirection(tview.FlexRow).AddItem(ui.libInfo, 11, 0, false).AddItem(ui.libTable, 0, 1, true)
+}
+
+// pickUpgrade lists how many library files are below each quality level; picking one queues
+// them to be downloaded again in better quality.
+func (ui *tui) pickUpgrade() {
+	counts := ui.m.UpgradeCounts()
+	list := tview.NewList().ShowSecondaryText(true)
+	for _, t := range core.Thresholds {
+		if t.Name == "any" {
+			continue
+		}
+		th, n := t.Name, counts[t.Name]
+		list.AddItem(fmt.Sprintf("below %s: %d files", strings.SplitN(t.Label, " (", 2)[0], n), "   "+t.Label, 0, func() {
+			ui.closeModal("upgrade")
+			if n == 0 {
+				ui.message("Upgrade", "No library files below that.")
+				return
+			}
+			ui.confirm(fmt.Sprintf("Look for better copies of %d library files below %s? Each is downloaded only when a source has it in clearly better quality "+
+				"(never converted); the new file goes to the downloads folder and your library copy stays as it is.", n, th), "Upgrade", func() {
+				name, got, err := ui.m.UpgradeLibrary(th)
+				if err != nil {
+					ui.message("Upgrade", err.Error())
+					return
+				}
+				ui.message("Upgrade", fmt.Sprintf("%d tracks queued as the playlist %s (f in the Queue: \"library upgrades\"; remove it in the Search tab with d).", got, name))
+			})
+		})
+	}
+	list.SetDoneFunc(func() { ui.closeModal("upgrade") })
+	list.SetBorder(true).SetTitle(" Upgrade your library: download better copies of files below… ")
+	ui.openModal("upgrade", list, 90, list.GetItemCount()*2+2)
 }
 
 func (ui *tui) pickThreshold() {
@@ -100,7 +134,8 @@ func (ui *tui) refreshLibrary() {
 	}
 	fmt.Fprintf(&b, "Good enough quality (t): [::b]%s[::-] — %s\n", c.Threshold, label)
 	b.WriteString("Tracks you have at this quality or better are skipped. Ones you have in lower quality are downloaded only\n" +
-		"if a source has them in clearly better quality; the new file goes to the downloads folder and your copy stays.\n\n")
+		"if a source has them in clearly better quality; the new file goes to the downloads folder and your copy stays.\n" +
+		"[::b]u[::-] upgrades your library's files below a quality: better copies are downloaded (never converted).\n\n")
 	switch {
 	case len(c.LibraryDirs) == 0:
 		b.WriteString("[yellow]No library folders yet: press a to add one.[-]\n")

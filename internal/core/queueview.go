@@ -26,6 +26,7 @@ var QueueFilters = []QueueOption{
 	{"failed", "not found"},
 	{"cancelled", "cancelled"},
 	{"search", "added from the Search tab"},
+	{"upgrading", "library upgrades"},
 }
 
 var QueueSorts = []QueueOption{
@@ -81,9 +82,9 @@ func MatchesFilter(v JobView, f string) bool {
 		return v.State == JobFailed
 	case "cancelled":
 		return v.State == JobCancelled
-	case "search":
+	case "search", "upgrading":
 		for _, p := range v.Playlists {
-			if IsAddition(p) {
+			if f == "search" && IsAddition(p) && !IsUpgrade(p) || f == "upgrading" && IsUpgrade(p) {
 				return true
 			}
 		}

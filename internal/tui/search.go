@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,22 +19,42 @@ import (
 
 func (ui *tui) buildSearch() tview.Primitive {
 	ui.findField = tview.NewInputField().SetLabel(" Find: ").SetFieldWidth(0).
-		SetPlaceholder("artist - title · artist - album · artist (track: album: artist: in front to be sure), Enter searches")
+		SetPlaceholder("artist - title · artist - album · artist · or tags: artist: album: track: year:  (Enter searches)")
+	field := func(label string, width int) *tview.InputField {
+		f := tview.NewInputField().SetLabel(" " + label + " ").SetFieldWidth(width)
+		return f
+	}
+	ui.fArtist, ui.fAlbum, ui.fTrack, ui.fYear = field("Artist", 0), field("Album", 0), field("Track", 0), field("Year", 11)
+	ui.fYear.SetPlaceholder("1997 or 1995-1999")
 	ui.resultsTable = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
 	ui.resultsTable.SetBorder(true).SetTitle(" Results (Enter adds to the queue) ")
-	ui.findField.SetDoneFunc(func(k tcell.Key) {
-		switch k {
-		case tcell.KeyEnter:
-			ui.findMusic(ui.findField.GetText())
-		case tcell.KeyEscape, tcell.KeyTab, tcell.KeyDown:
-			ui.app.SetFocus(ui.resultsTable)
-		case tcell.KeyBacktab:
-			ui.app.SetFocus(ui.playlistsTable)
-		}
-	})
+	inputs := []*tview.InputField{ui.findField, ui.fArtist, ui.fAlbum, ui.fTrack, ui.fYear}
+	for i, f := range inputs {
+		i := i
+		f.SetDoneFunc(func(k tcell.Key) {
+			switch k {
+			case tcell.KeyEnter:
+				ui.findMusic(ui.musicQuery())
+			case tcell.KeyEscape, tcell.KeyDown:
+				ui.app.SetFocus(ui.resultsTable)
+			case tcell.KeyTab:
+				if i+1 < len(inputs) {
+					ui.app.SetFocus(inputs[i+1])
+				} else {
+					ui.app.SetFocus(ui.resultsTable)
+				}
+			case tcell.KeyBacktab:
+				if i > 0 {
+					ui.app.SetFocus(inputs[i-1])
+				} else {
+					ui.app.SetFocus(ui.playlistsTable)
+				}
+			}
+		})
+	}
 	ui.resultsTable.SetSelectedFunc(func(row, col int) {
-		if row >= 1 && row-1 < len(ui.results) {
-			ui.addMusic(ui.results[row-1])
+		if row >= 0 && row < len(ui.resultRows) && ui.resultRows[row] >= 0 {
+			ui.addMusic(ui.results[ui.resultRows[row]])
 		}
 	})
 	ui.resultsTable.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
@@ -41,11 +62,11 @@ func (ui *tui) buildSearch() tview.Primitive {
 		case ev.Key() == tcell.KeyTab:
 			ui.app.SetFocus(ui.inputsTable)
 		case ev.Key() == tcell.KeyBacktab:
-			ui.app.SetFocus(ui.findField)
+			ui.app.SetFocus(ui.fYear)
 		case ev.Rune() == '/':
 			ui.app.SetFocus(ui.findField)
 		case ev.Key() == tcell.KeyUp:
-			if r, _ := ui.resultsTable.GetSelection(); r <= 1 {
+			if r, _ := ui.resultsTable.GetSelection(); r <= ui.firstResultRow() {
 				ui.app.SetFocus(ui.findField)
 				return nil
 			}
@@ -60,14 +81,50 @@ func (ui *tui) buildSearch() tview.Primitive {
 		AddItem(ui.inputsTable, 0, 2, false).
 		AddItem(ui.playlistsTable, 0, 3, false)
 	ui.findInfo = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+	fields := tview.NewFlex().
+		AddItem(ui.fArtist, 0, 3, false).
+		AddItem(ui.fAlbum, 0, 3, false).
+		AddItem(ui.fTrack, 0, 3, false).
+		AddItem(ui.fYear, 30, 0, false)
 	return tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(ui.findField, 1, 0, false).
+		AddItem(fields, 1, 0, false).
 		AddItem(ui.findInfo, 1, 0, false).
 		AddItem(ui.resultsTable, 0, 1, true).
 		AddItem(lists, 0, 1, false)
 }
 
-var kindIcons = map[string]string{"track": "♪ track", "album": "◉ album", "artist": "★ artist"}
+// musicQuery is the Find text with the fields added as tags.
+func (ui *tui) musicQuery() string {
+	q := strings.TrimSpace(ui.findField.GetText())
+	for _, f := range []struct {
+		tag   string
+		field *tview.InputField
+	}{{"artist", ui.fArtist}, {"album", ui.fAlbum}, {"track", ui.fTrack}, {"year", ui.fYear}} {
+		if v := strings.TrimSpace(f.field.GetText()); v != "" {
+			q += " " + f.tag + ":" + v
+		}
+	}
+	return strings.TrimSpace(q)
+}
+
+var resultSections = []struct {
+	kind, title string
+	color       tcell.Color
+}{
+	{"track", "♪ Tracks", tcell.ColorAqua},
+	{"album", "◉ Albums", tcell.ColorYellow},
+	{"artist", "★ Artists (Enter: the whole discography)", tcell.ColorFuchsia},
+}
+
+func (ui *tui) firstResultRow() int {
+	for r, i := range ui.resultRows {
+		if i >= 0 {
+			return r
+		}
+	}
+	return 0
+}
 
 // findMusic searches the catalog in the background.
 func (ui *tui) findMusic(text string) {
@@ -92,43 +149,78 @@ func (ui *tui) findMusic(text string) {
 			ui.fillResults()
 			ui.resultsTable.SetTitle(fmt.Sprintf(" %d results for %q (Enter adds: a track, the whole album, or the artist's discography) ", len(res), text))
 			if len(res) > 0 {
-				ui.resultsTable.Select(1, 0)
+				ui.resultsTable.Select(ui.firstResultRow(), 0)
 				ui.app.SetFocus(ui.resultsTable)
 			}
 		})
 	}()
 }
 
+// fillResults lists the results by kind, each kind under its own heading, best first; the
+// kind whose best result fits best comes first.
 func (ui *tui) fillResults() {
 	t := ui.resultsTable
 	t.Clear()
-	headerRow(t, "", "Title", "Artist", "Album", "Year", "Size", "Fits")
-	for i, r := range ui.results {
-		size := ""
-		switch r.Kind {
-		case "track":
-			size = core.FmtDuration(float64(r.Duration))
-		case "album":
-			size = fmt.Sprintf("%d tracks", r.Count)
-		case "artist":
-			size = fmt.Sprintf("%d releases", r.Count)
-		}
-		color := map[string]tcell.Color{"track": tcell.ColorAqua, "album": tcell.ColorYellow, "artist": tcell.ColorFuchsia}[r.Kind]
-		cells := []*tview.TableCell{
-			tview.NewTableCell(kindIcons[r.Kind]).SetTextColor(color),
-			tview.NewTableCell(tview.Escape(r.Title)).SetExpansion(2).SetMaxWidth(60),
-			tview.NewTableCell(tview.Escape(r.Artist)).SetExpansion(1).SetMaxWidth(40),
-			tview.NewTableCell(tview.Escape(r.Album)).SetExpansion(1).SetMaxWidth(40),
-			tview.NewTableCell(r.Year),
-			tview.NewTableCell(size).SetAlign(tview.AlignRight),
-			tview.NewTableCell(fmt.Sprintf("%.0f%%", max(0, r.Score))).SetAlign(tview.AlignRight).SetTextColor(tcell.ColorGray),
-		}
-		for c, cell := range cells {
-			t.SetCell(i+1, c, cell)
+	ui.resultRows = ui.resultRows[:0]
+	best := map[string]float64{}
+	for _, r := range ui.results {
+		if _, ok := best[r.Kind]; !ok {
+			best[r.Kind] = r.Score // results come best first
 		}
 	}
+	sections := append(resultSections[:0:0], resultSections...)
+	sort.SliceStable(sections, func(i, j int) bool { return best[sections[i].kind] > best[sections[j].kind] })
+	row := 0
+	for _, sec := range sections {
+		if _, ok := best[sec.kind]; !ok {
+			continue
+		}
+		head := []string{"[::b]" + sec.title + "[::-]", "Artist", "", "Year", "", "Fits"}
+		switch sec.kind {
+		case "track":
+			head[2], head[4] = "Album", "Length"
+		case "album":
+			head[2], head[4] = "", "Tracks"
+		case "artist":
+			head[1], head[4] = "", "Releases"
+		}
+		for c, h := range head {
+			t.SetCell(row, c, tview.NewTableCell(h).SetTextColor(sec.color).SetSelectable(false).SetAttributes(tcell.AttrBold))
+		}
+		ui.resultRows = append(ui.resultRows, -1)
+		row++
+		for i, r := range ui.results {
+			if r.Kind != sec.kind {
+				continue
+			}
+			size := ""
+			switch r.Kind {
+			case "track":
+				size = core.FmtDuration(float64(r.Duration))
+			case "album", "artist":
+				size = fmt.Sprint(r.Count)
+			}
+			cells := []*tview.TableCell{
+				tview.NewTableCell("  " + tview.Escape(r.Title)).SetExpansion(2).SetMaxWidth(60).SetTextColor(sec.color),
+				tview.NewTableCell(tview.Escape(r.Artist)).SetExpansion(1).SetMaxWidth(40),
+				tview.NewTableCell(tview.Escape(r.Album)).SetExpansion(1).SetMaxWidth(40).SetTextColor(tcell.ColorGray),
+				tview.NewTableCell(r.Year),
+				tview.NewTableCell(size).SetAlign(tview.AlignRight),
+				tview.NewTableCell(fmt.Sprintf("%.0f%%", max(0, r.Score))).SetAlign(tview.AlignRight).SetTextColor(tcell.ColorGray),
+			}
+			for c, cell := range cells {
+				t.SetCell(row, c, cell)
+			}
+			ui.resultRows = append(ui.resultRows, i)
+			row++
+		}
+		t.SetCell(row, 0, tview.NewTableCell("").SetSelectable(false))
+		ui.resultRows = append(ui.resultRows, -1)
+		row++
+	}
 	if len(ui.results) == 0 {
-		t.SetCell(1, 1, tview.NewTableCell("[gray]nothing found; try \"Artist - Title\", or only the artist[-]").SetSelectable(false))
+		t.SetCell(0, 0, tview.NewTableCell("[gray]nothing found; try \"Artist - Title\", only the artist, or fewer fields[-]").SetSelectable(false))
+		ui.resultRows = append(ui.resultRows, -1)
 	}
 }
 

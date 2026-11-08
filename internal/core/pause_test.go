@@ -228,3 +228,28 @@ func TestRealAria2cPause(t *testing.T) {
 		t.Fatal("didn't finish after resuming")
 	}
 }
+
+// With bandwidth to spare, a track doesn't wait for a source that's only a little busy: it
+// goes on to the next (queue jumping); with jumping off, it waits its turn.
+func TestQueueJumping(t *testing.T) {
+	tools := NeedFFmpeg(t)
+	for _, jump := range []bool{true, false} {
+		tr := MakeTrack("Song", []string{"Band"}, "", 4)
+		tr.Key = "a"
+		busy := &busySource{FakeSource: FakeSource{SrcName: "soulseek", T: t, Results: map[string][]Candidate{"a": Found("soulseek", "Song", "Band", 4)}}, wait: 10 * time.Second}
+		other := &FakeSource{SrcName: "youtube", T: t, Results: map[string][]Candidate{"a": Found("youtube", "Song", "Band", 4)}}
+		m := TestManager(t, tools, []Source{busy, other}, TestLibrary(tr), func(c *Config) { c.NoQueueJump = !jump })
+		v := RunManager(t, m)["a"]
+		want := "youtube"
+		if !jump {
+			want = "soulseek"
+		}
+		if v.State != JobDone || v.Rec.Source != want {
+			t.Errorf("jumping %v: %v from %q, want %q (%s)", jump, v.State, v.Rec.Source, want, v.Reason)
+		}
+	}
+	// A download that would wait for a full slot jumps too.
+	if !isBusy(busyf("x")) || isUnavailable(busyf("x")) {
+		t.Error("busy errors")
+	}
+}
