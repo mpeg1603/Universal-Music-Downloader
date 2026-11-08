@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 // Torrent downloads go through the built-in client (torrent_engine.go), one for the whole
@@ -55,7 +58,8 @@ type torrentManager struct {
 	along     time.Duration // and up to this long for the files of tracks on their way (expect)
 
 	mu      sync.Mutex
-	jobs    map[string]*torrentJob // by .torrent path
+	jobs    map[string]*torrentJob // by the torrent's hash: two sites can offer the same one
+	hashes  map[string]string      // .torrent path → the torrent's hash
 	polling bool
 	closed  bool
 	started int     // downloads started, for the log and tests
@@ -68,7 +72,7 @@ type torrentManager struct {
 }
 
 type torrentJob struct {
-	file  string
+	key   string // its hash, in torrentManager.jobs
 	id    string
 	data  []byte
 	names []string
@@ -102,11 +106,11 @@ type fileWaiter struct {
 
 func newTorrentManager(eng *btEngine, dir string, timeout time.Duration) *torrentManager {
 	return &torrentManager{eng: eng, dir: dir, timeout: timeout, gather: 2 * time.Second, maxGather: 8 * time.Second,
-		along: 20 * time.Second, jobs: map[string]*torrentJob{}}
+		along: 20 * time.Second, jobs: map[string]*torrentJob{}, hashes: map[string]string{}}
 }
 
 func (m *torrentManager) fetch(ctx context.Context, torrentFile string, index int, dest string, task *Task) (string, error) {
-	task.setStage("starting torrent")
+	task.setWaitStage("starting torrent")
 	fresh := !m.eng.alive()
 	if err := m.eng.ensure(ctx); err != nil {
 		return "", err
@@ -153,7 +157,7 @@ func (m *torrentManager) fetch(ctx context.Context, torrentFile string, index in
 		m.schedule(job)
 	}
 	if job.gid == "" && job.expecting(time.Now()) > 0 {
-		task.setStage("waiting for the torrent's other tracks")
+		task.setWaitStage("waiting for the torrent's other tracks")
 	}
 	if !m.polling {
 		m.polling = true
@@ -173,7 +177,7 @@ func (m *torrentManager) fetch(ctx context.Context, torrentFile string, index in
 }
 
 func (m *torrentManager) job(torrentFile string) (*torrentJob, error) {
-	if job := m.jobs[torrentFile]; job != nil {
+	if job := m.jobs[m.hashes[torrentFile]]; job != nil {
 		return job, nil
 	}
 	data, err := os.ReadFile(torrentFile)
@@ -184,10 +188,19 @@ func (m *torrentManager) job(torrentFile string) (*torrentJob, error) {
 	if err != nil {
 		return nil, failf("bad torrent file: %v", err)
 	}
+	mi, err := metainfo.Load(bytes.NewReader(data))
+	if err != nil {
+		return nil, failf("bad torrent file: %v", err)
+	}
+	key := mi.HashInfoBytes().HexString()
+	m.hashes[torrentFile] = key
+	if job := m.jobs[key]; job != nil { // the same torrent, from another site
+		return job, nil
+	}
 	sum := sha1.Sum(data)
-	job := &torrentJob{file: torrentFile, id: hex.EncodeToString(sum[:8]), data: data, names: names,
+	job := &torrentJob{key: key, id: hex.EncodeToString(sum[:8]), data: data, names: names,
 		selected: map[int]bool{}, complete: map[int]string{}, pending: map[int]bool{}, expected: map[int]time.Time{}}
-	m.jobs[torrentFile] = job
+	m.jobs[key] = job
 	return job, nil
 }
 
@@ -252,7 +265,7 @@ func (m *torrentManager) expect(torrentFile string, index int) {
 func (m *torrentManager) unexpect(torrentFile string, index int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	job := m.jobs[torrentFile]
+	job := m.jobs[m.hashes[torrentFile]]
 	if job == nil {
 		return
 	}
@@ -347,7 +360,7 @@ func (m *torrentManager) pollLoop() {
 				m.poll(job)
 			case len(job.waiters) == 0 && len(job.pending) == 0 && job.timer == nil && job.expecting(now) == 0 &&
 				(job.failed == nil || now.Sub(job.failedAt) > 10*time.Minute):
-				delete(m.jobs, job.file) // nothing to do (e.g. expected tracks that went elsewhere)
+				delete(m.jobs, job.key) // nothing to do (e.g. expected tracks that went elsewhere)
 			}
 		}
 		m.mu.Unlock()
@@ -381,18 +394,18 @@ func (m *torrentManager) poll(job *torrentJob) {
 	}
 	for _, w := range append([]*fileWaiter(nil), job.waiters...) {
 		if !job.selected[w.index] {
-			w.task.setStage("joining the torrent")
+			w.task.setWaitStage("joining the torrent")
 			continue
 		}
 		f := files[w.index]
 		switch {
 		case m.paused:
-			w.task.setStage("paused")
+			w.task.setWaitStage("paused")
 			w.activeSince = time.Time{} // the time limit starts again on resume
 		case st.Status == "waiting" || st.Status == "paused":
-			w.task.setStage("queued behind other torrents")
+			w.task.setWaitStage("queued behind other torrents")
 		case st.CompletedLength == 0:
-			w.task.setStage("looking for peers")
+			w.task.setWaitStage("looking for peers")
 			w.task.setNote(note)
 		default:
 			w.task.setStage("downloading")
@@ -423,7 +436,7 @@ func (m *torrentManager) poll(job *torrentJob) {
 			debugf("torrent %s: download %s no longer needed", job.id, job.gid)
 			m.eng.forget(job.gid)
 			os.RemoveAll(job.dir)
-			delete(m.jobs, job.file)
+			delete(m.jobs, job.key)
 		}
 	}
 }
@@ -465,7 +478,7 @@ func (m *torrentManager) endDownload(job *torrentJob, err error) {
 		m.startDownload(job)
 	}
 	if job.gid == "" && len(job.waiters) == 0 && job.failed == nil {
-		delete(m.jobs, job.file)
+		delete(m.jobs, job.key)
 	}
 }
 

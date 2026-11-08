@@ -260,7 +260,7 @@ func (b *Bandcamp) emailDownload(ctx context.Context, t *tralbum, pageURL string
 		return "", failf("Bandcamp's email to %s never came (asked %d times)", cfg.Email, bandcampEmailTries)
 	}
 	if at.IsZero() || time.Since(at) > bandcampEmailWait {
-		task.setStage("asking Bandcamp to email the download")
+		task.setWaitStage("asking Bandcamp to email the download")
 		u, err := url.Parse(pageURL)
 		if err != nil {
 			return "", err
@@ -289,7 +289,7 @@ func (b *Bandcamp) emailDownload(ctx context.Context, t *tralbum, pageURL string
 	if !canFetch {
 		return "", pendingf(bandcampEmailWait, "Bandcamp emails the download link to %s: paste it in Sources → Bandcamp (%s)", cfg.Email, pageURL)
 	}
-	task.setStage("waiting for Bandcamp's email")
+	task.setWaitStage("waiting for Bandcamp's email")
 	go mb.poll()
 	select {
 	case link := <-ch:

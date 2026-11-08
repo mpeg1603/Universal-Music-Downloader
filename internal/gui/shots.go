@@ -978,6 +978,8 @@ func (s *shotter) sortFlow() {
 		if out, err := exec.Command("ffmpeg", append(args, p)...).CombinedOutput(); err != nil {
 			s.fail("ffmpeg: %s", out)
 		}
+		long := time.Now().Add(-time.Hour) // a file written just now counts as unfinished
+		os.Chtimes(p, long, long)
 	}
 	tone("mess/01 one.flac", "Band", "One", "First Record", "1", "", "3")
 	tone("mess/one copy.mp3", "Band", "One", "", "", "128k", "3")

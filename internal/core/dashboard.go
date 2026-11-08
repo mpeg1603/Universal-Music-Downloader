@@ -23,8 +23,8 @@ type DashboardView struct {
 // TrackParts counts tracks so that each one is in exactly one part.
 type TrackParts struct {
 	InLibrary, Downloaded, NeedUpgrade int
-	Downloading, Searching             int
-	Waiting, Retrying                  int
+	Downloading, Searching             int // data coming in; being looked for
+	Waiting, Queued                    int // for a slot, a queue, peers or a retry; not started
 	NotFound, Cancelled                int
 }
 
@@ -77,22 +77,25 @@ func (m *Manager) trackParts() (TrackParts, map[string]int) {
 	for _, j := range list {
 		j.mu.Lock()
 		state, better := j.state, j.needBetter && len(j.lib) > 0
+		moving := state == JobDownloading && !j.task.isWaiting()
 		j.mu.Unlock()
 		switch {
 		case state == JobInLibrary:
 			p.InLibrary++
 		case state == JobDone:
 			p.Downloaded++
-		case state == JobDownloading || state == JobReady:
+		case moving:
 			p.Downloading++
 		case state == JobSearching:
 			p.Searching++
+		case state == JobDownloading || state == JobReady:
+			p.Waiting++
 		case better && state != JobFailed && state != JobCancelled:
 			p.NeedUpgrade++
 		case state == JobWaiting:
-			p.Retrying++
-		case state == JobQueued:
 			p.Waiting++
+		case state == JobQueued:
+			p.Queued++
 		case state == JobFailed:
 			p.NotFound++
 		case state == JobCancelled:

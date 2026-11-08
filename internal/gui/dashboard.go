@@ -30,6 +30,7 @@ type dashTile struct {
 type dashRow struct {
 	count  *qt.QLabel
 	swatch *qt.QLabel
+	color  string
 }
 
 type dashboardTab struct {
@@ -88,10 +89,10 @@ func newDashboardTab(a *app) *dashboardTab {
 		{"library", "library", "Already in my library", "You have these at a quality you're happy with", "library"},
 		{"done", "check", "Downloaded", "Saved to your downloads folder", "done"},
 		{"upgrade", "arrow-up", "Need an upgrade", "You have a copy, but below the quality you chose", "below"},
-		{"downloading", "download", "Downloading", "On their way now", "downloading"},
+		{"downloading", "download", "Downloading", "Data is coming in right now", "downloading"},
 		{"searching", "search", "Searching", "Being looked for right now", "searching"},
-		{"waiting", "clock", "Waiting", "Their turn hasn't come yet", "queued"},
-		{"retry", "refresh", "Will retry", "A source was busy; the app tries again by itself", "waiting"},
+		{"waiting", "clock", "Waiting", "Found, and waiting for a free slot, a place in someone's queue, peers, or a retry", "waiting"},
+		{"queued", "playlist", "Queued", "Their turn hasn't come yet", "queued"},
 		{"missing", "x", "Not found", "No source had them", "failed"},
 		{"cancelled", "ban", "Cancelled", "You stopped these", "cancelled"},
 	}
@@ -174,7 +175,7 @@ func (t *dashboardTab) stateRow(key, icon, label, tip, filter string) *qt.QWidge
 	row.AddWidget(swatch.QWidget)
 	row.AddWidget2(name.QWidget, 1)
 	row.AddWidget(count.QWidget)
-	t.rows[key] = &dashRow{count, swatch}
+	t.rows[key] = &dashRow{count: count, swatch: swatch}
 	return b.QWidget
 }
 
@@ -264,7 +265,10 @@ func (t *dashboardTab) show(v core.DashboardView) {
 		if color == "" {
 			color = th.Border
 		}
-		r.swatch.SetStyleSheet("background: " + color + "; border-radius: 4px;")
+		if r.color != color { // setting a style sheet restyles the widget, even if it's the same one
+			r.color = color
+			r.swatch.SetStyleSheet("background: " + color + "; border-radius: 4px;")
+		}
 	}
 	set("library", p.InLibrary, lib)
 	set("done", p.Downloaded, done)
@@ -272,7 +276,7 @@ func (t *dashboardTab) show(v core.DashboardView) {
 	set("downloading", p.Downloading, active)
 	set("searching", p.Searching, active)
 	set("waiting", p.Waiting, "")
-	set("retry", p.Retrying, "")
+	set("queued", p.Queued, "")
 	set("missing", p.NotFound, missing)
 	set("cancelled", p.Cancelled, missing)
 	t.bar.set([]barPart{
@@ -281,7 +285,7 @@ func (t *dashboardTab) show(v core.DashboardView) {
 		{"In progress", p.Downloading + p.Searching, active},
 		{"Need an upgrade", p.NeedUpgrade, upgrade},
 		{"Not found or cancelled", p.NotFound + p.Cancelled, missing},
-		{"Waiting", p.Waiting + p.Retrying, ""},
+		{"Waiting or queued", p.Waiting + p.Queued, ""},
 	}, func(n float64) string { return fmtCount(int(n)) + " songs" })
 
 	d := v.Disk

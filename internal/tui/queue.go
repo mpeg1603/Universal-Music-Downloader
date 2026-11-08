@@ -60,6 +60,9 @@ func (q *queueContent) GetCell(row, col int) *tview.TableCell {
 		if v.Bumped && v.State == core.JobQueued {
 			icon = "▲"
 		}
+		if v.State == core.JobDownloading && v.Task.Waiting { // no data yet: a queue, peers
+			icon, color = "⟳", tcell.ColorOrange
+		}
 		return tview.NewTableCell(icon).SetTextColor(color)
 	case 1:
 		return tview.NewTableCell(tview.Escape(v.Track.String())).SetExpansion(3).SetMaxWidth(60)

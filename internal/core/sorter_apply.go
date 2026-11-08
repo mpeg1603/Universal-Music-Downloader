@@ -278,6 +278,7 @@ func sortApply(ctx context.Context, p *sortPlan, dir string, progress func(strin
 	problems := map[string]string{}
 	emptied := map[string]bool{}
 	moved := map[string]string{}
+	var partial sortPartialCheck
 	verb := "Moving files"
 	if p.Options.Copy {
 		verb = "Copying files"
@@ -288,7 +289,10 @@ func sortApply(ctx context.Context, p *sortPlan, dir string, progress func(strin
 			break
 		}
 		m := &p.Moves[i]
-		status := sortApplyOne(m, p.Options.Copy, j)
+		status := "still being downloaded"
+		if !partial.unfinished(m.Src) {
+			status = sortApplyOne(m, p.Options.Copy, j)
+		}
 		switch status {
 		case "done", "already done":
 			if status == "done" {

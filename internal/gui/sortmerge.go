@@ -94,7 +94,7 @@ func (t *sortTab) buildChoose() *qt.QWidget {
 	a := t.a
 	scroll, body, _ := scrolling()
 	safe, safeText := banner("banner")
-	safeText.SetText("<b>Nothing changes until you say so.</b> Making a plan only reads your files. You look it over, and only pressing Apply moves anything. Nothing is ever deleted or re-encoded, and you can undo it afterwards.")
+	safeText.SetText("<b>Nothing changes until you say so.</b> Making a plan only reads your files. You look it over, and only pressing Apply moves anything. Nothing is ever deleted or re-encoded, unfinished downloads are left where they are, and you can undo it afterwards.")
 	body.AddWidget(safe.QWidget)
 
 	what, wb := card()

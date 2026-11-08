@@ -13,12 +13,13 @@ type QueueOption struct{ Name, Label string }
 var QueueFilters = []QueueOption{
 	{"all", "all tracks"},
 	{"todo", "to do (queued, in progress or retried later)"},
-	{"active", "in progress"},
-	{"downloading", "downloading now (no searches)"},
+	{"active", "in progress (searching, waiting or downloading)"},
+	{"downloading", "downloading now, data coming in"},
 	{"searching", "searching now"},
+	{"waiting", "waiting (slot, queue, peers or a retry)"},
 	{"queued", "queued, not started yet"},
 	{"prioritized", "moved to the front (p)"},
-	{"waiting", "to be retried later"},
+	{"retry", "to be retried later"},
 	{"done", "downloaded"},
 	{"lossless", "downloaded in lossless quality"},
 	{"lossy", "downloaded in lossy quality"},
@@ -62,6 +63,7 @@ type jobBrief struct {
 	track      *Track
 	playlists  []string
 	state      JobState
+	moving     bool // downloading, and not just waiting for something (see Task.waiting)
 	source     string
 	recSource  string
 	recUpdated string
@@ -97,9 +99,11 @@ func (j *Job) brief() jobBrief {
 	case j.state == JobInLibrary:
 		b.progress = 2
 	case j.state.Active():
-		if t := j.task.view(); t.Total > 0 {
+		t := j.task.view()
+		if t.Total > 0 {
 			b.progress = float64(t.Done) / float64(t.Total)
 		}
+		b.moving = j.state == JobDownloading && !t.Waiting
 	}
 	return b
 }
@@ -119,9 +123,9 @@ func (b *jobBrief) matches(f string) bool {
 	todo := b.state == JobQueued || b.state.Active() || b.state == JobWaiting
 	switch f {
 	case "active":
-		return b.state.Active()
+		return b.state.Active() || b.state == JobWaiting
 	case "downloading":
-		return b.state == JobDownloading
+		return b.moving
 	case "searching":
 		return b.state == JobSearching
 	case "todo":
@@ -131,6 +135,8 @@ func (b *jobBrief) matches(f string) bool {
 	case "prioritized":
 		return b.bumped && todo
 	case "waiting":
+		return b.state == JobReady || b.state == JobWaiting || b.state == JobDownloading && !b.moving
+	case "retry":
 		return b.state == JobWaiting
 	case "done":
 		return b.state == JobDone
@@ -163,7 +169,7 @@ func (b *jobBrief) matches(f string) bool {
 func (b *jobBrief) count(out map[string]*int, bySource map[string]int) {
 	add := func(f string) { *out[f]++ }
 	add("all")
-	for _, f := range [...]string{"todo", "active", "downloading", "searching", "queued", "prioritized", "waiting", "done",
+	for _, f := range [...]string{"todo", "active", "downloading", "searching", "queued", "prioritized", "waiting", "retry", "done",
 		"lossless", "lossy", "upgrades", "library", "below", "failed", "cancelled"} {
 		if b.matches(f) {
 			add(f)

@@ -25,6 +25,10 @@ type Task struct {
 	group, file string
 	groupSpeed  float64
 	onPark      func()
+	// waiting: this step of the download only waits for something (a place in someone's queue,
+	// peers); no data is moving. The queue's Downloading and Waiting lists go by it.
+	waiting   bool
+	onWaiting func() // told when waiting changes, so that the lists follow
 }
 
 type taskKey struct{}
@@ -39,12 +43,23 @@ func taskFrom(ctx context.Context) *Task {
 }
 
 // setStage starts a new step; progress from the previous step is cleared.
-func (t *Task) setStage(stage string) {
+func (t *Task) setStage(stage string) { t.step(stage, false) }
+
+// setWaitStage starts a step that only waits for something: nothing is being transferred.
+func (t *Task) setWaitStage(stage string) { t.step(stage, true) }
+
+func (t *Task) step(stage string, waiting bool) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.waiting != waiting {
+		t.waiting = waiting
+		if t.onWaiting != nil {
+			t.onWaiting()
+		}
+	}
 	if t.stage == stage {
 		return
 	}
@@ -68,6 +83,12 @@ func (t *Task) setProgress(done, total int64) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.waiting && done > 0 { // whatever it was waiting for, data is coming in now
+		t.waiting = false
+		if t.onWaiting != nil {
+			t.onWaiting()
+		}
+	}
 	now := time.Now()
 	switch dt := now.Sub(t.sampleAt).Seconds(); {
 	case t.sampleAt.IsZero() || done < t.sampleN:
@@ -121,6 +142,16 @@ type taskView struct {
 	Speed       float64 // the group's when Group is set
 	Group, File string
 	Started     time.Time
+	Waiting     bool // only waiting for something (see Task.waiting)
+}
+
+func (t *Task) isWaiting() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.waiting
 }
 
 func (t *Task) view() taskView {
@@ -137,7 +168,7 @@ func (t *Task) view() taskView {
 		speed = 0
 	}
 	return taskView{Stage: t.stage, Note: t.note, Done: t.done, Total: t.total, Speed: speed,
-		Group: t.group, File: t.file, Started: t.started}
+		Group: t.group, File: t.file, Started: t.started, Waiting: t.waiting}
 }
 
 // --- gates ------------------------------------------------------------------------------------

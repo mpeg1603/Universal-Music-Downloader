@@ -12,6 +12,13 @@ import (
 	"syscall"
 )
 
+// In the window app (built with cgo) Go would otherwise ask libc for every name, whenever
+// nsswitch.conf lists more than files and dns, as it does on most current distributions. libc's
+// lookup blocks a whole OS thread, so hundreds of searches and tracker announces going on at once
+// meant hundreds of threads, and those never go away. Go's own resolver waits without one, and
+// it's what the terminal app (built without cgo) has always used.
+func init() { net.DefaultResolver.PreferGo = true }
+
 // bindToInterface makes the dialer's sockets use iface whatever the routing table says
 // (SO_BINDTODEVICE; no special privileges are needed for this since Linux 5.7).
 func bindToInterface(d *net.Dialer, iface string) {

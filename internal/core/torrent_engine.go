@@ -54,21 +54,40 @@ type btEngine struct {
 	speed   float64 // overall, smoothed
 	lastAll int64
 	lastAt  time.Time
+	// metaUsers counts the callers waiting for each magnet's details: the client has one
+	// torrent per hash, so they share it, and the last one to finish lets go of it.
+	metaUsers map[metainfo.Hash]int
 }
+
+// btCompletion is the library's in-memory record of finished pieces, kept from taking the whole
+// app down. A piece still being checked when its torrent ends goes on to ask for its file's
+// pieces; closing the record empties it, its range lookup then returns nothing at all, and the
+// library panics, in a goroutine of its own where nothing can catch it. So closing does nothing
+// here (each download has its own record, gone along with it), and range lookups go through
+// Get, which always has an answer.
+type btCompletion struct{ storage.PieceCompletion }
+
+func (btCompletion) Close() error { return nil }
+
+// Persistent: nothing to flush a piece to disk for after each one.
+func (btCompletion) Persistent() bool { return false }
 
 type btTorrent struct {
 	t        *torrent.Torrent
 	st       storage.ClientImplCloser
 	dir      string
 	files    map[int]bool
-	read     int64 // useful bytes read when last looked
+	all      []*torrent.File // the torrent's files, asked for once
+	read     int64           // useful bytes read when last looked
 	readAt   time.Time
 	progress time.Time // when data last came in
 	speed    float64
 	err      string
 }
 
-func newBTEngine() *btEngine { return &btEngine{ts: map[string]*btTorrent{}} }
+func newBTEngine() *btEngine {
+	return &btEngine{ts: map[string]*btTorrent{}, metaUsers: map[metainfo.Hash]int{}}
+}
 
 // ensure starts the client.
 func (e *btEngine) ensure(ctx context.Context) error {
@@ -116,7 +135,7 @@ func (e *btEngine) add(ctx context.Context, data []byte, dir string, files map[i
 	if err != nil {
 		return "", err
 	}
-	st := storage.NewFileOpts(storage.NewFileClientOpts{ClientBaseDir: dir, PieceCompletion: storage.NewMapPieceCompletion()})
+	st := storage.NewFileOpts(storage.NewFileClientOpts{ClientBaseDir: dir, PieceCompletion: btCompletion{storage.NewMapPieceCompletion()}})
 	spec.Storage = st
 	e.mu.Lock()
 	cl := e.cl
@@ -129,8 +148,15 @@ func (e *btEngine) add(ctx context.Context, data []byte, dir string, files map[i
 		st.Close()
 		return "", err
 	}
-	if !isNew { // the same torrent under another download: shouldn't happen, but share it
-		st.Close()
+	if !isNew { // its magnet's details are still being fetched: it can't become a download so
+		st.Close() // it would save to the wrong place. Whoever waits for the details gets an error.
+		t.Drop()
+		st = storage.NewFileOpts(storage.NewFileClientOpts{ClientBaseDir: dir, PieceCompletion: btCompletion{storage.NewMapPieceCompletion()}})
+		spec.Storage = st
+		if t, _, err = cl.AddTorrentSpec(spec); err != nil {
+			st.Close()
+			return "", err
+		}
 	}
 	select {
 	case <-t.GotInfo():
@@ -152,13 +178,21 @@ func (e *btEngine) add(ctx context.Context, data []byte, dir string, files map[i
 }
 
 func (e *btEngine) select_(bt *btTorrent) {
-	for i, f := range bt.t.Files() {
+	for i, f := range bt.files_() {
 		if bt.files[i] {
 			f.SetPriority(types.PiecePriorityNormal)
 		} else {
 			f.SetPriority(types.PiecePriorityNone)
 		}
 	}
+}
+
+// files_ lists the torrent's files. It's a long list for a discography and is read every second.
+func (bt *btTorrent) files_() []*torrent.File {
+	if bt.all == nil {
+		bt.all = bt.t.Files()
+	}
+	return bt.all
 }
 
 // setFiles changes which files a download fetches; what it has stays.
@@ -195,13 +229,16 @@ func (e *btEngine) status(ctx context.Context, id string) (*torrentStatus, error
 	}
 	st := &torrentStatus{Status: "active", DownloadSpeed: int64(bt.speed), Connections: stats.ActivePeers, NumSeeders: stats.ConnectedSeeders}
 	all := true
-	for i, f := range bt.t.Files() {
+	list := bt.files_()
+	for i := range bt.files { // only those: looking at each file of a big torrent every second adds up
+		if i < 0 || i >= len(list) {
+			continue
+		}
+		f := list[i]
 		done := f.BytesCompleted()
 		st.Files = append(st.Files, torrentFileStatus{Index: i + 1, Path: filepath.Join(bt.dir, f.Path()), Length: f.Length(), CompletedLength: done})
-		if bt.files[i] {
-			st.CompletedLength += done
-			all = all && done >= f.Length()
-		}
+		st.CompletedLength += done
+		all = all && done >= f.Length()
 	}
 	switch {
 	case all:
@@ -308,6 +345,18 @@ var publicTrackers = []string{
 	"udp://tracker.corpscorp.online:80/announce",
 }
 
+// downloading says whether t is one of the running downloads.
+func (e *btEngine) downloading(t *torrent.Torrent) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, bt := range e.ts {
+		if bt.t == t {
+			return true
+		}
+	}
+	return false
+}
+
 // metadata gets the .torrent of a magnet link from its peers.
 func (e *btEngine) metadata(ctx context.Context, magnet string) ([]byte, error) {
 	if err := e.ensure(ctx); err != nil {
@@ -316,12 +365,35 @@ func (e *btEngine) metadata(ctx context.Context, magnet string) ([]byte, error) 
 	e.mu.Lock()
 	cl := e.cl
 	e.mu.Unlock()
-	t, err := cl.AddMagnet(magnet)
+	spec, err := torrent.TorrentSpecFromMagnetUri(magnet)
 	if err != nil {
 		return nil, fmt.Errorf("bad magnet link: %w", err)
 	}
-	defer t.Drop()
-	t.DisallowDataDownload()
+	e.mu.Lock()
+	e.metaUsers[spec.InfoHash]++
+	e.mu.Unlock()
+	t, err := cl.AddMagnet(magnet)
+	if err != nil {
+		e.mu.Lock()
+		e.metaUsers[spec.InfoHash]--
+		e.mu.Unlock()
+		return nil, fmt.Errorf("bad magnet link: %w", err)
+	}
+	defer func() {
+		e.mu.Lock()
+		e.metaUsers[spec.InfoHash]--
+		last := e.metaUsers[spec.InfoHash] <= 0
+		if last {
+			delete(e.metaUsers, spec.InfoHash)
+		}
+		e.mu.Unlock()
+		if last && !e.downloading(t) {
+			t.Drop()
+		}
+	}()
+	if !e.downloading(t) { // a download of the same torrent must keep going
+		t.DisallowDataDownload()
+	}
 	t.AddTrackers([][]string{publicTrackers}) // sites often give just the hash
 	select {
 	case <-t.GotInfo():

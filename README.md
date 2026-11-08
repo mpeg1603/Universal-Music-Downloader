@@ -220,7 +220,7 @@ Anywhere: `1`–`9` (or `Alt+1`–`9`, `F1`–`F9`) switch tabs, `[` `]` lower/r
 `P` pauses/resumes everything, `q` quits.
 
 **Queue filters and sorting.** `f` lists what can be shown, with how many tracks each:
-everything, to do, in progress, downloading now (without the searches), searching now, queued, moved to the front, to be retried, downloaded,
+everything, to do, in progress (searching, waiting and downloading together), downloading now (data coming in), searching now, waiting (for a slot, someone's queue, peers or a retry), queued, moved to the front, to be retried, downloaded,
 downloaded lossless or lossy, downloaded to replace a worse library copy, in your library,
 in your library below the threshold, not found, cancelled, added from the Search tab, and
 downloaded from each source, library upgrades. `o` sorts by playlist order, state, artist, title, album, length,
@@ -264,7 +264,9 @@ and their lengths differ by at most a few seconds: a 7-minute extended cut and t
 original are both kept, and so are live versions and remixes. The best copy stays: lossless beats
 lossy, then higher quality wins.
 
-**Nothing is deleted or re-encoded, and nothing is overwritten.** A file that changed since the
+**Nothing is deleted or re-encoded, and nothing is overwritten.** Unfinished downloads are left
+where they are: this app's, and those of browsers, torrent and Soulseek clients (`.part`, `.aria2`,
+`.!qB`, `INCOMPLETE…` and the like, or anything written to in the last two minutes). A file that changed since the
 plan was made is skipped. Each finished move goes straight to a journal, so applying can be
 stopped and continued, and a plan can be undone, even after a restart. Files you downloaded are
 followed to their new place, so they aren't downloaded again. Playlists (`.m3u`) pointing at the

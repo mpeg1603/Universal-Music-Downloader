@@ -33,6 +33,7 @@ type sortAudio struct {
 	Duration    float64 `json:"s,omitempty"`
 	Tags        sortTags
 	Err         string `json:"e,omitempty"`
+	Unfinished  bool   `json:"-"` // still being written: left out of the plan
 }
 
 type sortTags struct {
@@ -70,14 +71,16 @@ var sortCodecNames = map[string]string{"mp3": "MP3", "flac": "FLAC", "aac": "AAC
 	"wav": "WAV", "wavpack": "WavPack", "ape": "APE", "tta": "TTA", "wmav2": "WMA", "wmav1": "WMA", "mp2": "MP2"}
 
 // sortFind lists the audio files under the roots: hidden folders and symlinks are skipped, and
-// a file reachable from two roots counts once.
-func sortFind(ctx context.Context, roots, exclude []string, progress func(int)) ([]*sortAudio, error) {
+// a file reachable from two roots counts once. Unfinished downloads are left out; partial says
+// how many there were.
+func sortFind(ctx context.Context, roots, exclude []string, progress func(int)) (files []*sortAudio, partial int, err error) {
 	excluded := map[string]bool{}
 	for _, e := range exclude {
 		excluded[realPath(e)] = true
 	}
 	seen := map[string]bool{}
 	var found []*sortAudio
+	markers := map[string]bool{}
 	for _, root := range roots {
 		root = CleanPath(root)
 		realRoot := realPath(root)
@@ -100,7 +103,18 @@ func sortFind(ctx context.Context, roots, exclude []string, progress func(int)) 
 				}
 				return nil
 			}
-			if strings.HasPrefix(name, "._") || !sortExts[strings.ToLower(filepath.Ext(name))] || !d.Type().IsRegular() {
+			ext := strings.ToLower(filepath.Ext(name))
+			if sortPartialMarks[ext] {
+				markers[strings.TrimSuffix(p, filepath.Ext(name))] = true
+				return nil
+			}
+			if !sortExts[ext] || !d.Type().IsRegular() {
+				return nil
+			}
+			if sortLooksPartial(name) {
+				if !strings.HasPrefix(name, "._") { // macOS's notes about a file, not a download
+					partial++
+				}
 				return nil
 			}
 			real := resolved(p)
@@ -115,10 +129,18 @@ func sortFind(ctx context.Context, roots, exclude []string, progress func(int)) 
 			return nil
 		})
 		if err != nil && ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, 0, ctx.Err()
 		}
 	}
-	return found, nil
+	finished := found[:0]
+	for _, a := range found {
+		if markers[a.Path] {
+			partial++
+		} else {
+			finished = append(finished, a)
+		}
+	}
+	return finished, partial, nil
 }
 
 // realPath follows symlinks in a path that exists.
@@ -211,7 +233,9 @@ func sortRead(ctx context.Context, files []*sortAudio, cache *sortTagCache, tool
 				} else {
 					a.Size, a.Mtime = st.Size(), st.ModTime().UnixNano()
 					key := fileIdentity(st)
-					if c := cache.old[key]; c != nil {
+					if sortStillWritten(st) {
+						a.Unfinished = true
+					} else if c := cache.old[key]; c != nil {
 						a.Format, a.Lossless, a.Kbps, a.SampleRate, a.Bits, a.Duration, a.Tags, a.Err = c.Format, c.Lossless, c.Kbps, c.SampleRate, c.Bits, c.Duration, c.Tags, c.Err
 					} else {
 						sortReadFile(ctx, a, tools)
