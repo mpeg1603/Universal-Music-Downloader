@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"time"
 
 	"universal-music-downloader/internal/core"
@@ -17,6 +19,8 @@ import (
 var version = "dev"
 
 func main() {
+	dropOpenGL()
+	core.TuneMemory()
 	fs := flag.NewFlagSet("universal-music-downloader-gui", flag.ExitOnError)
 	configPath := fs.String("config", core.DefaultConfigPath(), "settings file")
 	dataDir := fs.String("data", core.DefaultDataDir(), "where the app keeps its state, logs and caches")
@@ -56,6 +60,20 @@ func main() {
 		os.Exit(1)
 	}
 	gui.Version = version
+	gui.StateFile = filepath.Join(*dataDir, "window.json")
 	gui.Run(m)
 	m.Stop()
+}
+
+// dropOpenGL starts the program over without the variable that picks a graphics driver: the
+// window draws in software, but with __GLX_VENDOR_LIBRARY_NAME set, linking Qt loads the whole
+// driver (some 90 MB with NVIDIA's) just in case.
+func dropOpenGL() {
+	if runtime.GOOS != "linux" || os.Getenv("__GLX_VENDOR_LIBRARY_NAME") == "" {
+		return
+	}
+	os.Unsetenv("__GLX_VENDOR_LIBRARY_NAME")
+	if exe, err := os.Executable(); err == nil {
+		syscall.Exec(exe, os.Args, os.Environ()) // on failure, carry on as we are
+	}
 }

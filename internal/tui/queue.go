@@ -15,25 +15,45 @@ import (
 
 type queueContent struct {
 	tview.TableContentReadOnly
-	rows []core.JobView
+	m     core.Backend
+	keys  []string
+	views map[int]core.JobView // the rows drawn lately; the others aren't read at all
+}
+
+// view reads a row's track when it's first drawn.
+func (q *queueContent) view(row int) (core.JobView, bool) {
+	if v, ok := q.views[row]; ok {
+		return v, true
+	}
+	if q.views == nil || len(q.views) > 300 {
+		q.views = map[int]core.JobView{}
+	}
+	v, ok := q.m.JobView(q.keys[row])
+	if ok {
+		q.views[row] = v
+	}
+	return v, ok
 }
 
 var queueHeaders = []string{"", "Track", "Album", "Status", "Quality", "Playlist"}
 
-func (q *queueContent) GetRowCount() int { return len(q.rows) + 1 }
+func (q *queueContent) GetRowCount() int { return len(q.keys) + 1 }
 
 func (q *queueContent) GetColumnCount() int { return len(queueHeaders) }
 
 // GetCell must accept positions outside the table: tview's mouse handler asks for row or
 // column -1 when a click lands below the last row or right of the last column.
 func (q *queueContent) GetCell(row, col int) *tview.TableCell {
-	if row < 0 || row > len(q.rows) || col < 0 || col >= len(queueHeaders) {
+	if row < 0 || row > len(q.keys) || col < 0 || col >= len(queueHeaders) {
 		return nil
 	}
 	if row == 0 {
 		return tview.NewTableCell(queueHeaders[col]).SetSelectable(false).SetAttributes(tcell.AttrBold).SetTextColor(tcell.ColorYellow)
 	}
-	v := q.rows[row-1]
+	v, ok := q.view(row - 1)
+	if !ok {
+		return nil
+	}
 	switch col {
 	case 0:
 		icon, color := stateIcon(v.State)
@@ -150,11 +170,11 @@ func qualityText(v core.JobView) string {
 }
 
 func (ui *tui) buildQueue() tview.Primitive {
-	ui.queueRows = &queueContent{}
+	ui.queueRows = &queueContent{m: ui.m}
 	ui.queueTable = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetContent(ui.queueRows)
 	ui.queueTable.SetSelectionChangedFunc(func(row, col int) {
-		if row >= 1 && row-1 < len(ui.queueRows.rows) {
-			ui.selected = ui.queueRows.rows[row-1].Key
+		if row >= 1 && row-1 < len(ui.queueRows.keys) {
+			ui.selected = ui.queueRows.keys[row-1]
 		}
 	})
 	ui.queueTable.SetSelectedFunc(func(row, col int) { ui.showDetails() })
@@ -214,8 +234,14 @@ func (ui *tui) buildQueue() tview.Primitive {
 }
 
 func (ui *tui) refreshQueue() {
-	rows := ui.m.Queue(ui.q)
-	ui.queueRows.rows = rows
+	// The order is read again every couple of seconds, or at once for a new filter; the rows
+	// on screen are read at every drawing.
+	if ui.q != ui.queueAsked || time.Since(ui.queueRead) > 2*time.Second {
+		ui.queueRows.keys, ui.queueCounts = ui.m.QueueKeys(ui.q)
+		ui.queueAsked, ui.queueRead = ui.q, time.Now()
+	}
+	ui.queueRows.views = nil
+	rows := ui.queueRows.keys
 	filter, sortBy := "all tracks", "playlist order"
 	for _, f := range core.QueueFilters {
 		if f.Name == ui.q.Filter {
@@ -240,15 +266,15 @@ func (ui *tui) refreshQueue() {
 	if ui.q.Filter != "" || ui.q.Source != "" || ui.q.Playlist != "" || ui.q.Text != "" {
 		info += " · Esc shows all"
 	}
-	if len(ui.m.Config().Inputs) == 0 && len(ui.m.Jobs()) == 0 {
+	if len(ui.m.Config().Inputs) == 0 && ui.queueCounts["all"] == 0 {
 		info = " [yellow]Nothing queued yet: press 2 for Search to find music or add your playlist files[-]"
 	}
 	ui.queueInfo.SetText(info)
 	// Keep the selected track selected as rows move.
 	row, _ := ui.queueTable.GetSelection()
 	want := -1
-	for i, v := range rows {
-		if v.Key == ui.selected {
+	for i, k := range rows {
+		if k == ui.selected {
 			want = i + 1
 			break
 		}
@@ -377,9 +403,9 @@ func (ui *tui) pickFilter() {
 		})
 	}
 	bySource := map[string]int{}
-	for _, v := range ui.m.Jobs() {
-		if v.State == core.JobDone && v.Rec.Source != "" {
-			bySource[v.Rec.Source]++
+	for k, n := range counts {
+		if name, ok := strings.CutPrefix(k, "from:"); ok {
+			bySource[name] = n
 		}
 	}
 	var srcs []string

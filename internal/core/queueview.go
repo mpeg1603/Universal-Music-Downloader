@@ -55,41 +55,101 @@ type QueueQuery struct {
 	Reverse  bool
 }
 
-// MatchesFilter tells whether a track belongs under a filter.
-func MatchesFilter(v JobView, f string) bool {
+// jobBrief is what filtering and sorting look at: a small copy of a job, so that listing the
+// queue doesn't copy every track's whole state.
+type jobBrief struct {
+	key        string
+	track      *Track
+	playlists  []string
+	state      JobState
+	source     string
+	recSource  string
+	recUpdated string
+	recQuality Quality
+	libQuality Quality
+	hasLib     bool
+	recLib     bool // better than the library copy
+	needBetter bool
+	bumped     bool
+	prio       int
+	idx        int
+	progress   float64
+}
+
+func (j *Job) brief() jobBrief {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	b := jobBrief{key: j.Track.Key, track: j.Track, playlists: j.playlists, state: j.state, source: j.source,
+		needBetter: j.needBetter, bumped: j.bump > 0, prio: j.prio, idx: j.idx, progress: -1}
+	if j.rec != nil {
+		b.recSource, b.recUpdated = j.rec.Source, j.rec.Updated
+		if j.state == JobDone {
+			b.recQuality, b.recLib = j.rec.Quality, j.rec.LibPath != ""
+		}
+	}
+	if j.state == JobDone {
+		b.progress = 2
+	}
+	if len(j.lib) > 0 {
+		b.hasLib, b.libQuality = true, j.lib[0].Q
+	}
+	switch {
+	case j.state == JobInLibrary:
+		b.progress = 2
+	case j.state.Active():
+		if t := j.task.view(); t.Total > 0 {
+			b.progress = float64(t.Done) / float64(t.Total)
+		}
+	}
+	return b
+}
+
+func (b *jobBrief) quality() Quality {
+	switch {
+	case b.state == JobDone:
+		return b.recQuality
+	case b.hasLib:
+		return b.libQuality
+	}
+	return Quality{}
+}
+
+// matches tells whether a track belongs under a filter.
+func (b *jobBrief) matches(f string) bool {
+	todo := b.state == JobQueued || b.state.Active() || b.state == JobWaiting
 	switch f {
 	case "active":
-		return v.State.Active()
+		return b.state.Active()
 	case "downloading":
-		return v.State == JobDownloading
+		return b.state == JobDownloading
 	case "searching":
-		return v.State == JobSearching
+		return b.state == JobSearching
 	case "todo":
-		return v.State == JobQueued || v.State.Active() || v.State == JobWaiting
+		return todo
 	case "queued":
-		return v.State == JobQueued
+		return b.state == JobQueued
 	case "prioritized":
-		return v.Bumped && (v.State == JobQueued || v.State.Active() || v.State == JobWaiting)
+		return b.bumped && todo
 	case "waiting":
-		return v.State == JobWaiting
+		return b.state == JobWaiting
 	case "done":
-		return v.State == JobDone
+		return b.state == JobDone
 	case "lossless":
-		return v.State == JobDone && v.Rec.Quality.Lossless
+		return b.state == JobDone && b.recQuality.Lossless
 	case "lossy":
-		return v.State == JobDone && !v.Rec.Quality.Lossless
+		return b.state == JobDone && !b.recQuality.Lossless
 	case "upgrades":
-		return v.State == JobDone && v.Rec.LibPath != ""
+		return b.state == JobDone && b.recLib
 	case "library":
-		return v.State == JobInLibrary
+		return b.state == JobInLibrary
 	case "below":
-		return v.NeedBetter && v.LibCount > 0 && v.State != JobDone
+		return b.needBetter && b.hasLib && b.state != JobDone
 	case "failed":
-		return v.State == JobFailed
+		return b.state == JobFailed
 	case "cancelled":
-		return v.State == JobCancelled
+		return b.state == JobCancelled
 	case "search", "upgrading":
-		for _, p := range v.Playlists {
+		for _, p := range b.playlists {
 			if f == "search" && IsAddition(p) && !IsUpgrade(p) || f == "upgrading" && IsUpgrade(p) {
 				return true
 			}
@@ -99,129 +159,180 @@ func MatchesFilter(v JobView, f string) bool {
 	return true
 }
 
-// Queue lists the tracks q asks for.
-func (m *Manager) Queue(q QueueQuery) []JobView {
-	views := m.Jobs()
-	needle := strings.ToLower(strings.TrimSpace(q.Text))
-	rows := views[:0]
-	for _, v := range views {
-		if !MatchesFilter(v, q.Filter) {
-			continue
+// count adds a track to the counts of the filters it's under, and of the source it came from.
+func (b *jobBrief) count(out map[string]*int, bySource map[string]int) {
+	add := func(f string) { *out[f]++ }
+	add("all")
+	for _, f := range [...]string{"todo", "active", "downloading", "searching", "queued", "prioritized", "waiting", "done",
+		"lossless", "lossy", "upgrades", "library", "below", "failed", "cancelled"} {
+		if b.matches(f) {
+			add(f)
 		}
-		if q.Playlist != "" && !ContainsString(v.Playlists, q.Playlist) {
-			continue
-		}
-		if q.Source != "" && v.Rec.Source != q.Source && v.Source != q.Source {
-			continue
-		}
-		if needle != "" && !strings.Contains(strings.ToLower(v.Track.String()+" "+v.Track.Album), needle) {
-			continue
-		}
-		rows = append(rows, v)
 	}
-	SortViews(rows, q.Sort, q.Reverse)
-	return rows
+	if len(b.playlists) > 0 {
+		for _, f := range [...]string{"search", "upgrading"} {
+			if b.matches(f) {
+				add(f)
+			}
+		}
+	}
+	if b.state == JobDone && b.recSource != "" {
+		bySource[b.recSource]++
+	}
 }
 
-// QueueCounts counts the tracks under each filter.
-func (m *Manager) QueueCounts() map[string]int {
-	out := map[string]int{}
-	for _, v := range m.Jobs() {
-		for _, f := range QueueFilters {
-			if MatchesFilter(v, f.Name) {
-				out[f.Name]++
-			}
+func (m *Manager) briefs() []jobBrief {
+	m.jobsMu.Lock()
+	list := m.order
+	m.jobsMu.Unlock()
+	out := make([]jobBrief, len(list))
+	for i, j := range list {
+		out[i] = j.brief()
+	}
+	return out
+}
+
+// QueueKeys lists the tracks q asks for, as keys (JobView gets a track's details), and how many
+// tracks are under each filter ("from:<source>" for what came from each source). Listing and
+// counting everything takes one pass, so a frontend with a big queue asks for just this and
+// reads only the rows it's showing.
+func (m *Manager) QueueKeys(q QueueQuery) ([]string, map[string]int) {
+	all := m.briefs()
+	storage := make([]int, len(QueueFilters))
+	refs := make(map[string]*int, len(QueueFilters))
+	for i, f := range QueueFilters {
+		refs[f.Name] = &storage[i]
+	}
+	bySource := map[string]int{}
+	needle := strings.ToLower(strings.TrimSpace(q.Text))
+	rows := make([]int32, 0, len(all))
+	for i := range all {
+		b := &all[i]
+		b.count(refs, bySource)
+		if q.Filter != "" && !b.matches(q.Filter) {
+			continue
+		}
+		if q.Playlist != "" && !ContainsString(b.playlists, q.Playlist) {
+			continue
+		}
+		if q.Source != "" && b.recSource != q.Source && b.source != q.Source {
+			continue
+		}
+		if needle != "" && !strings.Contains(strings.ToLower(b.track.String()+" "+b.track.Album), needle) {
+			continue
+		}
+		rows = append(rows, int32(i))
+	}
+	sortBriefs(all, rows, q.Sort, q.Reverse)
+	keys := make([]string, len(rows))
+	for i, r := range rows {
+		keys[i] = all[r].key
+	}
+	counts := make(map[string]int, len(refs)+len(bySource))
+	for name, p := range refs {
+		counts[name] = *p
+	}
+	for src, n := range bySource {
+		counts["from:"+src] = n
+	}
+	return keys, counts
+}
+
+// Queue lists the tracks q asks for, with everything about them.
+func (m *Manager) Queue(q QueueQuery) []JobView {
+	keys, _ := m.QueueKeys(q)
+	out := make([]JobView, 0, len(keys))
+	for _, k := range keys {
+		if v, ok := m.JobView(k); ok {
+			out = append(out, v)
 		}
 	}
 	return out
 }
 
-func viewQuality(v JobView) Quality {
-	if v.State == JobDone {
-		return v.Rec.Quality
-	}
-	if v.Lib != nil {
-		return v.Lib.Q
-	}
-	return Quality{}
+// QueueCounts counts the tracks under each filter.
+func (m *Manager) QueueCounts() map[string]int {
+	_, counts := m.QueueKeys(QueueQuery{Filter: "none"})
+	return counts
 }
 
-func viewProgress(v JobView) float64 {
-	switch {
-	case v.State == JobDone || v.State == JobInLibrary:
-		return 2
-	case v.Task.Total > 0:
-		return float64(v.Task.Done) / float64(v.Task.Total)
-	}
-	return -1
+// sortKey is what one track is ordered by.
+type sortKey struct {
+	a, b string
+	x, y float64
 }
 
-// SortViews orders tracks; ties keep playlist order (reversed too, with reverse).
-func SortViews(views []JobView, by string, reverse bool) {
-	less := func(x, y JobView) int { // -1, 0, 1
-		cmp := func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) }
-		num := func(a, b float64) int {
-			switch {
-			case a < b:
-				return -1
-			case a > b:
-				return 1
+// sortBriefs orders rows (indexes into all); ties keep playlist order (reversed too, with
+// reverse). What it compares is worked out once per track, not once per comparison.
+func sortBriefs(all []jobBrief, rows []int32, by string, reverse bool) {
+	if by == "" || by == "playlist" {
+		// already in playlist order
+		if reverse {
+			for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+				rows[i], rows[j] = rows[j], rows[i]
 			}
-			return 0
 		}
+		return
+	}
+	keys := make([]sortKey, len(all))
+	lower := strings.ToLower
+	newest := false
+	for _, r := range rows {
+		b, k := &all[r], &keys[r]
+		t := b.track
 		switch by {
 		case "artist":
-			if c := cmp(x.Track.ArtistStr(), y.Track.ArtistStr()); c != 0 {
-				return c
-			}
-			if c := cmp(x.Track.Album, y.Track.Album); c != 0 {
-				return c
-			}
-			return num(float64(x.Track.TrackNumber), float64(y.Track.TrackNumber))
+			k.a, k.b, k.x = lower(t.ArtistStr()), lower(t.Album), float64(t.TrackNumber)
 		case "title":
-			return cmp(x.Track.Title, y.Track.Title)
+			k.a = lower(t.Title)
 		case "album":
-			if c := cmp(x.Track.Album, y.Track.Album); c != 0 {
-				return c
-			}
-			return num(float64(x.Track.DiscNumber*1000+x.Track.TrackNumber), float64(y.Track.DiscNumber*1000+y.Track.TrackNumber))
+			k.a, k.x = lower(t.Album), float64(t.DiscNumber*1000+t.TrackNumber)
 		case "length":
-			return num(float64(x.Track.DurationMs), float64(y.Track.DurationMs))
+			k.x = float64(t.DurationMs)
 		case "quality":
-			return -num(viewQuality(x).Score(), viewQuality(y).Score()) // best first
+			k.x = -b.quality().Score() // best first
 		case "source":
-			return cmp(FirstNonEmpty(x.Rec.Source, x.Source, "~"), FirstNonEmpty(y.Rec.Source, y.Source, "~"))
+			k.a = lower(FirstNonEmpty(b.recSource, b.source, "~"))
 		case "state":
-			return num(float64(stateOrder[x.State]), float64(stateOrder[y.State]))
+			k.x = float64(stateOrder[b.state])
 		case "progress":
-			return -num(viewProgress(x), viewProgress(y))
+			k.x = -b.progress
 		case "priority":
-			if x.Bumped != y.Bumped {
-				if x.Bumped {
-					return -1
-				}
-				return 1
+			if !b.bumped {
+				k.x = 1
 			}
-			return -num(float64(x.Prio), float64(y.Prio))
+			k.y = -float64(b.prio)
 		case "updated":
-			return -cmp(x.Rec.Updated, y.Rec.Updated) // newest first
+			k.a, newest = lower(b.recUpdated), true
 		}
-		return 0
 	}
-	sort.SliceStable(views, func(a, b int) bool {
-		x, y := views[a], views[b]
-		c := less(x, y)
+	compare := func(i, j int32) int {
+		x, y := &keys[i], &keys[j]
+		c := strings.Compare(x.a, y.a)
+		if newest {
+			c = -c
+		}
 		if c == 0 {
-			c = num0(x.idx, y.idx)
+			c = strings.Compare(x.b, y.b)
+		}
+		if c == 0 {
+			c = num0(x.x, y.x)
+		}
+		if c == 0 {
+			c = num0(x.y, y.y)
+		}
+		if c == 0 {
+			c = num0(all[i].idx, all[j].idx)
 		}
 		if reverse {
-			return c > 0
+			return -c
 		}
-		return c < 0
-	})
+		return c
+	}
+	sort.Slice(rows, func(i, j int) bool { return compare(rows[i], rows[j]) < 0 })
 }
 
-func num0(a, b int) int {
+func num0[T int | float64](a, b T) int {
 	switch {
 	case a < b:
 		return -1

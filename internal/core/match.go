@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -173,6 +174,168 @@ func versionConflict(t *Track, c *Candidate) string {
 		}
 	}
 	return ""
+}
+
+// --- the library check ---------------------------------------------------------------------
+//
+// Checking tens of thousands of tracks against tens of thousands of files is the most expensive
+// thing the app does. libMatches decides exactly what evaluate would (accepted or not), but
+// cheapest tests first, stops as soon as the answer is known, and reuses the cleaned-up text
+// of a track and of a file instead of working it out for every pair.
+
+// trackForm is a track's text, ready for comparing with library files.
+type trackForm struct {
+	t       *Track
+	targets [][]rune // the cleaned titles
+	sorted  [][]rune // the same, with their words in order
+	artists []string
+	ours    string // normalized title, album and artists; made when first needed
+	marks   uint32
+	marked  bool
+}
+
+func newTrackForm(t *Track) *trackForm {
+	f := &trackForm{t: t, artists: normalizedArtists(t)}
+	a, b := cleanTitle(t.Title, false), cleanTitle(baseTitle(t.Title), false)
+	for _, s := range []string{a, b} {
+		if s != "" && (len(f.targets) == 0 || s != string(f.targets[0])) {
+			f.targets, f.sorted = append(f.targets, []rune(s)), append(f.sorted, []rune(sortedTokens(s)))
+		}
+	}
+	return f
+}
+
+// ownMarks are the version markers (live, remix, ...) in the track's own text.
+func (f *trackForm) ownMarks() uint32 {
+	if !f.marked {
+		f.marks, f.marked = versionMarks(normalize(f.t.Title+" "+f.t.Album+" "+strings.Join(f.t.Artists, " "))), true
+	}
+	return f.marks
+}
+
+func versionMarks(s string) uint32 {
+	var out uint32
+	for i := range versionMarkers {
+		if versionMarkers[i].re.MatchString(s) {
+			out |= 1 << i
+		}
+	}
+	return out
+}
+
+type titleVariant struct {
+	text    string
+	runes   []rune
+	sorted  []rune
+	penalty float64
+}
+
+// fileForm is a library file's title, ready for comparing with tracks.
+type fileForm struct {
+	variants []titleVariant
+	marks    uint32
+}
+
+func newFileForm(title string) *fileForm {
+	f := &fileForm{marks: versionMarks(normalize(title))}
+	parts := []string{title}
+	if reTitleParts.MatchString(title) {
+		parts = append(parts, reTitleParts.Split(title, -1)...)
+	}
+	seen := map[string]bool{}
+	add := func(text string, penalty float64) {
+		if key := text + "\x00" + fmt.Sprint(penalty); text != "" && !seen[key] {
+			seen[key] = true
+			f.variants = append(f.variants, titleVariant{text, []rune(text), []rune(sortedTokens(text)), penalty})
+		}
+	}
+	for _, part := range parts {
+		add(cleanTitle(part, true), 0)
+		add(cleanTitle(reBrackets.ReplaceAllString(part, " "), true), 5)
+	}
+	return f
+}
+
+// runesRatio is ratio on text already split into characters.
+func runesRatio(a, b []rune) float64 {
+	if len(a)+len(b) == 0 {
+		return 100
+	}
+	return 200 * float64(lcs(a, b)) / float64(len(a)+len(b))
+}
+
+// titleFits tells whether titleScore would reach minTitle.
+func titleFits(t *trackForm, f *fileForm) bool {
+	if len(t.targets) == 0 {
+		return false
+	}
+	one := func(target, sorted []rune, v []rune, vs []rune, penalty float64) bool {
+		// Neither ratio can beat what the two lengths allow.
+		short, sum := min(len(target), len(v)), len(target)+len(v)
+		if sum == 0 || 200*float64(short)/float64(sum)-penalty < minTitle {
+			return false
+		}
+		return runesRatio(target, v)-penalty >= minTitle || runesRatio(sorted, vs)-penalty >= minTitle
+	}
+	for i := range f.variants {
+		v := &f.variants[i]
+		for j, target := range t.targets {
+			if one(target, t.sorted[j], v.runes, v.sorted, v.penalty) {
+				return true
+			}
+		}
+		// Uploads carry the artist's name in the title; try without it.
+		for _, a := range t.artists {
+			if !containsPhrase(v.text, a) {
+				continue
+			}
+			without := strings.Join(strings.Fields(strings.ReplaceAll(" "+v.text+" ", " "+a+" ", " ")), " ")
+			if without == "" {
+				continue
+			}
+			runes, sorted := []rune(without), []rune(sortedTokens(without))
+			for j, target := range t.targets {
+				if one(target, t.sorted[j], runes, sorted, v.penalty) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// artistForms are the ways a credit is compared; many files share one, so they're kept by name
+// during a check.
+type artistForms struct{ forms sync.Map }
+
+func (a *artistForms) get(name string) []string {
+	if v, ok := a.forms.Load(name); ok {
+		return v.([]string)
+	}
+	var channels []string
+	for _, ch := range []string{normalize(name), normalize(reChannelNoise.ReplaceAllString(name, ""))} {
+		if ch != "" {
+			channels = append(channels, ch)
+		}
+	}
+	a.forms.Store(name, channels)
+	return channels
+}
+
+// artistFits tells whether artistScore (for a performer credit) would reach minArtist.
+func artistFits(t *trackForm, channels []string) bool {
+	if len(t.artists) == 0 {
+		return true
+	}
+	for _, n := range t.artists {
+		for _, ch := range channels {
+			if n == ch || tokenSetRatio(n, ch) >= minArtist ||
+				ratio(strings.ReplaceAll(n, " ", ""), strings.ReplaceAll(ch, " ", "")) >= minArtist {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func normalizedArtists(t *Track) []string {

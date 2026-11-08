@@ -3,7 +3,9 @@
 An app that downloads the songs of your playlists, and the tracks, albums and
 discographies you search for, from many sources (Bandcamp, Soulseek, torrents, YouTube…), and
 **skips what your music library already has in good enough quality**. It never downloads from
-Spotify, and never writes to your library: new files go to their own downloads folder.
+Spotify, and doesn't write to your library: new files go to their own downloads folder. (The
+one exception is **Sort & merge**, which tidies your folders when, and only when, you apply a
+plan you've looked over.)
 
 It's self-contained: the Soulseek client, the BitTorrent client and the torrent site search
 (Jackett's public site definitions) are built in, and the programs it uses (ffmpeg, yt-dlp)
@@ -113,9 +115,9 @@ with the number of transfers each way).
 ![The Downloads page](docs/img/downloads.png)
 
 `universal-music-downloader-gui` is the same app with a desktop interface. The sidebar has the
-things you'd come for: **Downloads**, **Find music**, **Playlists**, **My library**, then
-**Sources** (where music comes from, and in what order), **Soulseek**, **Settings**, **Activity**
-and **Help**. Every page says what it's for, and the small **?** next to its title explains it.
+things you'd come for: **Dashboard**, **Downloads**, **Find music**, **Playlists**, **My library**,
+**Sort & merge**, then **Sources** (where music comes from, and in what order), **Soulseek**,
+**Settings**, **Activity** and **Help**. Every page says what it's for, and the small **?** next to its title explains it.
 Light, dark, or following your desktop (Settings → Appearance). [docs/gui-guide.md](docs/gui-guide.md)
 walks through it.
 
@@ -197,8 +199,10 @@ connection to Deezer the lines are read as `Artist - Title`.
 | `5` Soulseek | a full Soulseek client in six pages: Search, Transfers, Browse, Users, Chat, Interests (see *Soulseek*) | `<` `>` switch pages, `/` search, `u` the user menu, `m` message, `b` browse their files, `i` user info, `n` message someone, `j` join a room, `A` away/online, `o` check your port, `R` reconnect |
 | `6` Settings | downloads folder, format, layout, threshold, bandwidth, parallel downloads and searches | `Tab`/arrows move, `Esc` leaves a field, **Save** applies |
 | `7` Log | what happened | `v` detailed log, `End` follow |
+| `8` Dashboard | speeds, how far the songs have come, disk use | |
+| `9` Sort | tidy your library and downloads, duplicates aside (see *Sort & merge*) | `s` make a plan, `a` apply, `d` drop it, `D` moves/duplicates, `f` kind, `/` filter, `x` stop, `u` undo a plan, `C` carry on with one |
 
-Anywhere: `1`–`7` (or `Alt+1`–`7`, `F1`–`F7`) switch tabs, `[` `]` lower/raise the bandwidth,
+Anywhere: `1`–`9` (or `Alt+1`–`9`, `F1`–`F9`) switch tabs, `[` `]` lower/raise the bandwidth,
 `P` pauses/resumes everything, `q` quits.
 
 **Queue filters and sorting.** `f` lists what can be shown, with how many tracks each:
@@ -216,6 +220,37 @@ finish. `P` again resumes.
 
 Quitting (`q`, closing the terminal, or `kill`) stops the tracks in progress; they continue
 next time. Reports are rewritten every few minutes and on quit.
+
+### Sort & merge
+
+Tidies your library and downloads into one library, and moves duplicate songs into a folder of
+their own, sorted the same way, with a report of which file replaced which:
+
+```
+Music/Artist/Album/01 - Song.flac
+Music/Artist/Singles/Song.mp3
+Music/Various Artists/Album/01 - Artist - Song.mp3
+Duplicates/Artist/Album/01 - Song.mp3      (a worse copy of something kept)
+Duplicates/duplicates_report.txt
+```
+
+It works in three steps, and only the last changes anything:
+
+1. **Make a plan.** It reads your files: their tags, then their file and folder names, then (for
+   the few that need it, and if you allow it) MusicBrainz and Deezer. Nothing changes.
+2. **Look it over.** Every file's old and new place, every duplicate and why.
+3. **Apply it.** Files move, or are copied if you'd rather. Downloads pause meanwhile.
+
+Two files are the same recording if they're byte-for-byte identical, or if artist and title match
+and their lengths differ by at most a few seconds: a 7-minute extended cut and the 3-minute
+original are both kept, and so are live versions and remixes. The best copy stays: lossless beats
+lossy, then higher quality wins.
+
+**Nothing is deleted or re-encoded, and nothing is overwritten.** A file that changed since the
+plan was made is skipped. Each finished move goes straight to a journal, so applying can be
+stopped and continued, and a plan can be undone, even after a restart. Files you downloaded are
+followed to their new place, so they aren't downloaded again. Playlists (`.m3u`) pointing at the
+old places stop matching. Plans are kept in the data folder under `sort-plans/`.
 
 ### Reports
 

@@ -35,9 +35,10 @@ type bandcampMail struct {
 	path string
 
 	mu        sync.Mutex
-	Requested map[string]time.Time `json:"requested"` // release -> when Bandcamp was asked to email it
-	Links     map[string]string    `json:"links"`     // release -> download page from the email
-	Seen      map[string]string    `json:"seen"`      // link -> release ("" if it didn't open)
+	Requested map[string]time.Time `json:"requested"`       // release -> when Bandcamp was asked to email it
+	Asked     map[string]int       `json:"asked,omitempty"` // release -> how many times, while no link came
+	Links     map[string]string    `json:"links"`           // release -> download page from the email
+	Seen      map[string]string    `json:"seen"`            // link -> release ("" if it didn't open)
 
 	cfg     BandcampCfg
 	fetcher mailFetcher
@@ -113,6 +114,25 @@ func (m *bandcampMail) markRequested(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Requested[key] = time.Now()
+	if m.Asked == nil {
+		m.Asked = map[string]int{}
+	}
+	m.Asked[key]++
+	m.saveLocked()
+}
+
+func (m *bandcampMail) asks(key string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Asked[key]
+}
+
+// forgetRequest gives up on a release's email; asking starts over if it's ever tried again.
+func (m *bandcampMail) forgetRequest(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.Requested, key)
+	delete(m.Asked, key)
 	m.saveLocked()
 }
 
@@ -122,6 +142,7 @@ func (m *bandcampMail) dropLink(key string) {
 	defer m.mu.Unlock()
 	delete(m.Links, key)
 	delete(m.Requested, key)
+	delete(m.Asked, key)
 	m.saveLocked()
 }
 

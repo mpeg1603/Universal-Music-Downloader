@@ -33,6 +33,8 @@ type LibFile struct {
 	Duration    float64 `json:"d,omitempty"`
 	Q           Quality `json:"q"`
 	Guessed     bool    `json:"g,omitempty"` // no usable tags: title/artist taken from the path
+
+	form atomic.Pointer[fileForm] // its title prepared for comparing, during a library check
 }
 
 type LibScanStatus struct {
@@ -50,6 +52,8 @@ type LibScanStatus struct {
 type LibIndex struct {
 	cachePath string
 	tools     *Tools
+	checking  atomic.Bool // a full library check is running: prepared text is worth keeping
+	artists   artistForms
 
 	mu       sync.RWMutex
 	files    map[string]*LibFile
@@ -69,7 +73,10 @@ func newLibIndex(cachePath string, tools *Tools) *LibIndex {
 	if data, err := os.ReadFile(cachePath); err == nil {
 		var list []*LibFile
 		if json.Unmarshal(data, &list) == nil {
+			strs := map[string]string{}
 			for _, f := range list {
+				f.Artist, f.AlbumArtist, f.Album = intern(strs, f.Artist), intern(strs, f.AlbumArtist), intern(strs, f.Album)
+				f.Q.Codec = intern(strs, f.Q.Codec)
 				ix.files[f.Path] = f
 			}
 		}
@@ -409,6 +416,31 @@ func (d *ffprobeOutput) quality() (float64, Quality) {
 }
 
 // Match finds the library's copies of a track, best quality first.
+// fileForm is a file's prepared title; kept only while a full check runs.
+func (ix *LibIndex) fileForm(f *LibFile) *fileForm {
+	if v := f.form.Load(); v != nil {
+		return v
+	}
+	v := newFileForm(f.Title)
+	if ix.checking.Load() {
+		f.form.Store(v)
+	}
+	return v
+}
+
+// beginCheck and endCheck bracket a check of the whole queue; the prepared text goes afterwards.
+func (ix *LibIndex) beginCheck() { ix.checking.Store(true) }
+
+func (ix *LibIndex) endCheck() {
+	ix.checking.Store(false)
+	ix.mu.RLock()
+	for _, f := range ix.files {
+		f.form.Store(nil)
+	}
+	ix.mu.RUnlock()
+	ix.artists = artistForms{}
+}
+
 func (ix *LibIndex) Match(t *Track) []*LibFile {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
@@ -433,8 +465,9 @@ func (ix *LibIndex) Match(t *Track) []*LibFile {
 	}
 	add(ix.byTitle[libTitleKey(t.Title)])
 	var out []*LibFile
+	form := newTrackForm(t)
 	for _, f := range cands {
-		if libMatches(t, f, isrc) {
+		if libFits(form, f, isrc, ix.fileForm(f), &ix.artists) {
 			out = append(out, f)
 		}
 	}
@@ -443,18 +476,27 @@ func (ix *LibIndex) Match(t *Track) []*LibFile {
 }
 
 func libMatches(t *Track, f *LibFile, isrc string) bool {
+	return libFits(newTrackForm(t), f, isrc, newFileForm(f.Title), &artistForms{})
+}
+
+// libFits is libMatches with the text already prepared.
+func libFits(t *trackForm, f *LibFile, isrc string, form *fileForm, artists *artistForms) bool {
+	tr := t.t
 	dur := f.Duration
 	if f.ISRC != "" && isrc != "" && strings.EqualFold(strings.TrimSpace(f.ISRC), isrc) {
 		// The same recording; only a very different length (a cut or a mislabelled file) says no.
-		return dur == 0 || t.DurationMs == 0 || abs(dur-t.Duration()) <= max(20, t.Duration()*0.1)
+		return dur == 0 || tr.DurationMs == 0 || abs(dur-tr.Duration()) <= max(20, tr.Duration()*0.1)
 	}
-	c := Candidate{Title: f.Title, Artist: FirstNonEmpty(f.Artist, f.AlbumArtist), Album: f.Album, Duration: dur, ArtistIsCredit: true}
-	m := evaluate(t, c)
-	if m.Reject != "" && f.AlbumArtist != "" && f.Artist != "" && strings.HasPrefix(m.Reject, "different artist") {
-		c.Artist = f.AlbumArtist
-		m = evaluate(t, c)
+	if dur > 0 && tr.DurationMs > 0 && abs(dur-tr.Duration()) > durationTolerance(tr.Duration()) {
+		return false
 	}
-	return m.Reject == ""
+	if form.marks&^t.ownMarks() != 0 || !titleFits(t, form) {
+		return false
+	}
+	if artistFits(t, artists.get(FirstNonEmpty(f.Artist, f.AlbumArtist))) {
+		return true
+	}
+	return f.AlbumArtist != "" && f.Artist != "" && artistFits(t, artists.get(f.AlbumArtist))
 }
 
 func abs(x float64) float64 {

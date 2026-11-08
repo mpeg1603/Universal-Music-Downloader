@@ -300,3 +300,47 @@ func TestGmailSignInAndFetch(t *testing.T) {
 		t.Errorf("expired sign-in: %v", err)
 	}
 }
+
+// A link that doesn't come within the hour is asked for again, a few times, and then the track
+// moves on to other sources.
+func TestBandcampAsksAgainAfterAnHour(t *testing.T) {
+	fb := newFakeBandcamp(t)
+	dir := t.TempDir()
+	mb := newBandcampMail(filepath.Join(dir, "mail.json"))
+	mb.configure(BandcampCfg{Email: "me@example.com", Mailbox: "paste"}, "system", nil, "")
+	tr := MakeTrack("Song", []string{"Artist"}, "", 4)
+	cand := Candidate{Source: "bandcamp", URL: fb.srv.URL + "/track/song", Title: "Song", Artist: "Artist", Duration: 4}
+	try := func() error {
+		b := newBandcamp(filepath.Join(dir, "cache"), "original", "system", mb)
+		_, err := b.Download(context.Background(), cand, tr, t.TempDir())
+		return err
+	}
+	anHourLater := func() {
+		mb.mu.Lock()
+		for k := range mb.Requested {
+			mb.Requested[k] = time.Now().Add(-bandcampEmailWait - time.Minute)
+		}
+		mb.mu.Unlock()
+	}
+	for want := int32(1); want <= bandcampEmailTries; want++ {
+		err := try()
+		wait, pending := isPending(err)
+		if !pending || wait > bandcampEmailWait {
+			t.Fatalf("try %d: pending %v for %v (%v)", want, pending, wait, err)
+		}
+		if n := fb.requested.Load(); n != want {
+			t.Fatalf("after %d tries Bandcamp was asked %d times", want, n)
+		}
+		if try(); fb.requested.Load() != want { // not again until the hour is up
+			t.Fatalf("asked again within the hour: %d", fb.requested.Load())
+		}
+		anHourLater()
+	}
+	err := try()
+	if _, pending := isPending(err); pending || err == nil || !strings.Contains(err.Error(), "never came") {
+		t.Fatalf("after %d requests it should move on: %v", bandcampEmailTries, err)
+	}
+	if n := fb.requested.Load(); n != bandcampEmailTries {
+		t.Errorf("asked %d times", n)
+	}
+}

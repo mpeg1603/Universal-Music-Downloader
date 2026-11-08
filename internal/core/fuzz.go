@@ -20,8 +20,13 @@ func lcs(a, b []rune) int {
 	if len(a) < len(b) {
 		a, b = b, a
 	}
-	prev := make([]int, len(b)+1)
-	cur := make([]int, len(b)+1)
+	var buf [2 * 256]int // titles and names fit here, so nothing is allocated for them
+	var prev, cur []int
+	if n := len(b) + 1; n <= len(buf)/2 {
+		prev, cur = buf[:n:n], buf[n:2*n:2*n]
+	} else {
+		prev, cur = make([]int, n), make([]int, n)
+	}
 	for i := 1; i <= len(a); i++ {
 		for j := 1; j <= len(b); j++ {
 			switch {

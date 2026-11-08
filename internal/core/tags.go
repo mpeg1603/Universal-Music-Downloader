@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // Reading tags and stream details (codec, length, bitrate) of audio files without running
@@ -20,8 +21,11 @@ import (
 type tagInfo struct {
 	Title, Artist, AlbumArtist, Album, ISRC string
 	TrackNumber                             int
-	Duration                                float64
-	Q                                       Quality
+	// Only Sort & merge looks at these; they aren't kept in the library index.
+	Disc, DiscTotal, Date, ReleaseType, Compilation string
+	FirstArtist, FirstAlbumArtist                   string // of several values, the first
+	Duration                                        float64
+	Q                                               Quality
 }
 
 var errUnsupported = errors.New("unsupported format")
@@ -95,10 +99,31 @@ func parseVorbisComment(b []byte, info *tagInfo) {
 			if info.TrackNumber == 0 {
 				info.TrackNumber = leadingInt(v)
 			}
+		case "DISCNUMBER", "DISC":
+			info.Disc = FirstNonEmpty(info.Disc, v)
+		case "DISCTOTAL", "TOTALDISCS":
+			info.DiscTotal = FirstNonEmpty(info.DiscTotal, v)
+		case "ORIGINALDATE":
+			info.Date = v
+		case "DATE", "YEAR":
+			info.Date = FirstNonEmpty(info.Date, v)
+		case "RELEASETYPE", "MUSICBRAINZ_ALBUMTYPE":
+			if info.ReleaseType != "" {
+				v = info.ReleaseType + "; " + v
+			}
+			info.ReleaseType = v
+		case "COMPILATION":
+			info.Compilation = FirstNonEmpty(info.Compilation, v)
 		}
 	}
 	info.Artist = strings.Join(artists, "; ")
 	info.AlbumArtist = strings.Join(albumArtists, "; ")
+	if len(artists) > 0 {
+		info.FirstArtist = artists[0]
+	}
+	if len(albumArtists) > 0 {
+		info.FirstAlbumArtist = albumArtists[0]
+	}
 }
 
 func leadingInt(s string) int {
@@ -199,9 +224,27 @@ func readFLAC(f *os.File, size int64) (*tagInfo, error) {
 
 // --- MP3 --------------------------------------------------------------------------------------
 
-func decodeID3Text(b []byte) string {
+func decodeID3Text(b []byte) string { return strings.Join(decodeID3Values(b), "; ") }
+
+// firstID3Value is a frame's first value, when it has several.
+func firstID3Value(b []byte) string {
+	if v := decodeID3Values(b); len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
+func latin1(b []byte) string {
+	r := make([]rune, len(b))
+	for i, c := range b {
+		r[i] = rune(c)
+	}
+	return string(r)
+}
+
+func decodeID3Values(b []byte) []string {
 	if len(b) == 0 {
-		return ""
+		return nil
 	}
 	enc, b := b[0], b[1:]
 	var s string
@@ -225,12 +268,11 @@ func decodeID3Text(b []byte) string {
 		s = strings.ReplaceAll(string(utf16.Decode(u)), "\ufeff", "")
 	case 3:
 		s = string(b)
-	default: // ISO-8859-1
-		r := make([]rune, len(b))
-		for i, c := range b {
-			r[i] = rune(c)
+		if !utf8.Valid(b) { // says UTF-8, but isn't: it's nearly always Latin-1 then
+			s = latin1(b)
 		}
-		s = string(r)
+	default: // ISO-8859-1
+		s = latin1(b)
 	}
 	var parts []string
 	for _, p := range strings.Split(s, "\x00") {
@@ -238,7 +280,7 @@ func decodeID3Text(b []byte) string {
 			parts = append(parts, p)
 		}
 	}
-	return strings.Join(parts, "; ")
+	return parts
 }
 
 func unsync(b []byte) []byte {
@@ -317,16 +359,35 @@ func parseID3v2(f io.ReadSeeker, info *tagInfo) (int64, float64) {
 			info.Title = decodeID3Text(body)
 		case "TPE1", "TP1":
 			info.Artist = decodeID3Text(body)
+			info.FirstArtist = firstID3Value(body)
 		case "TPE2", "TP2":
 			info.AlbumArtist = decodeID3Text(body)
+			info.FirstAlbumArtist = firstID3Value(body)
 		case "TALB", "TAL":
 			info.Album = decodeID3Text(body)
 		case "TSRC", "TRC":
 			info.ISRC = decodeID3Text(body)
 		case "TXXX", "TXX": // user-defined text: description, then value
-			if desc, val, ok := strings.Cut(decodeID3Text(body), "; "); ok && strings.EqualFold(desc, "ISRC") && info.ISRC == "" {
-				info.ISRC = val
+			if desc, val, ok := strings.Cut(decodeID3Text(body), "; "); ok {
+				switch strings.ToLower(desc) {
+				case "isrc":
+					info.ISRC = FirstNonEmpty(info.ISRC, val)
+				case "releasetype", "musicbrainz album type":
+					info.ReleaseType = FirstNonEmpty(info.ReleaseType, val)
+				case "albumartist", "album artist":
+					info.AlbumArtist = FirstNonEmpty(info.AlbumArtist, val)
+				case "compilation":
+					info.Compilation = FirstNonEmpty(info.Compilation, val)
+				}
 			}
+		case "TPOS", "TPA":
+			info.Disc = decodeID3Text(body)
+		case "TDOR", "TOR":
+			info.Date = decodeID3Text(body)
+		case "TDRC", "TYER", "TYE":
+			info.Date = FirstNonEmpty(info.Date, decodeID3Text(body))
+		case "TCMP", "TCP":
+			info.Compilation = decodeID3Text(body)
 		case "TRCK", "TRK":
 			info.TrackNumber = leadingInt(decodeID3Text(body))
 		case "TLEN", "TLE":
@@ -404,9 +465,15 @@ func readMP3(f *os.File, size int64) (*tagInfo, error) {
 		if _, err := f.ReadAt(v1[:], size-128); err == nil && string(v1[:3]) == "TAG" {
 			end -= 128
 			if info.Title == "" {
-				info.Title = strings.TrimRight(string(v1[3:33]), "\x00 ")
-				info.Artist = FirstNonEmpty(info.Artist, strings.TrimRight(string(v1[33:63]), "\x00 "))
-				info.Album = FirstNonEmpty(info.Album, strings.TrimRight(string(v1[63:93]), "\x00 "))
+				v1Text := func(b []byte) string { // ID3v1 has no encoding of its own; it's Latin-1 in practice
+					if !utf8.Valid(b) {
+						return strings.TrimRight(latin1(b), "\x00 ")
+					}
+					return strings.TrimRight(string(b), "\x00 ")
+				}
+				info.Title = v1Text(v1[3:33])
+				info.Artist = FirstNonEmpty(info.Artist, v1Text(v1[33:63]))
+				info.Album = FirstNonEmpty(info.Album, v1Text(v1[63:93]))
 			}
 		}
 	}
@@ -645,6 +712,11 @@ func (m *mp4Reader) ilstItem(typ string, pos, end int64) {
 			if len(payload) >= 8 {
 				if typ == "trkn" && len(payload) >= 12 {
 					m.info.TrackNumber = int(binary.BigEndian.Uint16(payload[10:12]))
+				} else if typ == "disk" && len(payload) >= 14 {
+					m.info.Disc = strconv.Itoa(int(binary.BigEndian.Uint16(payload[10:12])))
+					m.info.DiscTotal = strconv.Itoa(int(binary.BigEndian.Uint16(payload[12:14])))
+				} else if typ == "cpil" && len(payload) >= 9 {
+					m.info.Compilation = strconv.Itoa(int(payload[8]))
 				} else {
 					value = strings.TrimSpace(string(payload[8:]))
 				}
@@ -661,9 +733,14 @@ func (m *mp4Reader) ilstItem(typ string, pos, end int64) {
 		m.info.AlbumArtist = value
 	case "\xa9alb":
 		m.info.Album = value
+	case "\xa9day":
+		m.info.Date = value
 	case "----":
-		if strings.EqualFold(name, "ISRC") {
+		switch strings.ToLower(name) {
+		case "isrc":
 			m.info.ISRC = value
+		case "musicbrainz album type", "releasetype":
+			m.info.ReleaseType = value
 		}
 	}
 }

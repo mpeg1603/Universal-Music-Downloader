@@ -323,3 +323,46 @@ func TestLastLines(t *testing.T) {
 		t.Error(got)
 	}
 }
+
+// The library check's shortcut has to decide exactly what the full comparison decides.
+func TestLibraryCheckAgreesWithEvaluate(t *testing.T) {
+	track := func(title, artist, album string, ms int) *Track {
+		return &Track{Key: title, Title: title, Artists: []string{artist}, Album: album, DurationMs: ms}
+	}
+	tracks := []*Track{track("Roygbiv", "Boards of Canada", "Music Has the Right to Children", 150000),
+		track("Song (feat. Someone)", "An Artist", "Album", 200000), track("Song - Remastered 2011", "An Artist", "Album", 200000),
+		track("Live Forever", "Oasis", "Definitely Maybe", 276000), track("Живи", "Кино", "Группа крови", 240000),
+		track("One", "U2", "Achtung Baby", 276000), track("One", "Metallica", "...And Justice for All", 446000)}
+	file := func(title, artist, albumArtist string, d float64) *LibFile {
+		return &LibFile{Title: title, Artist: artist, AlbumArtist: albumArtist, Album: "Album", Duration: d}
+	}
+	files := []*LibFile{file("Roygbiv", "Boards of Canada", "", 150), file("ROYGBIV (Remastered)", "boards of canada", "", 151),
+		file("Roygbiv (Live)", "Boards of Canada", "", 150), file("Roygbiv", "Boards Of Canada", "Various Artists", 300),
+		file("Boards of Canada - Roygbiv", "Unknown", "Boards of Canada", 150), file("Song", "An Artist", "", 200), file("Song (Remix)", "An Artist", "", 200),
+		file("Song", "Another Artist", "An Artist", 200), file("Live Forever", "Oasis", "", 276), file("Live Forever (Live)", "Oasis", "", 277),
+		file("Живи", "Кино", "", 240), file("One", "U2", "", 276), file("One", "Metallica", "", 446), file("One", "", "U2", 0)}
+	old := func(tr *Track, f *LibFile) bool {
+		c := Candidate{Title: f.Title, Artist: FirstNonEmpty(f.Artist, f.AlbumArtist), Album: f.Album, Duration: f.Duration, ArtistIsCredit: true}
+		m := evaluate(tr, c)
+		if m.Reject != "" && f.AlbumArtist != "" && f.Artist != "" && strings.HasPrefix(m.Reject, "different artist") {
+			c.Artist = f.AlbumArtist
+			m = evaluate(tr, c)
+		}
+		return m.Reject == ""
+	}
+	accepted := 0
+	for _, tr := range tracks {
+		for _, f := range files {
+			want := old(tr, f)
+			if want {
+				accepted++
+			}
+			if got := libMatches(tr, f, ""); got != want {
+				t.Errorf("%q / %q: got %v, want %v", tr.Title, f.Title, got, want)
+			}
+		}
+	}
+	if accepted == 0 {
+		t.Error("nothing matched at all")
+	}
+}

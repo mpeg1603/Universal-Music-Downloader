@@ -93,6 +93,8 @@ func trackKey(spotifyID, artist, title string) string {
 type Playlist struct {
 	Name string   `json:"name"`
 	Keys []string `json:"keys"`
+
+	has map[string]bool // Keys as a set, while importing
 }
 
 // Skipped is a playlist entry that isn't a downloadable song (podcast episode, removed track, ...).
@@ -114,7 +116,8 @@ type Library struct {
 	// Repeats: the songs seen so far by primary artist, and the keys merged into another.
 	songs  map[string][]sighting
 	alias  map[string]string
-	merged int // listings merged into the same song under a different key
+	strs   map[string]string // imported text, kept once
+	merged int               // listings merged into the same song under a different key
 }
 
 // sighting is one listing of a song, as far as recognizing a repeat of it goes.
@@ -180,12 +183,45 @@ func (l *Library) add(playlistName string, t *Track) {
 	}
 	l.remember(key, t)
 	p := l.playlist(playlistName)
-	for _, k := range p.Keys {
-		if k == key {
-			return
+	if p.has == nil {
+		p.has = make(map[string]bool, len(p.Keys))
+		for _, k := range p.Keys {
+			p.has[k] = true
 		}
 	}
-	p.Keys = append(p.Keys, key)
+	if !p.has[key] {
+		p.has[key] = true
+		p.Keys = append(p.Keys, key)
+	}
+}
+
+// trim lets go of what only importing needs (it's made again if more is imported).
+func (l *Library) trim() {
+	l.songs, l.alias, l.strs = nil, nil, nil
+	for _, p := range l.Playlists {
+		p.has = nil
+	}
+}
+
+// text keeps one copy of a piece of imported text: names repeat a lot, and text cut out of a
+// bigger string would keep the whole of it in memory.
+func (l *Library) text(s string) string {
+	if l.strs == nil {
+		l.strs = map[string]string{}
+	}
+	return intern(l.strs, s)
+}
+
+func intern(strs map[string]string, s string) string {
+	if s == "" {
+		return ""
+	}
+	if v, ok := strs[s]; ok {
+		return v
+	}
+	v := strings.Clone(s)
+	strs[v] = v
+	return v
 }
 
 // indexSongs builds the repeat index for a library loaded from disk.

@@ -29,6 +29,7 @@ type settingsTab struct {
 	enrich    *qt.QCheckBox
 	iface     *qt.QLineEdit
 	tray      *qt.QCheckBox
+	noTray    *qt.QLabel
 	notify    *qt.QCheckBox
 	advanced  *qt.QWidget
 	advancedB *qt.QPushButton
@@ -149,11 +150,10 @@ func newSettingsTab(a *app) *settingsTab {
 	t.tray = qt.NewQCheckBox3("Keep running in the system tray when the window is closed")
 	t.tray.SetToolTip("Downloads carry on. Quit from the tray icon or with Ctrl+Q.")
 	t.tray.OnClicked(t.saveAll)
-	if a.tray == nil {
-		t.tray.SetEnabled(false)
-		t.tray.SetToolTip("Your desktop has no system tray.")
-	}
 	ab.AddWidget(t.tray.QWidget)
+	t.noTray = text("Your desktop doesn't have a system tray running right now, so this isn't available.", "hint")
+	t.noTray.Hide()
+	ab.AddWidget(t.noTray.QWidget)
 	t.notify = qt.NewQCheckBox3("Tell me when downloads finish, or someone messages me on Soulseek")
 	t.notify.OnClicked(t.saveAll)
 	ab.AddWidget(t.notify.QWidget)
@@ -264,6 +264,8 @@ func (t *settingsTab) load() {
 		t.iface.SetText(c.DirectInterface)
 	}
 	t.tray.SetChecked(c.GUI.CloseToTray)
+	t.tray.SetEnabled(t.a.tray != nil)
+	t.noTray.SetVisible(t.a.tray == nil)
 	t.notify.SetChecked(!c.GUI.NoNotify)
 }
 
@@ -310,6 +312,7 @@ func (t *settingsTab) saveAll() {
 	after := t.a.m.Config()
 	apply(&after)
 	if sameSettings(before, after) {
+		t.status.Hide() // back to what was saved: whatever was wrong isn't any more
 		return
 	}
 	t.save(apply)

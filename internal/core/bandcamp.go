@@ -227,6 +227,11 @@ func (b *Bandcamp) Download(ctx context.Context, c Candidate, t *Track, workdir 
 	return "", failf("on Bandcamp but not a free download; you can buy it at %s", c.URL)
 }
 
+const (
+	bandcampEmailWait  = time.Hour // how long to wait for the emailed link before asking again
+	bandcampEmailTries = 3         // how many times to ask before moving on to other sources
+)
+
 // emailDownload returns the download page Bandcamp emails for a release: asks Bandcamp to send
 // it (once), then waits for it to show up in your mailbox, or for you to paste it.
 func (b *Bandcamp) emailDownload(ctx context.Context, t *tralbum, pageURL string) (string, error) {
@@ -246,12 +251,15 @@ func (b *Bandcamp) emailDownload(ctx context.Context, t *tralbum, pageURL string
 	cfg, canFetch := mb.settings()
 	ch := mb.wait(key)
 	defer mb.forget(key, ch)
-	// Asked once; again only if the link never came (a day with a mailbox, a week without).
-	again := 7 * 24 * time.Hour
-	if canFetch {
-		again = 24 * time.Hour
+	// If the link hasn't come within the hour, the email is asked for again: it got lost, or
+	// the link in it doesn't work any more. Not for ever, though: after a few unanswered requests
+	// the track moves on to the next sources instead of waiting.
+	at := mb.requestedAt(key)
+	if !at.IsZero() && time.Since(at) > bandcampEmailWait && mb.asks(key) >= bandcampEmailTries {
+		mb.forgetRequest(key)
+		return "", failf("Bandcamp's email to %s never came (asked %d times)", cfg.Email, bandcampEmailTries)
 	}
-	if at := mb.requestedAt(key); at.IsZero() || time.Since(at) > again {
+	if at.IsZero() || time.Since(at) > bandcampEmailWait {
 		task.setStage("asking Bandcamp to email the download")
 		u, err := url.Parse(pageURL)
 		if err != nil {
@@ -279,7 +287,7 @@ func (b *Bandcamp) emailDownload(ctx context.Context, t *tralbum, pageURL string
 		Logf("Bandcamp: asked for %s to be emailed to %s", pageURL, cfg.Email)
 	}
 	if !canFetch {
-		return "", pendingf(6*time.Hour, "Bandcamp emails the download link to %s: paste it in Sources → Bandcamp (%s)", cfg.Email, pageURL)
+		return "", pendingf(bandcampEmailWait, "Bandcamp emails the download link to %s: paste it in Sources → Bandcamp (%s)", cfg.Email, pageURL)
 	}
 	task.setStage("waiting for Bandcamp's email")
 	go mb.poll()

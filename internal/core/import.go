@@ -316,8 +316,11 @@ func importCSV(lib *Library, defaultPlaylist string, r io.Reader) error {
 			}
 			return ""
 		}
-		title := get("title")
+		title := strings.Clone(get("title"))
 		artists := SplitBy(get("artists"), sep["artists"])
+		for i, a := range artists {
+			artists[i] = lib.text(a)
+		}
 		if title == "" || len(artists) == 0 {
 			continue
 		}
@@ -331,14 +334,14 @@ func importCSV(lib *Library, defaultPlaylist string, r io.Reader) error {
 		}
 		id := spotifyTrackID(get("uri"))
 		t := &Track{
-			Key:         trackKey(id, artists[0], title),
+			Key:         strings.Clone(trackKey(id, artists[0], title)),
 			Title:       title,
 			Artists:     artists,
-			Album:       get("album"),
-			AlbumArtist: strings.Join(SplitBy(get("album_artist"), sep["album_artist"]), ", "),
-			ISRC:        get("isrc"),
-			ReleaseDate: get("release"),
-			CoverURL:    get("cover"),
+			Album:       lib.text(get("album")),
+			AlbumArtist: lib.text(strings.Join(SplitBy(get("album_artist"), sep["album_artist"]), ", ")),
+			ISRC:        strings.Clone(get("isrc")),
+			ReleaseDate: lib.text(get("release")),
+			CoverURL:    lib.text(get("cover")),
 			SpotifyURL:  spotifyTrackURL(id),
 		}
 		t.TrackNumber, _ = strconv.Atoi(get("track_number"))
@@ -352,7 +355,7 @@ func importCSV(lib *Library, defaultPlaylist string, r io.Reader) error {
 			t.ArtistURLs = map[string]string{}
 			for i, u := range uris {
 				if id := strings.TrimPrefix(u, "spotify:artist:"); id != u {
-					t.ArtistURLs[artists[i]] = "https://open.spotify.com/artist/" + id
+					t.ArtistURLs[artists[i]] = lib.text("https://open.spotify.com/artist/" + id)
 				}
 			}
 		}

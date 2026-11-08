@@ -21,6 +21,7 @@ import (
 var tabs = []struct{ name, title string }{
 	{"queue", "Queue"}, {"search", "Search"}, {"library", "Library"},
 	{"sources", "Sources"}, {"soulseek", "Soulseek"}, {"settings", "Settings"}, {"log", "Log"},
+	{"dashboard", "Dashboard"}, {"sort", "Sort"},
 }
 
 // tui is the terminal frontend. It sees the backend only through core.Backend.
@@ -38,6 +39,9 @@ type tui struct {
 	// queue
 	queueTable  *tview.Table
 	queueRows   *queueContent
+	queueCounts map[string]int
+	queueAsked  core.QueueQuery
+	queueRead   time.Time
 	queueInfo   *tview.TextView
 	searchField *tview.InputField
 	q           core.QueueQuery // what the queue shows
@@ -71,6 +75,14 @@ type tui struct {
 
 	// settings
 	settings *tview.Form
+
+	// dashboard
+	dashView         *tview.TextView
+	dashDown, dashUp []float64
+	dashRead         time.Time
+
+	// sort & merge
+	st *sortUI
 
 	// log
 	logView   *tview.TextView
@@ -132,6 +144,8 @@ func (ui *tui) build() {
 	ui.body.AddPage("soulseek", ui.buildSoulseek(), true, false)
 	ui.body.AddPage("settings", ui.buildSettings(), true, false)
 	ui.body.AddPage("log", ui.buildLog(), true, false)
+	ui.body.AddPage("dashboard", ui.buildDashboard(), true, false)
+	ui.body.AddPage("sort", ui.buildSort(), true, false)
 	main := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(ui.header, 2, 0, false).
 		AddItem(ui.tabBar, 1, 0, false).
@@ -201,6 +215,10 @@ func (ui *tui) focusPage() {
 		ui.app.SetFocus(ui.settings)
 	case "log":
 		ui.app.SetFocus(ui.logView)
+	case "dashboard":
+		ui.app.SetFocus(ui.dashView)
+	case "sort":
+		ui.app.SetFocus(ui.st.table)
 	}
 }
 
@@ -541,6 +559,7 @@ func pathCompletions(text string, dirsOnly bool, exts []string) []string {
 
 func (ui *tui) refresh() {
 	o := ui.m.Overview()
+	ui.dashSample(o)
 	state := "[green]● running[-]"
 	switch {
 	case !o.Ready && o.Lib.Scanning:
@@ -617,20 +636,26 @@ func (ui *tui) refresh() {
 		ui.refreshSoulseek()
 	case "log":
 		ui.refreshLog()
+	case "dashboard":
+		ui.refreshDashboard()
+	case "sort":
+		ui.refreshSort()
 	}
 	ui.footer.SetText(ui.footerText())
 }
 
 func (ui *tui) footerText() string {
-	common := "  [::d]1-7/Alt+1-7/F1-F7 tabs · [ ] bandwidth −/+ · P pause all · q quit[::-]"
+	common := "  [::d]1-9/Alt+1-9/F1-F9 tabs · [ ] bandwidth −/+ · P pause all · q quit[::-]"
 	hints := map[string]string{
-		"queue":    " [::b]Enter[::-] details  [::b]c[::-] cancel  [::b]r[::-] restart  [::b]p[::-] do next  [::b]R[::-] retry all failed  [::b]f[::-] filter  [::b]o[::-] sort  [::b]O[::-] reverse  [::b]/[::-] find in queue  [::b]Esc[::-] show all",
-		"search":   " [::b]/[::-] find music  [::b]Enter[::-] add result / show playlist  [::b]Tab[::-] next list  [::b]a[::-] add file/link  [::b]d[::-] remove  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]R[::-] re-read",
-		"library":  " [::b]a[::-] add folder  [::b]d[::-] remove  [::b]s[::-] rescan  [::b]t[::-] quality threshold  [::b]u[::-] upgrade files below a quality",
-		"sources":  " [::b]space[::-] on/off  [::b]K J[::-] move up/down  [::b]Enter[::-] settings  [::b]e[::-] route  [::b]p[::-] pause/resume  [::b]b[::-] paste Bandcamp links",
-		"soulseek": " [::b]/[::-] search  [::b]Enter[::-] download  [::b]d[::-] folder  [::b]Tab[::-] next pane  [::b]n[::-] message  [::b]j[::-] join room  [::b]l[::-] leave/close  [::b]m[::-] message user  [::b]x[::-] stop upload  [::b]B[::-] ban  [::b]o[::-] port  [::b]R[::-] reconnect",
-		"settings": " [::b]Tab ↑ ↓[::-] move between fields  [::b]Esc[::-] leave a field  Save applies the changes right away",
-		"log":      " [::b]↑ ↓ PgUp PgDn[::-] scroll  [::b]End[::-] follow  [::b]v[::-] details " + onOff(core.Verbose),
+		"queue":     " [::b]Enter[::-] details  [::b]c[::-] cancel  [::b]r[::-] restart  [::b]p[::-] do next  [::b]R[::-] retry all failed  [::b]f[::-] filter  [::b]o[::-] sort  [::b]O[::-] reverse  [::b]/[::-] find in queue  [::b]Esc[::-] show all",
+		"search":    " [::b]/[::-] find music  [::b]Enter[::-] add result / show playlist  [::b]Tab[::-] next list  [::b]a[::-] add file/link  [::b]d[::-] remove  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]R[::-] re-read",
+		"library":   " [::b]a[::-] add folder  [::b]d[::-] remove  [::b]s[::-] rescan  [::b]t[::-] quality threshold  [::b]u[::-] upgrade files below a quality",
+		"sources":   " [::b]space[::-] on/off  [::b]K J[::-] move up/down  [::b]Enter[::-] settings  [::b]e[::-] route  [::b]p[::-] pause/resume  [::b]b[::-] paste Bandcamp links",
+		"soulseek":  " [::b]/[::-] search  [::b]Enter[::-] download  [::b]d[::-] folder  [::b]Tab[::-] next pane  [::b]n[::-] message  [::b]j[::-] join room  [::b]l[::-] leave/close  [::b]m[::-] message user  [::b]x[::-] stop upload  [::b]B[::-] ban  [::b]o[::-] port  [::b]R[::-] reconnect",
+		"settings":  " [::b]Tab ↑ ↓[::-] move between fields  [::b]Esc[::-] leave a field  Save applies the changes right away",
+		"dashboard": " speeds, progress and disk use at a glance",
+		"sort":      " [::b]s[::-] make a plan  [::b]a[::-] apply  [::b]d[::-] drop it  [::b]D[::-] moves/duplicates  [::b]f[::-] kind  [::b]/[::-] filter  [::b]x[::-] stop  [::b]u[::-] undo a plan  [::b]C[::-] carry on with one",
+		"log":       " [::b]↑ ↓ PgUp PgDn[::-] scroll  [::b]End[::-] follow  [::b]v[::-] details " + onOff(core.Verbose),
 	}
 	return hints[ui.current] + common
 }

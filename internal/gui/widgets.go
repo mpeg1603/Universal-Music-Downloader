@@ -328,27 +328,6 @@ func compactCombo(c *qt.QComboBox, chars int) {
 	c.View().SetMinimumWidth(240)
 }
 
-// table is a plain table of rows, for the Soulseek lists.
-func table(headers ...string) *qt.QTableWidget {
-	t := qt.NewQTableWidget2()
-	t.SetColumnCount(len(headers))
-	t.SetHorizontalHeaderLabels(headers)
-	t.SetSelectionBehavior(qt.QAbstractItemView__SelectRows)
-	t.SetSelectionMode(qt.QAbstractItemView__SingleSelection)
-	t.SetEditTriggers(qt.QAbstractItemView__NoEditTriggers)
-	t.SetShowGrid(false)
-	t.SetWordWrap(false)
-	t.SetAlternatingRowColors(false)
-	t.SetVerticalScrollMode(qt.QAbstractItemView__ScrollPerPixel)
-	t.VerticalHeader().Hide()
-	t.VerticalHeader().SetDefaultSectionSize(30)
-	t.HorizontalHeader().SetDefaultAlignment(qt.AlignLeft | qt.AlignVCenter)
-	t.HorizontalHeader().SetHighlightSections(false)
-	return t
-}
-
-func cell(s string) *qt.QTableWidgetItem { return qt.NewQTableWidgetItem2(s) }
-
 // fileFolder opens the folder a file is in.
 func openFolder(path string) {
 	openPath(filepath.Dir(path))

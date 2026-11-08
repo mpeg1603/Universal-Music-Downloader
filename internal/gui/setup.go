@@ -20,7 +20,7 @@ type setupStep struct {
 var setupSteps = []setupStep{
 	{"welcome", "Welcome", "This app downloads the songs of your playlists, and any music you search for, from many places, and skips what you already have. A few questions and you're ready. Skip anything you like; everything can be changed later.", ""},
 	{"output", "Where should downloads go?", "New files go to this folder, never into your existing music.", ""},
-	{"library", "Do you already have music?", "Add the folders where you keep it, and the app won't download what you already have. They're only ever read, never changed.", ""},
+	{"library", "Do you already have music?", "Add the folders where you keep it, and the app won't download what you already have. The app only reads them, unless you use Sort & merge yourself.", ""},
 	{"playlists", "Got any playlists?", "Add playlist files now, or skip this and search for music by name instead.", "playlists"},
 	{"free", "Sources that need no account", "These work right away. Bandcamp and the Internet Archive offer free, often lossless music; YouTube and SoundCloud have almost everything, in lower quality.", "sources"},
 	{"soulseek", "Soulseek", "A community sharing their collections directly with each other, often in lossless. It needs a free account, and you share your music in return.", "soulseek"},
@@ -288,6 +288,14 @@ func (w *setupWizard) show() {
 	buttons.SetSpacing(8)
 	if st.more != "" {
 		buttons.AddWidget(button("What's this?", "ghost", func() { w.a.showHelp(st.more) }).QWidget)
+	} else if st.id == "torrent" {
+		buttons.AddWidget(button("What's this?", "ghost", func() {
+			for _, x := range core.SetupSteps {
+				if x.ID == "torrent" {
+					w.a.message("Torrents", x.More)
+				}
+			}
+		}).QWidget)
 	}
 	buttons.AddStretch()
 	add := func(label, kind string, do func()) *qt.QPushButton {

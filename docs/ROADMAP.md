@@ -15,3 +15,6 @@ language, one program, no web view.
 
 The window was redesigned after phase 2: a desktop app with a sidebar and its own look, in plain
 words, rather than the terminal app's tabs in a window. Both do the same things.
+
+Since then: a Dashboard, and Sort & merge (planning, applying and undoing a tidy-up of your folders),
+in both the window and the terminal app.

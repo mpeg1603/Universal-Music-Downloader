@@ -39,7 +39,7 @@ func newLibraryTab(a *app) *libraryTab {
 	t.w = p.w
 
 	safe, safeText := banner("banner")
-	safeText.SetText("<b>Your files are safe.</b> Library folders are only ever read: the app never creates, changes, moves or deletes anything in them.")
+	safeText.SetText("<b>Your files are safe.</b> The app only reads these folders. The one exception is Sort & merge, and only when you press Apply there.")
 	p.box.AddWidget(safe.QWidget)
 
 	scroll, body, _ := scrolling()

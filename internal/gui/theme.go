@@ -106,7 +106,7 @@ QPushButton[kind="link"]:hover { color: @accenthover; background: transparent; }
 QPushButton[kind="danger"] { color: @bad; }
 QPushButton[kind="danger"]:hover { background: @badsoft; }
 QPushButton[kind="danger"]:disabled { color: @text3; background: @raised; border-color: @line; }
-QPushButton[kind="chip"] { border-radius: 14px; padding: 4px 12px; background: @surface; color: @text2; }
+QPushButton[kind="chip"] { border-radius: 14px; padding: 4px 9px; background: @surface; color: @text2; }
 QPushButton[kind="chip"]:hover { background: @hover; color: @text; }
 QPushButton[kind="chip"]:checked { background: @accentsoft; border-color: @accent; color: @accent; }
 QPushButton[kind="segment"] { border-radius: 7px; padding: 5px 14px; background: transparent; border-color: transparent; color: @text2; }
@@ -145,7 +145,10 @@ QListWidget::item { border-radius: 7px; padding: 5px 8px; }
 QListWidget::item:hover, QTableView::item:hover { background: @hover; }
 QListWidget::item:selected, QTableView::item:selected { background: @accentsoft; color: @text; }
 QHeaderView { background: transparent; }
-QHeaderView::section { background: transparent; color: @text3; border: none; border-bottom: 1px solid @line; padding: 6px 6px; font-size: @fsSmallpt; font-weight: 600; }
+QHeaderView::section { background: transparent; color: @text2; border: none; border-bottom: 1px solid @border; border-right: 1px solid @line; padding: 6px 8px; font-size: @fsSmallpt; font-weight: 600; }
+QHeaderView::section:hover { background: @hover; color: @text; }
+QHeaderView::down-arrow { image: url(@chevdown); width: 10px; height: 10px; subcontrol-position: center right; right: 6px; }
+QHeaderView::up-arrow { image: url(@chevup); width: 10px; height: 10px; subcontrol-position: center right; right: 6px; }
 QTableCornerButton::section { background: transparent; border: none; }
 QPlainTextEdit[role="log"] { font-family: monospace; border-radius: 10px; }
 

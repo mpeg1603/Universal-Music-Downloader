@@ -21,6 +21,7 @@ const (
 	EventConfig   EventKind = "config"   // the settings were saved
 	EventSoulseek EventKind = "soulseek" // the connection, chats, transfers
 	EventLog      EventKind = "log"      // new log lines
+	EventSort     EventKind = "sort"     // Sort & merge moved on
 )
 
 type eventHub struct {
@@ -33,7 +34,7 @@ type eventHub struct {
 
 // revisions count changes to the queue and the settings.
 type revisions struct {
-	queue, config atomic.Int64
+	queue, config, sort atomic.Int64
 }
 
 // Watch calls f (from a goroutine of its own) for each kind of change; stop ends it.
@@ -69,6 +70,7 @@ func (m *Manager) fingerprints() map[EventKind]string {
 		EventQueue:  fmt.Sprint(m.revs.queue.Load()),
 		EventConfig: fmt.Sprint(m.revs.config.Load()),
 		EventLog:    fmt.Sprint(logSeq),
+		EventSort:   fmt.Sprint(m.revs.sort.Load()),
 	}
 	var src []string
 	for _, s := range m.SourceStatus() {
@@ -100,7 +102,7 @@ func (m *Manager) watchLoop(stop chan struct{}, last map[EventKind]string) {
 		}
 		now := m.fingerprints()
 		var changed []EventKind
-		for _, k := range []EventKind{EventQueue, EventSources, EventConfig, EventSoulseek, EventLog} {
+		for _, k := range []EventKind{EventQueue, EventSources, EventConfig, EventSoulseek, EventLog, EventSort} {
 			if now[k] != last[k] {
 				changed = append(changed, k)
 			}

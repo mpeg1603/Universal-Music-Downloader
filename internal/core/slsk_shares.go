@@ -23,8 +23,7 @@ type slskShareRoot struct {
 }
 
 type slskShared struct {
-	vpath string // virtual path, backslash-separated
-	real  string
+	vpath string // virtual path, backslash-separated, starting with its root's name
 	size  int64
 	attrs []slskAttr
 }
@@ -39,7 +38,6 @@ type slskShares struct {
 	roots    []slskShareRoot
 	files    []slskShared
 	byPath   map[string]int32
-	byLower  map[string]int32
 	words    map[string][]int32
 	folders  []slskFolder
 	folderAt map[string]int
@@ -54,7 +52,7 @@ type slskShares struct {
 }
 
 func newSlskShares() *slskShares {
-	return &slskShares{byPath: map[string]int32{}, byLower: map[string]int32{}, words: map[string][]int32{}, folderAt: map[string]int{}}
+	return &slskShares{byPath: map[string]int32{}, words: map[string][]int32{}, folderAt: map[string]int{}}
 }
 
 // shareRoots names the shared folders: by their base name, made unique.
@@ -132,7 +130,7 @@ func (s *slskShares) scan(ctx context.Context, roots []slskShareRoot, meta func(
 	}
 	n.sortFolders()
 	s.mu.Lock()
-	s.roots, s.files, s.byPath, s.byLower, s.words, s.folders, s.folderAt = n.roots, n.files, n.byPath, n.byLower, n.words, n.folders, n.folderAt
+	s.roots, s.files, s.byPath, s.words, s.folders, s.folderAt = n.roots, n.files, n.byPath, n.words, n.folders, n.folderAt
 	s.list, s.scanning, s.scanned, s.took, s.problem = nil, false, time.Now(), time.Since(start), strings.Join(problems, "; ")
 	s.mu.Unlock()
 }
@@ -164,7 +162,7 @@ func (s *slskShares) add(real string) {
 }
 
 func (s *slskShares) addLocked(vpath, real string, size int64, meta func(string) (Quality, float64, bool)) {
-	f := slskShared{vpath: vpath, real: real, size: size}
+	f := slskShared{vpath: vpath, size: size}
 	if meta != nil && audioExts[strings.ToLower(filepath.Ext(real))] {
 		if q, dur, ok := meta(real); ok {
 			f.attrs = slskAttrsFor(q, dur)
@@ -173,7 +171,6 @@ func (s *slskShares) addLocked(vpath, real string, size int64, meta func(string)
 	idx := int32(len(s.files))
 	s.files = append(s.files, f)
 	s.byPath[vpath] = idx
-	s.byLower[strings.ToLower(vpath)] = idx
 	seen := map[string]bool{}
 	for _, w := range slskWords(vpath) {
 		if !seen[w] {
@@ -328,18 +325,33 @@ func (s *slskShares) lookup(vpath string) (string, int64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	idx, ok := s.byPath[vpath]
-	if !ok {
-		idx, ok = s.byLower[strings.ToLower(vpath)]
+	if !ok { // rare: not worth a second index of every path
+		for i := range s.files {
+			if strings.EqualFold(s.files[i].vpath, vpath) {
+				idx, ok = int32(i), true
+				break
+			}
+		}
 	}
 	if !ok {
 		return "", 0, false
 	}
-	f := s.files[idx]
-	st, err := os.Stat(f.real)
+	real := s.realPath(&s.files[idx])
+	st, err := os.Stat(real)
 	if err != nil || !st.Mode().IsRegular() {
 		return "", 0, false
 	}
-	return f.real, st.Size(), true
+	return real, st.Size(), true
+}
+
+// realPath is where a shared file is on disk.
+func (s *slskShares) realPath(f *slskShared) string {
+	for _, root := range s.roots {
+		if rest, ok := strings.CutPrefix(f.vpath, root.Name+`\`); ok {
+			return filepath.Join(root.Path, filepath.FromSlash(strings.ReplaceAll(rest, `\`, "/")))
+		}
+	}
+	return ""
 }
 
 func (s *slskShares) counts() (folders, files int) {

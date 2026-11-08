@@ -15,7 +15,7 @@ type helpTopic struct {
 	body  string // simple HTML
 }
 
-var helpOrder = []string{"start", "downloads", "find", "playlists", "library", "sources", "quality", "soulseek", "connection", "keys", "problems"}
+var helpOrder = []string{"start", "downloads", "find", "playlists", "library", "sort", "sources", "quality", "soulseek", "connection", "keys", "problems"}
 
 var helpTopics = map[string]helpTopic{
 	"start": {"How it works", `
@@ -55,9 +55,19 @@ var helpTopics = map[string]helpTopic{
 <p>Turn a playlist off and its songs leave the line without being forgotten. <b>Priority</b> decides which playlist goes first.</p>`},
 	"library": {"My library", `
 <p>Tell the app where your music already is, and it won't download what you already have.</p>
-<p>Your library folders are <b>only ever read</b>. The app never creates, changes, moves or deletes anything in them. New files always go to your downloads folder.</p>
+<p>Your library folders are <b>only read</b> during normal use. New files always go to your downloads folder. The one exception is <b>Sort & merge</b>, and only when you press Apply there.</p>
 <p><b>Good enough quality</b> is the line you draw: a song you have at that quality or better is skipped. A song you have in worse quality is downloaded only if a source has a clearly better copy, and your old file stays where it is.</p>
 <p><b>Upgrade my library</b> goes looking for better copies of the files below a quality you choose.</p>`},
+	"sort": {"Sort & merge", `
+<p>Sort & merge tidies your music into one library: every song in <b>Artist / Album / 01 - Song</b>, and duplicate copies moved to a folder of their own, with a report of which file replaced which.</p>
+<ol>
+<li><b>Make a plan.</b> The app reads your files and works out what would happen. Nothing changes.</li>
+<li><b>Look it over.</b> Every file's old and new place is listed, and every duplicate with the reason.</li>
+<li><b>Apply it.</b> Only now do files move. You can undo it afterwards, even after restarting the app.</li>
+</ol>
+<p><b>Which copy is kept?</b> Lossless beats compressed, then higher quality wins. Two files only count as the same recording if artist and title match and their lengths are within a few seconds, so an extended cut and the original are both kept, and so are live versions and remixes.</p>
+<p><b>Nothing is ever deleted or re-encoded</b>, and nothing is overwritten. This is the one part of the app that changes your library folders, and only when you press Apply.</p>
+<p>Files you downloaded that are moved keep being known to the app, so they aren't downloaded again. Playlists (.m3u) that point at the old places will no longer match.</p>`},
 	"sources": {"Sources", `
 <p>Sources are the services the app downloads from. For each song it tries them <b>from top to bottom</b> and uses the first one with a good copy, so put your favorites first. Lossless sources near the top get you better quality; those with the largest catalogs near the bottom catch what the others miss.</p>
 <p>Some work right away, some need an account or a sign-in: <b>Set up</b> on each one tells you what it needs.</p>
@@ -82,7 +92,7 @@ var helpTopics = map[string]helpTopic{
 </ul>`},
 	"keys": {"Keyboard shortcuts", `
 <table cellpadding="3">
-<tr><td><b>Ctrl+1 … Ctrl+8</b></td><td>go to a page</td></tr>
+<tr><td><b>Ctrl+1 … Ctrl+9, Ctrl+0</b></td><td>go to a page</td></tr>
 <tr><td><b>Ctrl+F</b></td><td>find music</td></tr>
 <tr><td><b>Shift+P</b></td><td>pause or resume everything</td></tr>
 <tr><td><b>F1</b></td><td>this help</td></tr>

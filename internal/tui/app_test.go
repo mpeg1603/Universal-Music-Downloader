@@ -484,7 +484,7 @@ func TestTUITransparentBackground(t *testing.T) {
 // Clicks outside the queue's cells (below the last row, right of the last column) make tview
 // ask the table content for row or column -1; that used to crash the app.
 func TestQueueClickOutsideCells(t *testing.T) {
-	content := &queueContent{rows: []core.JobView{{Key: "a", Track: core.MakeTrack("Get Lucky", []string{"Daft Punk"}, "RAM", 4)}}}
+	content := &queueContent{keys: []string{"a"}, views: map[int]core.JobView{0: {Key: "a", Track: core.MakeTrack("Get Lucky", []string{"Daft Punk"}, "RAM", 4)}}}
 	table := tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetContent(content)
 	screen := tcell.NewSimulationScreen("")
 	if err := screen.Init(); err != nil {
@@ -537,5 +537,36 @@ func TestSetupWizard(t *testing.T) {
 	})
 	if c := m.Config(); !c.SetupDone || c.Soulseek.Username != "someone" || m.NeedsSetup() {
 		t.Errorf("not saved: %+v", c.Soulseek)
+	}
+}
+
+// The Dashboard and Sort tabs draw, with nothing to show and with a plan.
+func TestDashboardAndSortTabs(t *testing.T) {
+	tools := core.NeedFFmpeg(t)
+	a := core.GetLucky()
+	m := core.TestManager(t, tools, nil, core.TestLibrary(a), nil)
+	ui := newTUI(m)
+	ui.dashRead = time.Time{}
+	ui.dashSample(m.Overview())
+	ui.refreshDashboard()
+	if s := ui.dashView.GetText(true); !strings.Contains(s, "Your songs") || !strings.Contains(s, "Download speed") {
+		t.Errorf("dashboard: %q", s)
+	}
+	ui.refreshSort()
+	if s := ui.st.info.GetText(true); !strings.Contains(s, "makes a plan") {
+		t.Errorf("sort: %q", s)
+	}
+	dir := t.TempDir()
+	os.WriteFile(dir+"/x.mp3", []byte("not really audio"), 0o644)
+	if err := m.SortPlan(core.SortOptions{Sources: []string{dir}, Dest: dir, DuplicatesDir: dir + "-dup", Offline: true}); err != nil {
+		t.Fatal(err)
+	}
+	core.WaitFor(t, func() bool { return !m.SortStatus().Busy })
+	ui.refreshSort()
+	if s := ui.st.info.GetText(true); !strings.Contains(s, "Nothing has changed yet") {
+		t.Errorf("with a plan: %q", s)
+	}
+	if ui.st.rows.mode != "moves" {
+		t.Errorf("table shows %s", ui.st.rows.mode)
 	}
 }

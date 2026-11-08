@@ -10,6 +10,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"html"
 	"os"
 	"strings"
 	"time"
@@ -31,10 +32,12 @@ const appName = "Universal Music Downloader"
 type pageID int
 
 const (
-	pageDownloads pageID = iota
+	pageDashboard pageID = iota
+	pageDownloads
 	pageFind
 	pagePlaylists
 	pageLibrary
+	pageSort
 	pageSources
 	pageSoulseek
 	pageSettings
@@ -55,6 +58,7 @@ type app struct {
 	stack  *qt.QStackedWidget
 	nav    [pageCount]navItem
 	assets string // pictures the style sheet refers to
+	ui     *uiState
 
 	themed   []func()
 	themeSet bool
@@ -65,17 +69,20 @@ type app struct {
 	toastLabel          *qt.QLabel
 	toastTimer          *qt.QTimer
 
-	tray     *qt.QSystemTrayIcon
-	trayShow *qt.QAction
-	trayStop *qt.QAction
-	hadWork  bool
-	unread   int
-	quitting bool
+	tray      *qt.QSystemTrayIcon
+	trayCheck int
+	trayShow  *qt.QAction
+	trayStop  *qt.QAction
+	hadWork   bool
+	unread    int
+	quitting  bool
 
+	dash     *dashboardTab
 	queue    *queueTab
 	search   *searchTab
 	lists    *playlistsTab
 	library  *libraryTab
+	sorter   *sortTab
 	sources  *sourcesTab
 	soulseek *soulseekTab
 	settings *settingsTab
@@ -119,9 +126,10 @@ func newApp(m core.Backend) *app {
 		a.sysDark = dark
 	}
 	cancel()
+	a.ui = loadUIState()
 	a.applyTheme()
 	a.build()
-	a.setupTray()
+	a.setupTray() // settings ask whether there's a tray when they're shown
 	return a
 }
 
@@ -151,8 +159,11 @@ func (a *app) begin() func() {
 func (a *app) build() {
 	a.win = qt.NewQMainWindow2()
 	a.win.SetWindowTitle(appName)
-	a.win.Resize(1240, 800)
-	a.win.SetMinimumSize2(1000, 640)
+	a.win.Resize(max(a.ui.Width, 1240), max(a.ui.Height, 800))
+	if a.ui.Width > 0 {
+		a.win.Resize(a.ui.Width, a.ui.Height)
+	}
+	a.win.SetMinimumSize2(1040, 720)
 	a.onTheme(func() { a.win.SetWindowIcon(appIcon()) })
 
 	central := qt.NewQWidget2()
@@ -165,15 +176,17 @@ func (a *app) build() {
 	root.AddWidget2(a.stack.QWidget, 1)
 	a.win.SetCentralWidget(central)
 
+	a.dash = newDashboardTab(a)
 	a.queue = newQueueTab(a)
 	a.search = newSearchTab(a)
 	a.lists = newPlaylistsTab(a)
 	a.library = newLibraryTab(a)
+	a.sorter = newSortTab(a)
 	a.sources = newSourcesTab(a)
 	a.soulseek = newSoulseekTab(a)
 	a.settings = newSettingsTab(a)
 	a.log = newLogTab(a)
-	for _, w := range []*qt.QWidget{a.queue.w, a.search.w, a.lists.w, a.library.w, a.sources.w, a.soulseek.w, a.settings.w, a.log.w, a.buildHelpPage()} {
+	for _, w := range []*qt.QWidget{a.dash.w, a.queue.w, a.search.w, a.lists.w, a.library.w, a.sorter.w, a.sources.w, a.soulseek.w, a.settings.w, a.log.w, a.buildHelpPage()} {
 		a.stack.AddWidget(w)
 	}
 
@@ -185,7 +198,7 @@ func (a *app) build() {
 	a.toastTimer.SetSingleShot(true)
 	a.toastTimer.OnTimeout(func() { a.toastLabel.Hide() })
 
-	a.show(pageDownloads)
+	a.show(pageDashboard)
 	a.shortcuts()
 	a.win.OnCloseEvent(func(super func(*qt.QCloseEvent), e *qt.QCloseEvent) {
 		if !a.quitting && a.m.Config().GUI.CloseToTray && a.tray != nil && a.tray.IsVisible() {
@@ -195,6 +208,7 @@ func (a *app) build() {
 		}
 		super(e)
 		a.quitting = true
+		a.rememberWindow()
 		qt.QCoreApplication_Quit()
 	})
 }
@@ -246,16 +260,18 @@ func (a *app) buildSidebar() *qt.QWidget {
 		box.AddWidget(l.QWidget)
 	}
 	head("MUSIC")
-	item(pageDownloads, "download", "Downloads", "Everything being downloaded, waiting or finished (Ctrl+1)")
-	item(pageFind, "search", "Find music", "Search for songs, albums and artists (Ctrl+2)")
-	item(pagePlaylists, "playlist", "Playlists", "Bring in your playlists from Spotify and other places (Ctrl+3)")
-	item(pageLibrary, "library", "My library", "The music you already have, so it isn't downloaded twice (Ctrl+4)")
+	item(pageDashboard, "gauge", "Dashboard", "Speeds, progress and disk use at a glance (Ctrl+1)")
+	item(pageDownloads, "download", "Downloads", "Everything being downloaded, waiting or finished (Ctrl+2)")
+	item(pageFind, "search", "Find music", "Search for songs, albums and artists (Ctrl+3)")
+	item(pagePlaylists, "playlist", "Playlists", "Bring in your playlists from Spotify and other places (Ctrl+4)")
+	item(pageLibrary, "library", "My library", "The music you already have, so it isn't downloaded twice (Ctrl+5)")
+	item(pageSort, "merge", "Sort && merge", "Tidy your library and downloads, and move duplicates aside (Ctrl+6)")
 	head("CONNECTIONS")
-	item(pageSources, "sources", "Sources", "The services the app downloads from, and their order (Ctrl+5)")
-	item(pageSoulseek, "people", "Soulseek", "The Soulseek file-sharing network: search, chat, transfers (Ctrl+6)")
+	item(pageSources, "sources", "Sources", "The services the app downloads from, and their order (Ctrl+7)")
+	item(pageSoulseek, "people", "Soulseek", "The Soulseek file-sharing network: search, chat, transfers (Ctrl+8)")
 	head("APP")
-	item(pageSettings, "settings", "Settings", "Where files go, quality, speed and the app's look (Ctrl+7)")
-	item(pageActivity, "activity", "Activity", "A running record of what the app is doing (Ctrl+8)")
+	item(pageSettings, "settings", "Settings", "Where files go, quality, speed and the app's look (Ctrl+9)")
+	item(pageActivity, "log", "Activity", "A running record of what the app is doing (Ctrl+0)")
 	item(pageHelp, "help", "Help", "How the app works, in plain words (F1)")
 
 	box.AddStretch()
@@ -278,10 +294,11 @@ func (a *app) shortcuts() {
 		sc := qt.NewQShortcut2(qt.NewQKeySequence2(key), a.win.QObject)
 		sc.OnActivated(do)
 	}
-	for i := pageDownloads; i < pageHelp; i++ {
+	for i := pageDashboard; i < pageActivity; i++ {
 		i := i
 		add(fmt.Sprintf("Ctrl+%d", int(i)+1), func() { a.show(i) })
 	}
+	add("Ctrl+0", func() { a.show(pageActivity) })
 	add("F1", func() { a.show(pageHelp) })
 	add("Shift+P", a.togglePause)
 	add("Ctrl+Q", a.quit)
@@ -295,8 +312,18 @@ func (a *app) shortcuts() {
 // quit leaves the app even when closing keeps it in the tray.
 func (a *app) quit() {
 	a.quitting = true
+	a.rememberWindow()
 	a.win.Close()
 	qt.QCoreApplication_Quit()
+}
+
+// rememberWindow keeps the window's size for next time.
+func (a *app) rememberWindow() {
+	a.ui.Maximized = a.win.IsMaximized()
+	if !a.ui.Maximized {
+		a.ui.Width, a.ui.Height = a.win.Width(), a.win.Height()
+	}
+	a.ui.save()
 }
 
 func (a *app) togglePause() {
@@ -310,6 +337,10 @@ func (a *app) show(id pageID) {
 	a.stack.CurrentWidget().SetFocus() // not to the first button on the page
 	a.nav[id].b.SetChecked(true)
 	switch id {
+	case pageDashboard:
+		a.dash.refresh()
+	case pageSort:
+		a.sorter.refresh()
 	case pageDownloads:
 		a.queue.refresh(false)
 		a.queue.focus()
@@ -339,7 +370,7 @@ func (a *app) changed(k core.EventKind) {
 		a.queue.changed()
 		switch a.current() {
 		case pagePlaylists:
-			a.lists.refresh()
+			a.lists.reread.poke()
 		case pageLibrary:
 			a.library.refresh()
 		case pageSources:
@@ -364,11 +395,22 @@ func (a *app) changed(k core.EventKind) {
 		if a.current() == pageActivity {
 			a.log.refresh()
 		}
+	case core.EventSort:
+		if a.current() == pageSort {
+			a.sorter.refresh()
+		}
 	}
 }
 
 // tick redraws what moves all the time.
 func (a *app) tick() {
+	if !a.win.IsVisible() && !a.quitting { // in the tray: nothing to draw, only to tell
+		o := a.m.Overview()
+		c := o.Counts
+		a.notify(o, c[core.JobSearching]+c[core.JobReady]+c[core.JobDownloading]+c[core.JobQueued]+c[core.JobWaiting])
+		a.checkTray()
+		return
+	}
 	o := a.m.Overview()
 	dot := func(color, label string) string {
 		return fmt.Sprintf("<span style='color:%s'>●</span>&nbsp; <b>%s</b>", color, label)
@@ -418,9 +460,14 @@ func (a *app) tick() {
 		a.free.SetText(core.FmtBytes(o.Free) + " free on disk")
 	}
 	a.setBadge(pageDownloads, active)
+	a.dash.sample(o)
+	if a.current() == pageDashboard {
+		a.dash.tick(o)
+	}
 	a.queue.tick(o)
 	a.soulseek.tick()
 	a.notify(o, todo)
+	a.checkTray()
 }
 
 func (a *app) setBadge(id pageID, n int) {
@@ -433,8 +480,16 @@ func (a *app) setBadge(id pageID, n int) {
 
 // --- tray and notifications ---------------------------------------------------------------------
 
+// checkTray puts the icon up if a tray has appeared since (panels often start after apps do).
+func (a *app) checkTray() {
+	a.trayCheck++
+	if a.tray == nil && a.trayCheck%8 == 0 {
+		a.setupTray()
+	}
+}
+
 func (a *app) setupTray() {
-	if !qt.QSystemTrayIcon_IsSystemTrayAvailable() {
+	if a.tray != nil || !qt.QSystemTrayIcon_IsSystemTrayAvailable() {
 		return
 	}
 	a.tray = qt.NewQSystemTrayIcon4(appIcon(), a.win.QObject)
@@ -456,6 +511,9 @@ func (a *app) setupTray() {
 		}
 	})
 	a.tray.Show()
+	if a.settings != nil {
+		a.settings.load()
+	}
 }
 
 func (a *app) raise() {
@@ -548,3 +606,8 @@ func logoPixmap(size int) *qt.QPixmap {
 }
 
 func appIcon() *qt.QIcon { return qt.NewQIcon2(logoPixmap(64)) }
+
+// mainDo runs f on the window's thread.
+func mainDo(f func()) { mainthread.Start(f) }
+
+func htmlEscape(s string) string { return html.EscapeString(s) }

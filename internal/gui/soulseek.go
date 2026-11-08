@@ -240,6 +240,15 @@ func (t *soulseekTab) refresh() {
 		}
 		s = append(s, e(x))
 	}
+	if v.Online && v.PublicIP != "" {
+		s = append(s, e("Your address "+v.PublicIP))
+	}
+	if v.SearchReqs > 0 {
+		s = append(s, e(fmt.Sprintf("answered %s of %s searches", fmtCount(int(v.SearchHits)), fmtCount(int(v.SearchReqs)))))
+	}
+	if v.Parent != "" {
+		s = append(s, e(fmt.Sprintf("search network via %s (level %d)", v.Parent, v.BranchLevel)))
+	}
 	if v.Port > 0 {
 		x := fmt.Sprintf("Port %d", v.Port)
 		if v.PortNote != "" {
@@ -263,6 +272,7 @@ func (t *soulseekTab) refresh() {
 		s = append(s, e("next search in "+core.FmtWait(v.SearchBacklog.Round(time.Second))))
 	}
 	t.share.SetText(strings.Join(s, "  ·  "))
+	t.share.SetToolTip(v.MOTD)
 	t.segs[slskPageChat].SetText(slskPageNames[slskPageChat] + onlyIf(v.Unread > 0, fmt.Sprintf(" (%d)", v.Unread)))
 
 	switch t.page {
@@ -380,14 +390,6 @@ func (t *soulseekTab) userMenu(user string, at *qt.QPoint) {
 	m.ExecWithPos(at)
 }
 
-// tableMenu shows the user menu for a table's selected row.
-func (t *soulseekTab) tableMenu(tb *qt.QTableWidget, user func() string) {
-	tb.SetContextMenuPolicy(qt.CustomContextMenu)
-	tb.OnCustomContextMenuRequested(func(pos *qt.QPoint) {
-		t.userMenu(user(), tb.Viewport().MapToGlobalWithQPoint(pos))
-	})
-}
-
 func slskBase(p string) string { return path.Base(strings.ReplaceAll(p, `\`, "/")) }
 
 func slskQuality(r core.SlskResult) string {
@@ -401,24 +403,7 @@ func slskQuality(r core.SlskResult) string {
 	return ext
 }
 
-func rightCell(s string) *qt.QTableWidgetItem {
-	c := cell(s)
-	c.SetTextAlignment(int(qt.AlignRight | qt.AlignVCenter))
-	return c
-}
-
-func colored(s, color string) *qt.QTableWidgetItem {
-	c := cell(s)
-	c.SetForeground(brushOf(color))
-	return c
-}
-
-func stretchColumn(tb *qt.QTableWidget, col int, widths ...int) {
-	for i, w := range widths {
-		tb.SetColumnWidth(i, w)
-	}
-	tb.HorizontalHeader().SetSectionResizeMode2(col, qt.QHeaderView__Stretch)
-}
+func sizeValue(n int64) float64 { return float64(n) }
 
 // --- search -------------------------------------------------------------------------------------
 
@@ -426,7 +411,7 @@ type slskSearch struct {
 	find    *qt.QLineEdit
 	go_     *qt.QPushButton
 	note    *qt.QLabel
-	table   *qt.QTableWidget
+	table   *dataTable
 	res     []core.SlskResult
 	busy    bool
 	dl, dlF *qt.QPushButton
@@ -449,17 +434,63 @@ func (t *soulseekTab) buildSearch() *qt.QWidget {
 	box.AddLayout(row.QLayout)
 	s.note = text("Searches are spaced out on purpose: the network bans clients that flood it.", "hint")
 	box.AddWidget(s.note.QWidget)
-	s.table = table("From", "File", "Size", "Quality", "Length", "Availability", "Their speed")
-	stretchColumn(s.table, 1, 130, 300, 80, 100, 72, 100, 100)
-	s.table.OnCellDoubleClicked(func(int, int) { t.downloadSelected() })
-	s.table.OnCurrentCellChanged(func(int, int, int, int) { t.updateSearchButtons() })
-	t.tableMenu(s.table, func() string {
-		if r := t.selectedResult(); r != nil {
-			return r.User
+	s.table = t.a.newTable("slsk-results", column{title: "File", width: 420, flex: true}, column{title: "From", width: 140},
+		column{title: "Size", width: 86, right: true}, column{title: "Quality", width: 104}, column{title: "Length", width: 74, right: true},
+		column{title: "Availability", width: 104}, column{title: "Their speed", width: 100, right: true})
+	tb := s.table
+	tb.count = func() int { return len(s.res) }
+	tb.key = func(r int) string { return s.res[r].User + "\x00" + s.res[r].Path }
+	tb.text = func(r, c int) string {
+		x := s.res[r]
+		switch c {
+		case 0:
+			return slskBase(x.Folder()) + "/" + slskBase(x.Path)
+		case 1:
+			return x.User
+		case 2:
+			return core.FmtBytes(x.Size)
+		case 3:
+			return slskQuality(x)
+		case 4:
+			if x.Duration > 0 {
+				return core.FmtDuration(float64(x.Duration))
+			}
+			return ""
+		case 5:
+			if x.FreeSlot {
+				return "Free now"
+			}
+			return fmt.Sprintf("In line (%d)", x.Queue)
+		case 6:
+			return core.FmtRate(float64(x.Speed))
 		}
 		return ""
-	})
-	box.AddWidget2(s.table.QWidget, 1)
+	}
+	tb.num = func(r, c int) (float64, bool) {
+		x := s.res[r]
+		switch c {
+		case 2:
+			return sizeValue(x.Size), true
+		case 4:
+			return float64(x.Duration), true
+		case 6:
+			return float64(x.Speed), true
+		}
+		return 0, false
+	}
+	tb.color = func(r, c int) string {
+		if c == 5 {
+			if s.res[r].FreeSlot {
+				return th.OK
+			}
+			return th.Warn
+		}
+		return ""
+	}
+	tb.onActivate(func(int) { t.downloadSelected() })
+	tb.onSelect(t.updateSearchButtons)
+	tb.onMenu(func(r int, at *qt.QPoint) { t.userMenu(s.res[r].User, at) })
+	box.AddWidget2(tb.view.QWidget, 1)
 	acts := hbox()
 	acts.SetSpacing(6)
 	s.dl = t.a.iconButton("download", "Download file", "", "", t.downloadSelected)
@@ -479,7 +510,7 @@ func (t *soulseekTab) updateSearchButtons() {
 }
 
 func (t *soulseekTab) selectedResult() *core.SlskResult {
-	if r := t.search.table.CurrentRow(); r >= 0 && r < len(t.search.res) {
+	if r := t.search.table.current(); r >= 0 && r < len(t.search.res) {
 		return &t.search.res[r]
 	}
 	return nil
@@ -518,30 +549,10 @@ func (t *soulseekTab) runSearch(q string) {
 
 func (t *soulseekTab) fillResults() {
 	s := &t.search
-	tb := s.table
-	tb.SetUpdatesEnabled(false)
-	defer tb.SetUpdatesEnabled(true)
-	tb.ClearContents()
-	tb.SetRowCount(len(s.res))
-	for i, r := range s.res {
-		slot, color := "Free now", th.OK
-		if !r.FreeSlot {
-			slot, color = fmt.Sprintf("In line (%d)", r.Queue), th.Warn
-		}
-		length := ""
-		if r.Duration > 0 {
-			length = core.FmtDuration(float64(r.Duration))
-		}
-		tb.SetItem(i, 0, cell(r.User))
-		tb.SetItem(i, 1, cell(slskBase(r.Folder())+"/"+slskBase(r.Path)))
-		tb.SetItem(i, 2, rightCell(core.FmtBytes(r.Size)))
-		tb.SetItem(i, 3, cell(slskQuality(r)))
-		tb.SetItem(i, 4, rightCell(length))
-		tb.SetItem(i, 5, colored(slot, color))
-		tb.SetItem(i, 6, rightCell(core.FmtRate(float64(r.Speed))))
-	}
+	s.table.reload()
 	if len(s.res) > 0 {
-		tb.SelectRow(0)
+		s.table.view.SelectRow(0)
+		s.table.view.ScrollToTop()
 	}
 }
 
@@ -572,7 +583,7 @@ func (t *soulseekTab) downloadFolder() {
 // --- transfers ----------------------------------------------------------------------------------
 
 type slskTransfers struct {
-	downs, ups *qt.QTableWidget
+	downs, ups *dataTable
 	xDown, xUp []core.SlskTransferView
 	stop       *qt.QPushButton
 }
@@ -583,25 +594,42 @@ func (t *soulseekTab) buildTransfers() *qt.QWidget {
 	box := qt.NewQVBoxLayout(w)
 	box.SetContentsMargins(0, 0, 0, 0)
 	box.SetSpacing(8)
-	mk := func(title string, rows *[]core.SlskTransferView) *qt.QTableWidget {
+	mk := func(name, title string, rows *[]core.SlskTransferView) *dataTable {
 		box.AddWidget(text(title, "h2").QWidget)
-		tb := table("From / to", "File", "State", "Progress", "Speed")
-		stretchColumn(tb, 1, 150, 300, 180, 150, 90)
-		t.tableMenu(tb, func() string {
-			if r := tb.CurrentRow(); r >= 0 && r < len(*rows) {
-				return (*rows)[r].User
+		tb := t.a.newTable(name, column{title: "File", width: 420, flex: true}, column{title: "From / to", width: 150},
+			column{title: "State", width: 200}, column{title: "Progress", width: 150}, column{title: "Speed", width: 96, right: true})
+		tb.count = func() int { return len(*rows) }
+		tb.key = func(r int) string { return (*rows)[r].User + "\x00" + (*rows)[r].File }
+		tb.text = func(r, c int) string { return transferText((*rows)[r], c) }
+		tb.color = func(r, c int) string {
+			if c == 2 {
+				return transferColor((*rows)[r])
 			}
 			return ""
-		})
-		box.AddWidget2(tb.QWidget, 1)
+		}
+		tb.num = func(r, c int) (float64, bool) {
+			x := (*rows)[r]
+			switch c {
+			case 3:
+				if x.Total > 0 {
+					return float64(x.Done) / float64(x.Total), true
+				}
+				return 0, true
+			case 4:
+				return x.Speed, true
+			}
+			return 0, false
+		}
+		tb.onMenu(func(r int, at *qt.QPoint) { t.userMenu((*rows)[r].User, at) })
+		box.AddWidget2(tb.view.QWidget, 1)
 		return tb
 	}
-	s.downs = mk("Downloads", &s.xDown)
-	s.ups = mk("What you're sending to others", &s.xUp)
+	s.downs = mk("slsk-downloads", "Downloads", &s.xDown)
+	s.ups = mk("slsk-uploads", "What you're sending to others", &s.xUp)
 	acts := hbox()
 	acts.SetSpacing(6)
 	s.stop = t.a.iconButton("x", "Stop sending", "danger", "Stop this upload", func() {
-		if r := s.ups.CurrentRow(); r >= 0 && r < len(s.xUp) {
+		if r := s.ups.current(); r >= 0 && r < len(s.xUp) {
 			t.a.m.SoulseekAbortUpload(s.xUp[r].User, s.xUp[r].File)
 			t.fillTransfers()
 		}
@@ -616,6 +644,49 @@ func (t *soulseekTab) buildTransfers() *qt.QWidget {
 	return w
 }
 
+func transferText(x core.SlskTransferView, c int) string {
+	switch c {
+	case 0:
+		return slskBase(path.Dir(strings.ReplaceAll(x.File, `\`, "/"))) + "/" + slskBase(x.File)
+	case 1:
+		if x.Privileged {
+			return "★ " + x.User
+		}
+		return x.User
+	case 2:
+		if x.State == "done" || strings.HasPrefix(x.State, "done:") {
+			return "Finished"
+		}
+		return capitalized(x.State)
+	case 3:
+		if x.Total > 0 && x.Done > 0 {
+			return fmt.Sprintf("%.0f%% of %s", float64(x.Done)/float64(x.Total)*100, core.FmtBytes(x.Total))
+		}
+		if x.Total > 0 {
+			return core.FmtBytes(x.Total)
+		}
+	case 4:
+		if x.Speed > 0 && (x.State == "sending" || x.State == "downloading") {
+			return core.FmtRate(x.Speed)
+		}
+	}
+	return ""
+}
+
+func transferColor(x core.SlskTransferView) string {
+	switch {
+	case x.State == "done", strings.HasPrefix(x.State, "done:"):
+		return th.OK
+	case strings.HasPrefix(x.State, "failed"):
+		return th.Bad
+	case x.State == "cancelled", x.State == "stopped":
+		return th.Text3
+	case x.State == "sending", x.State == "downloading":
+		return th.Accent
+	}
+	return th.Text2
+}
+
 func (t *soulseekTab) fillTransfers() {
 	s := &t.transfers
 	s.xDown, s.xUp = s.xDown[:0], s.xUp[:0]
@@ -626,52 +697,8 @@ func (t *soulseekTab) fillTransfers() {
 			s.xDown = append(s.xDown, x)
 		}
 	}
-	fill := func(tb *qt.QTableWidget, rows []core.SlskTransferView) {
-		sel := tb.CurrentRow()
-		tb.SetUpdatesEnabled(false)
-		tb.SetRowCount(len(rows))
-		for i, x := range rows {
-			user := x.User
-			if x.Privileged {
-				user = "★ " + user
-			}
-			file := slskBase(path.Dir(strings.ReplaceAll(x.File, `\`, "/"))) + "/" + slskBase(x.File)
-			prog := ""
-			if x.Total > 0 && x.Done > 0 {
-				prog = fmt.Sprintf("%.0f%% of %s", float64(x.Done)/float64(x.Total)*100, core.FmtBytes(x.Total))
-			} else if x.Total > 0 {
-				prog = core.FmtBytes(x.Total)
-			}
-			spd := ""
-			if x.Speed > 0 && (x.State == "sending" || x.State == "downloading") {
-				spd = core.FmtRate(x.Speed)
-			}
-			state, color := x.State, th.Text2
-			switch {
-			case x.State == "done", strings.HasPrefix(x.State, "done:"):
-				state, color = "Finished", th.OK
-			case strings.HasPrefix(x.State, "failed"):
-				color = th.Bad
-			case x.State == "cancelled", x.State == "stopped":
-				color = th.Text3
-			case x.State == "sending", x.State == "downloading":
-				color = th.Accent
-			}
-			tb.SetItem(i, 0, cell(user))
-			tb.SetItem(i, 1, cell(file))
-			st := colored(capitalized(state), color)
-			st.SetToolTip(x.State)
-			tb.SetItem(i, 2, st)
-			tb.SetItem(i, 3, cell(prog))
-			tb.SetItem(i, 4, rightCell(spd))
-		}
-		if sel >= 0 && sel < len(rows) {
-			tb.SelectRow(sel)
-		}
-		tb.SetUpdatesEnabled(true)
-	}
-	fill(s.downs, s.xDown)
-	fill(s.ups, s.xUp)
+	s.downs.changed()
+	s.ups.changed()
 }
 
 // --- browse -------------------------------------------------------------------------------------
@@ -680,11 +707,12 @@ type slskBrowse struct {
 	user       *qt.QLineEdit
 	go_        *qt.QPushButton
 	note       *qt.QLabel
-	folders    *qt.QTableWidget
-	files      *qt.QTableWidget
+	folders    *dataTable
+	files      *dataTable
 	browsed    []core.SlskResult
 	whose      string
 	folderList []string
+	byFolder   map[string][]core.SlskResult
 	inFolder   []core.SlskResult
 	sel        string
 	busy       bool
@@ -708,26 +736,66 @@ func (t *soulseekTab) buildBrowse() *qt.QWidget {
 	s.note = text("See everything someone shares, and download files or whole folders.", "hint")
 	box.AddWidget(s.note.QWidget)
 	split := qt.NewQSplitter3(qt.Horizontal)
-	s.folders = table("Folder", "Files")
-	stretchColumn(s.folders, 0, 300, 60)
-	s.folders.OnCurrentCellChanged(func(r, _, _, _ int) {
-		if r >= 0 && r < len(s.folderList) {
+	s.folders = t.a.newTable("slsk-folders", column{title: "Folder", width: 300, flex: true}, column{title: "Files", width: 64, right: true})
+	s.folders.count = func() int { return len(s.folderList) }
+	s.folders.key = func(r int) string { return s.folderList[r] }
+	s.folders.text = func(r, c int) string {
+		if c == 0 {
+			return strings.ReplaceAll(s.folderList[r], `\`, "/")
+		}
+		return fmt.Sprint(len(s.byFolder[s.folderList[r]]))
+	}
+	s.folders.num = func(r, c int) (float64, bool) {
+		if c == 1 {
+			return float64(len(s.byFolder[s.folderList[r]])), true
+		}
+		return 0, false
+	}
+	s.folders.onSelect(func() {
+		if r := s.folders.current(); r >= 0 && r < len(s.folderList) {
 			s.sel = s.folderList[r]
 			t.fillBrowseFiles()
 		}
 	})
-	t.tableMenu(s.folders, func() string { return s.whose })
-	s.files = table("File", "Size", "Quality", "Length")
-	stretchColumn(s.files, 0, 300, 80, 100, 72)
-	s.files.OnCellDoubleClicked(func(r, _ int) {
+	s.folders.onMenu(func(_ int, at *qt.QPoint) { t.userMenu(s.whose, at) })
+	s.files = t.a.newTable("slsk-files", column{title: "File", width: 300, flex: true}, column{title: "Size", width: 84, right: true},
+		column{title: "Quality", width: 104}, column{title: "Length", width: 74, right: true})
+	s.files.count = func() int { return len(s.inFolder) }
+	s.files.key = func(r int) string { return s.inFolder[r].Path }
+	s.files.text = func(r, c int) string {
+		x := s.inFolder[r]
+		switch c {
+		case 0:
+			return slskBase(x.Path)
+		case 1:
+			return core.FmtBytes(x.Size)
+		case 2:
+			return slskQuality(x)
+		case 3:
+			if x.Duration > 0 {
+				return core.FmtDuration(float64(x.Duration))
+			}
+		}
+		return ""
+	}
+	s.files.num = func(r, c int) (float64, bool) {
+		switch c {
+		case 1:
+			return sizeValue(s.inFolder[r].Size), true
+		case 3:
+			return float64(s.inFolder[r].Duration), true
+		}
+		return 0, false
+	}
+	s.files.onActivate(func(r int) {
 		if r >= 0 && r < len(s.inFolder) {
 			f := s.inFolder[r]
 			t.a.m.SoulseekDownload(f.User, f.Path, f.Size)
 			t.a.toast("Getting " + slskBase(f.Path))
 		}
 	})
-	split.AddWidget(s.folders.QWidget)
-	split.AddWidget(s.files.QWidget)
+	split.AddWidget(s.folders.view.QWidget)
+	split.AddWidget(s.files.view.QWidget)
 	split.SetStretchFactor(0, 2)
 	split.SetStretchFactor(1, 3)
 	box.AddWidget2(split.QWidget, 1)
@@ -759,23 +827,20 @@ func (t *soulseekTab) browseUser(user string) {
 				return
 			}
 			s.browsed, s.whose = files, user
-			byFolder := map[string]int{}
+			s.byFolder = map[string][]core.SlskResult{}
 			for _, f := range files {
-				byFolder[f.Folder()]++
+				s.byFolder[f.Folder()] = append(s.byFolder[f.Folder()], f)
 			}
 			s.folderList = s.folderList[:0]
-			for f := range byFolder {
+			for f := range s.byFolder {
 				s.folderList = append(s.folderList, f)
 			}
 			sort.Slice(s.folderList, func(i, j int) bool { return strings.ToLower(s.folderList[i]) < strings.ToLower(s.folderList[j]) })
-			s.folders.SetRowCount(len(s.folderList))
-			for i, f := range s.folderList {
-				s.folders.SetItem(i, 0, cell(strings.ReplaceAll(f, `\`, "/")))
-				s.folders.SetItem(i, 1, rightCell(fmt.Sprint(byFolder[f])))
-			}
+			s.folders.reload()
 			s.note.SetText(fmt.Sprintf("%s shares %d files in %d folders. Double-click a file to download it.", user, len(files), len(s.folderList)))
 			if len(s.folderList) > 0 {
-				s.folders.SelectRow(0)
+				s.folders.view.SelectRow(0)
+				s.folders.view.ScrollToTop()
 			}
 		})
 	}()
@@ -783,23 +848,8 @@ func (t *soulseekTab) browseUser(user string) {
 
 func (t *soulseekTab) fillBrowseFiles() {
 	s := &t.browse
-	s.inFolder = s.inFolder[:0]
-	for _, f := range s.browsed {
-		if f.Folder() == s.sel {
-			s.inFolder = append(s.inFolder, f)
-		}
-	}
-	s.files.SetRowCount(len(s.inFolder))
-	for i, r := range s.inFolder {
-		length := ""
-		if r.Duration > 0 {
-			length = core.FmtDuration(float64(r.Duration))
-		}
-		s.files.SetItem(i, 0, cell(slskBase(r.Path)))
-		s.files.SetItem(i, 1, rightCell(core.FmtBytes(r.Size)))
-		s.files.SetItem(i, 2, cell(slskQuality(r)))
-		s.files.SetItem(i, 3, rightCell(length))
-	}
+	s.inFolder = s.byFolder[s.sel]
+	s.files.reload()
 }
 
 func (t *soulseekTab) downloadBrowsed() {
@@ -830,7 +880,7 @@ type slskPerson struct {
 }
 
 type slskPeople struct {
-	table *qt.QTableWidget
+	table *dataTable
 	rows  []slskPerson
 	info  *qt.QLabel
 	shown string
@@ -844,20 +894,54 @@ func (t *soulseekTab) buildPeople() *qt.QWidget {
 	box.SetSpacing(12)
 	left := vbox()
 	left.SetSpacing(6)
-	s.table = table("Person", "Status", "Shares")
-	stretchColumn(s.table, 0, 200, 90, 160)
-	s.table.OnCurrentCellChanged(func(r, _, _, _ int) {
-		if r >= 0 && r < len(s.rows) && s.rows[r].list != "" {
+	s.table = t.a.newTable("slsk-people", column{title: "Person", width: 220, flex: true}, column{title: "Status", width: 96}, column{title: "Shares", width: 160})
+	tb := s.table
+	tb.count = func() int { return len(s.rows) }
+	tb.key = func(r int) string { return s.rows[r].list + "\x00" + s.rows[r].user.Name }
+	tb.plain = func(r int) bool { return r < len(s.rows) && s.rows[r].list == "" }
+	tb.text = func(r, c int) string {
+		p := s.rows[r]
+		switch {
+		case p.list == "" && c == 0:
+			return p.user.Name
+		case p.list == "":
+			return ""
+		case c == 0:
+			return "   " + p.user.Name
+		case c == 1:
+			return capitalized(p.user.StatusText())
+		case p.user.Files > 0:
+			return fmt.Sprintf("%d files, %s", p.user.Files, core.FmtRate(float64(p.user.Speed)))
+		}
+		return ""
+	}
+	tb.color = func(r, c int) string {
+		p := s.rows[r]
+		if p.list == "" {
+			return th.Text3
+		}
+		if c == 1 {
+			switch p.user.Status {
+			case 2:
+				return th.OK
+			case 1:
+				return th.Warn
+			}
+			return th.Text3
+		}
+		return ""
+	}
+	tb.onSelect(func() {
+		if r := tb.current(); r >= 0 && r < len(s.rows) && s.rows[r].list != "" {
 			t.userInfo(s.rows[r].user.Name)
 		}
 	})
-	t.tableMenu(s.table, func() string {
-		if r := s.table.CurrentRow(); r >= 0 && r < len(s.rows) {
-			return s.rows[r].user.Name
+	tb.onMenu(func(r int, at *qt.QPoint) {
+		if r < len(s.rows) && s.rows[r].list != "" {
+			t.userMenu(s.rows[r].user.Name, at)
 		}
-		return ""
 	})
-	left.AddWidget2(s.table.QWidget, 1)
+	left.AddWidget2(tb.view.QWidget, 1)
 	acts := hbox()
 	acts.SetSpacing(6)
 	acts.AddWidget(t.a.iconButton("plus", "Add a buddy", "", "See when someone's online", func() {
@@ -869,7 +953,7 @@ func (t *soulseekTab) buildPeople() *qt.QWidget {
 		}
 	}).QWidget)
 	acts.AddWidget(t.a.iconButton("x", "Take off the list", "", "", func() {
-		if r := s.table.CurrentRow(); r >= 0 && r < len(s.rows) && s.rows[r].list != "" {
+		if r := tb.current(); r >= 0 && r < len(s.rows) && s.rows[r].list != "" {
 			t.a.m.SoulseekSetUser(s.rows[r].list, s.rows[r].user.Name, false)
 			t.fillPeople()
 		}
@@ -898,15 +982,10 @@ func (t *soulseekTab) buildPeople() *qt.QWidget {
 func (t *soulseekTab) fillPeople() {
 	s := &t.people
 	cfg := t.a.m.Config().Soulseek
-	sel := s.table.CurrentRow()
 	s.rows = s.rows[:0]
-	tb := s.table
-	tb.SetUpdatesEnabled(false)
-	defer tb.SetUpdatesEnabled(true)
-	tb.ClearContents()
-	var head []int
+	var heads []int
 	section := func(title, list string, users []core.SlskUser) {
-		head = append(head, len(s.rows))
+		heads = append(heads, len(s.rows))
 		s.rows = append(s.rows, slskPerson{user: core.SlskUser{Name: title}})
 		for _, u := range users {
 			s.rows = append(s.rows, slskPerson{list: list, user: u})
@@ -922,34 +1001,8 @@ func (t *soulseekTab) fillPeople() {
 	section("Buddies", "buddies", t.a.m.SoulseekBuddies())
 	section("Banned: can't download from you or see your files", "banned", plain(cfg.Banned))
 	section("Ignored: their messages are hidden", "ignored", plain(cfg.Ignored))
-	tb.SetRowCount(len(s.rows))
-	for i, p := range s.rows {
-		if p.list == "" {
-			it := colored(p.user.Name, th.Text3)
-			it.SetFlags(qt.NoItemFlags)
-			tb.SetItem(i, 0, it)
-			tb.SetSpan(i, 0, 1, 3)
-			continue
-		}
-		tb.SetSpan(i, 0, 1, 1)
-		color := th.Text3
-		switch p.user.Status {
-		case 2:
-			color = th.OK
-		case 1:
-			color = th.Warn
-		}
-		extra := ""
-		if p.user.Files > 0 {
-			extra = fmt.Sprintf("%d files, %s", p.user.Files, core.FmtRate(float64(p.user.Speed)))
-		}
-		tb.SetItem(i, 0, cell("   "+p.user.Name))
-		tb.SetItem(i, 1, colored(capitalized(p.user.StatusText()), color))
-		tb.SetItem(i, 2, cell(extra))
-	}
-	if sel > 0 && sel < len(s.rows) && s.rows[sel].list != "" {
-		tb.SelectRow(sel)
-	}
+	s.table.spans = heads
+	s.table.reload()
 }
 
 // userInfo shows what's known about someone on the People page.
@@ -1178,9 +1231,9 @@ type slskLike struct {
 type slskInterests struct {
 	likes    *qt.QListWidget
 	likeRows []slskLike
-	recs     *qt.QTableWidget
+	recs     *dataTable
 	recRows  []core.SlskRecommendation
-	similar  *qt.QTableWidget
+	similar  *dataTable
 	simRows  []core.SlskUserScore
 	recsFor  string
 	global   bool
@@ -1234,18 +1287,37 @@ func (t *soulseekTab) buildInterests() *qt.QWidget {
 	mid.SetSpacing(6)
 	s.title = text("Recommended for you", "h2")
 	mid.AddWidget(s.title.QWidget)
-	s.recs = table("Interest", "People")
-	stretchColumn(s.recs, 0, 200, 70)
-	s.recs.OnCellDoubleClicked(func(r, _ int) {
+	s.recs = t.a.newTable("slsk-recs", column{title: "Interest", width: 240, flex: true}, column{title: "People", width: 74, right: true})
+	s.recs.count = func() int { return len(s.recRows) }
+	s.recs.key = func(r int) string { return s.recRows[r].Item }
+	s.recs.text = func(r, c int) string {
+		if c == 0 {
+			return s.recRows[r].Item
+		}
+		return fmt.Sprint(s.recRows[r].Score)
+	}
+	s.recs.num = func(r, c int) (float64, bool) {
+		if c == 1 {
+			return float64(s.recRows[r].Score), true
+		}
+		return 0, false
+	}
+	s.recs.color = func(r, _ int) string {
+		if s.recRows[r].Score < 0 {
+			return th.Bad
+		}
+		return ""
+	}
+	s.recs.onActivate(func(r int) {
 		if r >= 0 && r < len(s.recRows) {
 			t.loadRecs(s.recRows[r].Item)
 		}
 	})
-	mid.AddWidget2(s.recs.QWidget, 1)
+	mid.AddWidget2(s.recs.view.QWidget, 1)
 	recActs := hbox()
 	recActs.SetSpacing(6)
 	sel := func() *core.SlskRecommendation {
-		if r := s.recs.CurrentRow(); r >= 0 && r < len(s.recRows) {
+		if r := s.recs.current(); r >= 0 && r < len(s.recRows) {
 			return &s.recRows[r]
 		}
 		return nil
@@ -1272,20 +1344,25 @@ func (t *soulseekTab) buildInterests() *qt.QWidget {
 	right := vbox()
 	right.SetSpacing(6)
 	right.AddWidget(text("People like you", "h2").QWidget)
-	s.similar = table("Person", "Match")
-	stretchColumn(s.similar, 0, 160, 60)
-	t.tableMenu(s.similar, func() string {
-		if r := s.similar.CurrentRow(); r >= 0 && r < len(s.simRows) {
+	s.similar = t.a.newTable("slsk-similar", column{title: "Person", width: 170, flex: true}, column{title: "Match", width: 70, right: true})
+	s.similar.count = func() int { return len(s.simRows) }
+	s.similar.key = func(r int) string { return s.simRows[r].Name }
+	s.similar.text = func(r, c int) string {
+		if c == 0 {
 			return s.simRows[r].Name
 		}
+		if s.simRows[r].Score > 0 {
+			return fmt.Sprint(s.simRows[r].Score)
+		}
 		return ""
-	})
-	s.similar.OnCellDoubleClicked(func(r, _ int) {
+	}
+	s.similar.onMenu(func(r int, at *qt.QPoint) { t.userMenu(s.simRows[r].Name, at) })
+	s.similar.onActivate(func(r int) {
 		if r >= 0 && r < len(s.simRows) {
 			t.userInfo(s.simRows[r].Name)
 		}
 	})
-	right.AddWidget2(s.similar.QWidget, 1)
+	right.AddWidget2(s.similar.view.QWidget, 1)
 	box.AddLayout2(right.QLayout, 1)
 	return w
 }
@@ -1343,24 +1420,8 @@ func (t *soulseekTab) loadRecs(item string) {
 				s.title.SetText("Add what you like to get recommendations")
 			}
 			s.recRows, s.simRows = recs, users
-			s.recs.SetRowCount(len(recs))
-			for i, r := range recs {
-				color := th.Text
-				if r.Score < 0 {
-					color = th.Bad
-				}
-				s.recs.SetItem(i, 0, colored(r.Item, color))
-				s.recs.SetItem(i, 1, rightCell(fmt.Sprint(r.Score)))
-			}
-			s.similar.SetRowCount(len(users))
-			for i, u := range users {
-				s.similar.SetItem(i, 0, cell(u.Name))
-				score := ""
-				if u.Score > 0 {
-					score = fmt.Sprint(u.Score)
-				}
-				s.similar.SetItem(i, 1, rightCell(score))
-			}
+			s.recs.reload()
+			s.similar.reload()
 		})
 	}()
 }

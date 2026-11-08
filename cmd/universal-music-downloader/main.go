@@ -50,6 +50,7 @@ Options (all optional; the app saves its settings):
 `
 
 func main() {
+	core.TuneMemory()
 	os.Exit(run(os.Args[1:]))
 }
 

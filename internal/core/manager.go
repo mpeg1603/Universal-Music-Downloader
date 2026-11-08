@@ -60,7 +60,7 @@ type Job struct {
 	lib        []*LibFile // the library's copies, best first
 	needBetter bool       // a library copy exists but is below the threshold
 	force      bool       // download even though it's in the library
-	rec        Record     // when downloaded
+	rec        *Record    // when downloaded
 	prio       int
 	bump       int64
 	cancel     context.CancelFunc
@@ -107,7 +107,10 @@ func (j *Job) view() JobView {
 	defer j.mu.Unlock()
 	v := JobView{Key: j.Track.Key, Track: j.Track, Playlists: j.playlists, State: j.state, Source: j.source,
 		Reason: j.lastErr, Reasons: append([]string(nil), j.reasons...), LibCount: len(j.lib), NeedBetter: j.needBetter,
-		Rec: j.rec, Prio: j.prio, Bumped: j.bump > 0, RetryAt: j.retryAt, Started: j.started, idx: j.idx}
+		Prio: j.prio, Bumped: j.bump > 0, RetryAt: j.retryAt, Started: j.started, idx: j.idx}
+	if j.rec != nil {
+		v.Rec = *j.rec
+	}
 	if len(j.lib) > 0 {
 		v.Lib = j.lib[0]
 	}
@@ -202,6 +205,8 @@ type Manager struct {
 	checkMu               sync.Mutex // one library check at a time
 	checkDone, checkTotal atomic.Int64
 
+	sort   sorter    // Sort & merge
+	dash   dashState // the numbers at a glance
 	events eventHub  // Watch's subscribers
 	revs   revisions // changes to the queue and the settings, for Watch
 	// onFinish is called when a job reaches a final state (for the headless output).
@@ -823,50 +828,64 @@ func (m *Manager) dispatch() {
 	}
 	_, limit, _ := m.searchGate.Stats()
 	// Jobs counted as searching include ones about to take a search slot.
-	for m.countState(JobSearching) < limit && m.countState(JobReady) < m.readyMax() {
-		j := m.nextQueued()
-		if j == nil {
+	readyMax := m.readyMax()
+	searching, ready, next := m.queuePicture(limit)
+	for _, j := range next {
+		if searching >= limit || ready >= readyMax {
 			return
 		}
-		m.start(j)
+		j.mu.Lock()
+		queued := j.state == JobQueued
+		j.mu.Unlock()
+		if queued {
+			m.start(j)
+			searching++
+		}
 	}
 }
 
-func (m *Manager) countState(s JobState) int {
+// queuePicture counts the jobs searching and ready and picks the next few to start, in the
+// order they should start, in one pass over the jobs.
+func (m *Manager) queuePicture(want int) (searching, ready int, next []*Job) {
+	type pick struct {
+		j    *Job
+		bump int64
+		prio int
+		idx  int
+	}
+	better := func(a, b pick) bool {
+		return a.bump > b.bump || (a.bump == b.bump && (a.prio > b.prio || (a.prio == b.prio && a.idx < b.idx)))
+	}
+	picks := make([]pick, 0, want+1)
 	m.jobsMu.Lock()
 	defer m.jobsMu.Unlock()
-	n := 0
 	for _, j := range m.order {
 		j.mu.Lock()
-		if j.state == s {
-			n++
-		}
+		state := j.state
+		p := pick{j, j.bump, j.prio, j.idx}
 		j.mu.Unlock()
-	}
-	return n
-}
-
-// nextQueued picks the queued job to search next: ones you prioritized, then by playlist
-// priority, then in playlist order.
-func (m *Manager) nextQueued() *Job {
-	m.jobsMu.Lock()
-	defer m.jobsMu.Unlock()
-	var best *Job
-	var bb int64
-	var bp, bi int
-	for _, j := range m.order {
-		j.mu.Lock()
-		ok := j.state == JobQueued
-		b, p, i := j.bump, j.prio, j.idx
-		j.mu.Unlock()
-		if !ok {
-			continue
-		}
-		if best == nil || b > bb || (b == bb && (p > bp || (p == bp && i < bi))) {
-			best, bb, bp, bi = j, b, p, i
+		switch state {
+		case JobSearching:
+			searching++
+		case JobReady:
+			ready++
+		case JobQueued:
+			if len(picks) == want && !better(p, picks[want-1]) {
+				continue
+			}
+			at := sort.Search(len(picks), func(i int) bool { return better(p, picks[i]) })
+			picks = append(picks, pick{})
+			copy(picks[at+1:], picks[at:])
+			picks[at] = p
+			if len(picks) > want {
+				picks = picks[:want]
+			}
 		}
 	}
-	return best
+	for _, p := range picks {
+		next = append(next, p.j)
+	}
+	return
 }
 
 func (j *Job) priority() int64 {
@@ -1247,7 +1266,8 @@ func (m *Manager) finish(j *Job, gen int, res result) {
 		j.state = JobQueued // app stopping, or restarted
 		j.mu.Unlock()
 	case res.state == JobDone:
-		j.state, j.rec, j.lastErr, j.rounds = JobDone, res.rec, "", 0
+		j.state, j.lastErr, j.rounds = JobDone, "", 0
+		j.rec = &res.rec
 		if p := res.rec.Path; p != "" && m.slskClient() != nil {
 			go m.shares.add(p) // shared on Soulseek when the downloads folder is
 		}

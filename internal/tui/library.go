@@ -22,7 +22,7 @@ func (ui *tui) buildLibrary() tview.Primitive {
 		row, _ := ui.libTable.GetSelection()
 		switch ev.Rune() {
 		case 'a':
-			ui.askPath("Add a library folder", "A folder with your music. It is only read, never written to; downloads go to the downloads folder (Settings).",
+			ui.askPath("Add a library folder", "A folder with your music. The app only reads it (unless you use the Sort tab yourself); downloads go to the downloads folder (Settings).",
 				true, nil, func(p string) {
 					p = core.CleanPath(p)
 					if st, err := os.Stat(p); err != nil || !st.IsDir() {

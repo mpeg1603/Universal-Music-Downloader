@@ -6,6 +6,7 @@ import (
 	"universal-music-downloader/internal/core"
 
 	qt "github.com/mappu/miqt/qt6"
+	"github.com/mappu/miqt/qt6/mainthread"
 )
 
 // The Playlists page: the playlists the queue is made from, and the files and links they came
@@ -22,6 +23,8 @@ type playlistsTab struct {
 
 	show, onoff, up, down, remove *qt.QPushButton
 	inToggle, inRemove            *qt.QPushButton
+	loading, again                bool
+	reread                        *throttle
 }
 
 func newPlaylistsTab(a *app) *playlistsTab {
@@ -37,6 +40,7 @@ func newPlaylistsTab(a *app) *playlistsTab {
 	e.row.AddWidget(button("How does this work?", "", func() { a.showHelp("playlists") }).QWidget)
 	e.done()
 
+	t.reread = newThrottle(t.w.QObject, 1500, t.refresh)
 	t.list = newRowList(60, func() int { return len(t.rows) }, t.draw)
 	t.list.onSelect(func(int) { t.updateButtons() })
 	t.list.onActivate(t.showTracks)
@@ -239,13 +243,30 @@ func (t *playlistsTab) updateButtons() {
 	}
 }
 
-// refresh redraws the playlists and files, keeping the selections.
+// refresh reads the playlists and files again, away from the window's thread.
 func (t *playlistsTab) refresh() {
+	if t.loading {
+		t.again = true
+		return
+	}
+	t.loading = true
+	go func() {
+		rows, inputs := t.a.m.Playlists(), t.a.m.Inputs()
+		mainthread.Start(func() { t.loaded(rows, inputs) })
+	}()
+}
+
+func (t *playlistsTab) loaded(rows []core.PlaylistStatus, inputs []core.InputStatus) {
+	t.loading = false
+	if t.again {
+		t.again = false
+		t.refresh()
+		return
+	}
 	sel := ""
 	if p := t.selected(); p != nil {
 		sel = p.Name
 	}
-	rows := t.a.m.Playlists()
 	if len(rows) != len(t.rows) {
 		t.list.reset(func() { t.rows = rows })
 	} else {
@@ -258,20 +279,26 @@ func (t *playlistsTab) refresh() {
 		}
 	}
 	inRow := t.inputs.CurrentRow()
-	t.inRows = t.a.m.Inputs()
-	t.inputs.Clear()
-	for _, in := range t.inRows {
-		s := in.Path
-		if !in.Enabled {
-			s = "(off)  " + s
-		}
-		if in.Err != "" {
-			s += "  —  " + in.Err
-		}
-		t.inputs.AddItem(s)
+	same := len(inputs) == len(t.inRows)
+	for i := 0; same && i < len(inputs); i++ {
+		same = inputs[i] == t.inRows[i]
 	}
-	if inRow >= 0 && inRow < len(t.inRows) {
-		t.inputs.SetCurrentRow(inRow)
+	if !same {
+		t.inRows = inputs
+		t.inputs.Clear()
+		for _, in := range t.inRows {
+			s := in.Path
+			if !in.Enabled {
+				s = "(off)  " + s
+			}
+			if in.Err != "" {
+				s += "  —  " + in.Err
+			}
+			t.inputs.AddItem(s)
+		}
+		if inRow >= 0 && inRow < len(t.inRows) {
+			t.inputs.SetCurrentRow(inRow)
+		}
 	}
 	if len(t.rows) == 0 && len(t.inRows) == 0 {
 		t.stack.SetCurrentIndex(0)

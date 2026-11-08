@@ -31,18 +31,56 @@ func (a *app) pickIndexers() {
 	top.AddWidget2(find.QWidget, 1)
 	top.AddWidget(music.QWidget)
 	box.AddLayout(top.QLayout)
-	table := table("On", "Site", "Language", "Music", "Searches", "Last problem")
-	table.HorizontalHeader().SetSectionResizeMode2(1, qt.QHeaderView__Stretch)
-	table.SetColumnWidth(0, 34)
-	table.SetColumnWidth(5, 220)
-	box.AddWidget2(table.QWidget, 1)
+	table := a.newTable("indexers", column{title: "On", width: 44}, column{title: "Site", width: 330, flex: true}, column{title: "Language", width: 90},
+		column{title: "Music", width: 60}, column{title: "Searches", width: 130}, column{title: "Last problem", width: 220})
+	box.AddWidget2(table.view.QWidget, 1)
 	info := qt.NewQLabel2()
 	info.SetWordWrap(true)
 	box.AddWidget(info.QWidget)
 
 	var rows []core.IndexerStatus
+	var settings map[string]map[string]string
+	table.key = func(r int) string { return rows[r].ID }
+	table.count = func() int { return len(rows) }
+	table.text = func(r, c int) string {
+		x := rows[r]
+		switch c {
+		case 0:
+			if x.On {
+				return "✓"
+			}
+			return "·"
+		case 1:
+			name := x.Name
+			if x.Default {
+				name += " ★"
+			}
+			if x.Login {
+				if len(settings[x.ID]) > 0 {
+					name += " 🔑"
+				} else {
+					name += " (needs your account)"
+				}
+			}
+			return name
+		case 2:
+			return x.Language
+		case 3:
+			if x.Music {
+				return "♪"
+			}
+		case 4:
+			if x.Health != nil {
+				return fmt.Sprintf("%d (%d errors)", x.Health.Searches, x.Health.Errors)
+			}
+		case 5:
+			if x.Health != nil {
+				return x.Health.LastErr
+			}
+		}
+		return ""
+	}
 	fill := func() {
-		r := table.CurrentRow()
 		rows = rows[:0]
 		q := strings.ToLower(strings.TrimSpace(find.Text()))
 		for _, x := range a.m.Indexers() {
@@ -54,47 +92,16 @@ func (a *app) pickIndexers() {
 			}
 			rows = append(rows, x)
 		}
-		table.SetRowCount(len(rows))
-		settings := a.m.Config().Indexers.Settings
-		for i, x := range rows {
-			on, name := "·", x.Name
-			if x.On {
-				on = "✓"
-			}
-			if x.Default {
-				name += " ★"
-			}
-			if x.Login {
-				if len(settings[x.ID]) > 0 {
-					name += " 🔑"
-				} else {
-					name += " (needs your account)"
-				}
-			}
-			m := ""
-			if x.Music {
-				m = "♪"
-			}
-			searches, problem := "", ""
-			if x.Health != nil {
-				searches = fmt.Sprintf("%d (%d errors)", x.Health.Searches, x.Health.Errors)
-				problem = x.Health.LastErr
-			}
-			for c, text := range []string{on, name, x.Language, m, searches, problem} {
-				table.SetItem(i, c, cell(text))
-			}
-		}
-		if r >= 0 && r < len(rows) {
-			table.SelectRow(r)
-		}
+		settings = a.m.Config().Indexers.Settings
+		table.reload()
 	}
 	selected := func() *core.IndexerStatus {
-		if r := table.CurrentRow(); r >= 0 && r < len(rows) {
+		if r := table.current(); r >= 0 && r < len(rows) {
 			return &rows[r]
 		}
 		return nil
 	}
-	table.OnCurrentCellChanged(func(int, int, int, int) {
+	table.onSelect(func() {
 		if x := selected(); x != nil {
 			text := x.Name + " · " + x.Site + "\n" + x.Description
 			if x.Login {
@@ -115,7 +122,7 @@ func (a *app) pickIndexers() {
 		}
 		fill()
 	}
-	table.OnCellDoubleClicked(func(int, int) { toggle() })
+	table.onActivate(func(int) { toggle() })
 	find.OnTextChanged(func(string) { fill() })
 	music.OnToggled(func(bool) { fill() })
 

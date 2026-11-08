@@ -3,6 +3,14 @@
 Everything in the app lives in the sidebar on the left. You can get by with the first two
 items; the rest are there when you want them.
 
+## At a glance
+
+![Dashboard](img/dashboard.png)
+
+**Dashboard** is where the app opens: how fast things are downloading and being shared, how far
+your songs have come, and what's taking up the disk. Click a row under **Your songs** to see those
+songs in Downloads.
+
 ## Finding music
 
 ![Find music](img/find.png)
@@ -33,10 +41,18 @@ You can close the app at any time. It remembers where it stopped.
 ## What you already have
 
 **My library** is the list of folders where you keep music, so it isn't downloaded twice. They
-are only ever read: the app never creates, changes, moves or deletes anything in them.
+are only read; the one exception is Sort & merge, when you press Apply.
 **What counts as good enough** decides whether a copy you have is fine, or whether a clearly
 better one should be fetched. **Upgrade my library** goes looking for better copies of your
 lower-quality files; they go to your downloads folder, and your originals stay.
+
+## Tidying up
+
+**Sort & merge** turns your library and downloads into one tidy library: every song in
+Artist / Album / 01 - Song, and worse copies of songs you have moved to a folder of their own. It
+takes three steps. **Make a plan** only reads your files. You then see every file's old and new
+place, and every duplicate with the reason. **Apply this plan** is the only step that moves
+anything. Nothing is deleted, and **Undo** puts everything back, even after restarting the app.
 
 ## Where music comes from
 
@@ -66,7 +82,7 @@ window. Changes save as you make them.
 
 | Keys | |
 |---|---|
-| Ctrl+1 … Ctrl+8 | go to a page |
+| Ctrl+1 … Ctrl+9, Ctrl+0 | go to a page |
 | Ctrl+F | find music |
 | Shift+P | pause or resume everything |
 | F1 | help |

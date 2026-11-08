@@ -24,6 +24,7 @@ type Backend interface {
 	Overview() Overview
 	Jobs() []JobView
 	Queue(q QueueQuery) []JobView
+	QueueKeys(q QueueQuery) ([]string, map[string]int) // light: keys in order, and the counts per filter
 	QueueCounts() map[string]int
 	JobView(key string) (JobView, bool)
 	Cancel(key string)
@@ -66,6 +67,21 @@ type Backend interface {
 	RefreshIndexers(ctx context.Context) (changed int, err error)
 	BandcampMailStatus() (pending int, problem string)
 	AddBandcampLinks(text string) (found, added int, errs []string)
+
+	// Sort & merge: sorting folders into Artist/Album and moving duplicates aside.
+	SortDefaults() SortOptions
+	SortStatus() SortView
+	SortPlan(o SortOptions) error // reads only
+	SortMoves(kind, text string) []SortMove
+	SortDuplicates() []SortDuplicate
+	SortApply(id string) error // "" is the current plan
+	SortUndo(id string) error
+	SortCancel()
+	SortDiscard()
+	SortHistory() []SortPlanInfo
+
+	// At a glance.
+	Dashboard() DashboardView
 
 	// Soulseek.
 	SoulseekStatus() SoulseekView

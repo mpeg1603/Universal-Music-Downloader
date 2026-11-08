@@ -32,6 +32,7 @@ func (m *Manager) importInputs() {
 		}
 	}
 	m.mergeAdditions(lib)
+	lib.trim()
 	m.libMu.Lock()
 	if old := m.full; old != nil {
 		for k, t := range lib.Tracks { // keep earlier Deezer lookups
@@ -111,7 +112,7 @@ func (m *Manager) makeJobs() {
 	for i, t := range lib.Ordered() {
 		j := m.jobs[t.Key]
 		if j == nil {
-			j = &Job{Track: t, tried: map[string]bool{}}
+			j = &Job{Track: t}
 			m.initJob(j, recordFor(recs, t))
 		}
 		j.mu.Lock()
@@ -165,7 +166,7 @@ func (m *Manager) initJob(j *Job, rec Record) {
 	switch rec.Status {
 	case "downloaded":
 		if _, err := os.Stat(rec.Path); err == nil && filepath.IsAbs(rec.Path) {
-			j.state, j.rec = JobDone, rec
+			j.state, j.rec = JobDone, &rec
 			return
 		}
 		j.state = JobQueued
@@ -181,7 +182,7 @@ func (m *Manager) initJob(j *Job, rec Record) {
 // reevaluateLibrary checks the jobs not yet downloaded against the library: tracks you have in
 // good enough quality are skipped; ones you have in lower quality are only downloaded if a
 // source offers better. With tens of thousands of tracks this is a lot of fuzzy matching, so it
-// runs on every core (and one check at a time); it stops when the app does.
+// runs on several cores (and one check at a time); it stops when the app does.
 func (m *Manager) reevaluateLibrary() {
 	if m.index == nil {
 		return
@@ -198,7 +199,12 @@ func (m *Manager) reevaluateLibrary() {
 	start := time.Now()
 	var next, n atomic.Int64
 	var wg sync.WaitGroup
-	for range runtime.NumCPU() {
+	m.index.beginCheck()
+	defer func() {
+		m.index.endCheck()
+		releaseMemory()
+	}()
+	for range max(1, runtime.NumCPU()/2) { // leaves room for everything else on the computer
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -327,24 +333,20 @@ func (m *Manager) Playlists() []PlaylistStatus {
 	m.libMu.RLock()
 	pls := append([]*Playlist(nil), m.full.Playlists...)
 	m.libMu.RUnlock()
-	m.jobsMu.Lock()
-	jobs := m.jobs
-	states := map[string]JobState{}
-	for k, j := range jobs {
-		j.mu.Lock()
-		states[k] = j.state
-		j.mu.Unlock()
-	}
-	m.jobsMu.Unlock()
 	var out []PlaylistStatus
+	m.jobsMu.Lock()
+	defer m.jobsMu.Unlock()
 	for _, p := range pls {
 		pc := cfg.Playlists[p.Name]
 		s := PlaylistStatus{Name: p.Name, Enabled: !pc.Disabled, Priority: pc.Priority, Tracks: len(p.Keys)}
 		for _, k := range p.Keys {
-			st, ok := states[k]
-			if !ok {
+			j := m.jobs[k]
+			if j == nil {
 				continue
 			}
+			j.mu.Lock()
+			st := j.state
+			j.mu.Unlock()
 			switch {
 			case st == JobDone:
 				s.Done++

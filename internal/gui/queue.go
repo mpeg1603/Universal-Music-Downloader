@@ -3,13 +3,13 @@ package gui
 import (
 	"fmt"
 	"html"
-	"path/filepath"
+	"slices"
 	"strings"
-	"time"
 
 	"universal-music-downloader/internal/core"
 
 	qt "github.com/mappu/miqt/qt6"
+	"github.com/mappu/miqt/qt6/mainthread"
 )
 
 // The Downloads page: every track, with what's happening to it. The list reads its rows from
@@ -48,11 +48,13 @@ type queueTab struct {
 	dOpen                  *qt.QPushButton
 	paneKey                string
 
-	q    core.QueueQuery
-	rows []core.JobView
+	q     core.QueueQuery
+	keys  []string             // the tracks shown, in order
+	views map[int]core.JobView // the rows drawn lately; the others aren't read at all
 
-	lastFull time.Time  // the last time every row was read
-	later    *qt.QTimer // a full read put off (they're at most once a second)
+	loading, again, wantReset bool
+	moreSources               []string // the "came from" filters offered under More
+	reread                    *throttle
 }
 
 func newQueueTab(a *app) *queueTab {
@@ -87,7 +89,10 @@ func newQueueTab(a *app) *queueTab {
 	})
 	t.reverse.SetCheckable(true)
 	p.actions.AddWidget(t.reverse.QWidget)
-	p.actions.AddWidget(a.iconButton("folder", "Open folder", "", "Open your downloads folder", func() { openPath(a.m.Config().OutputDir) }).QWidget)
+	t.retry = a.iconButton("refresh", "Try again", "", "Search again for every song that wasn't found (Shift+R)", t.retryAll)
+	t.retry.Hide()
+	p.actions.AddWidget(t.retry.QWidget)
+	p.actions.AddWidget(a.iconButton("folder", "", "ghost", "Open your downloads folder", func() { openPath(a.m.Config().OutputDir) }).QWidget)
 
 	t.progress = qt.NewQProgressBar2()
 	t.progress.SetTextVisible(false)
@@ -131,25 +136,31 @@ func newQueueTab(a *app) *queueTab {
 		}
 	}
 	t.more.OnActivated(func(i int) {
-		if i > 0 && i < len(t.moreKeys) {
-			t.q.Filter = t.moreKeys[i]
-			group.SetExclusive(false)
-			for _, b := range t.chips {
-				b.SetChecked(false)
-			}
-			group.SetExclusive(true)
-			t.refresh(true)
+		if i <= 0 {
+			return
 		}
+		switch {
+		case i < len(t.moreKeys):
+			t.q.Filter, t.q.Source = t.moreKeys[i], ""
+		case i-len(t.moreKeys) < len(t.moreSources):
+			t.q.Filter, t.q.Source = "done", t.moreSources[i-len(t.moreKeys)]
+		default:
+			return
+		}
+		group.SetExclusive(false)
+		for _, b := range t.chips {
+			b.SetChecked(false)
+		}
+		group.SetExclusive(true)
+		t.refresh(true)
 	})
 	bar.AddWidget(t.more.QWidget)
 	bar.AddStretch()
-	t.retry = a.iconButton("refresh", "Try again", "", "Search again for every song that wasn't found (Shift+R)", t.retryAll)
-	t.retry.Hide()
-	t.retry.SetSizePolicy2(qt.QSizePolicy__Fixed, qt.QSizePolicy__Fixed)
-	bar.AddWidget(t.retry.QWidget)
 	p.box.AddLayout(bar.QLayout)
 
-	t.list = newRowList(58, func() int { return len(t.rows) }, t.draw)
+	t.views = map[int]core.JobView{}
+	t.reread = newThrottle(t.w.QObject, 1000, func() { t.refresh(false) })
+	t.list = newRowList(queueRowHeight, func() int { return len(t.keys) }, t.draw)
 	t.list.onSelect(func(int) { t.showPane() })
 	t.list.onActivate(t.showPane)
 	t.list.onMenu(t.menu)
@@ -245,11 +256,31 @@ func (t *queueTab) buildPane() *qt.QWidget {
 
 // --- drawing a row ------------------------------------------------------------------------------
 
+const queueRowHeight = 58
+
+// viewAt is a row's track, read when it's first drawn.
+func (t *queueTab) viewAt(row int) (core.JobView, bool) {
+	if v, ok := t.views[row]; ok {
+		return v, true
+	}
+	if row < 0 || row >= len(t.keys) {
+		return core.JobView{}, false
+	}
+	v, ok := t.a.m.JobView(t.keys[row])
+	if ok {
+		if len(t.views) > 200 {
+			clear(t.views)
+		}
+		t.views[row] = v
+	}
+	return v, ok
+}
+
 func (t *queueTab) draw(c *rowCtx) {
-	if c.row >= len(t.rows) {
+	v, ok := t.viewAt(c.row)
+	if !ok {
 		return
 	}
-	v := t.rows[c.row]
 	f := drawFonts
 	p := c.p
 	icon, color, soft := stateVisual(v)
@@ -273,7 +304,7 @@ func (t *queueTab) draw(c *rowCtx) {
 	} else if detail != "" {
 		drawText(p, rx, c.y+30, right, 18, qt.AlignRight|qt.AlignVCenter, detail, f.small, f.mSmall, th.Text3)
 	}
-	if c.row < len(t.rows)-1 && !c.selected {
+	if c.row < len(t.keys)-1 && !c.selected {
 		p.SetPen(col(th.Line))
 		p.DrawLine2(c.x+54, c.y+c.h-1, c.x+c.w-14, c.y+c.h-1)
 	}
@@ -377,8 +408,26 @@ func capitalized(s string) string {
 
 func (t *queueTab) focus() { t.list.view.SetFocus() }
 
+// setFilterFromOutside shows one filter's tracks, as the Dashboard's rows ask for.
+func (t *queueTab) setFilterFromOutside(name string) {
+	if b := t.chips[name]; b != nil {
+		b.SetChecked(true)
+		t.setFilter(name)
+		return
+	}
+	for i, key := range t.moreKeys {
+		if key == name {
+			t.more.SetCurrentIndex(i)
+			t.q.Filter, t.q.Source = name, ""
+			t.chips["all"].SetChecked(false)
+			t.refresh(true)
+			return
+		}
+	}
+}
+
 func (t *queueTab) setFilter(name string) {
-	t.q.Filter = name
+	t.q.Filter, t.q.Source = name, ""
 	if name == "all" {
 		t.q.Filter = ""
 	}
@@ -391,7 +440,7 @@ func (t *queueTab) clearFilters() {
 		t.hidePane()
 		return
 	}
-	if t.q.Playlist == "" && t.q.Text == "" && t.q.Filter == "" {
+	if t.q.Playlist == "" && t.q.Text == "" && t.q.Filter == "" && t.q.Source == "" {
 		return
 	}
 	t.q.Playlist = ""
@@ -400,59 +449,63 @@ func (t *queueTab) clearFilters() {
 	t.setFilter("all")
 }
 
-// changed reads every row again when the queue changed, at most once a second.
-func (t *queueTab) changed() {
-	if wait := time.Second - time.Since(t.lastFull); wait > 0 {
-		if t.later == nil {
-			t.later = qt.NewQTimer2(t.w.QObject)
-			t.later.SetSingleShot(true)
-			t.later.OnTimeout(func() { t.refresh(false) })
-		}
-		if !t.later.IsActive() {
-			t.later.Start(int(wait.Milliseconds()) + 1)
-		}
+// changed reads the list again when the queue changed, at most once a second.
+func (t *queueTab) changed() { t.reread.poke() }
+
+// refresh reads the list again, away from the window's thread so it never stutters; reset: the
+// filter or order changed (the list goes back to the top).
+func (t *queueTab) refresh(reset bool) {
+	t.wantReset = t.wantReset || reset
+	if t.loading {
+		t.again = true
 		return
 	}
-	t.refresh(false)
+	t.loading = true
+	q := t.q
+	go func() {
+		keys, counts := t.a.m.QueueKeys(q)
+		mainthread.Start(func() { t.loaded(keys, counts) })
+	}()
 }
 
-// refresh reads the rows again; reset: the filter or order changed (the selection may go).
-func (t *queueTab) refresh(reset bool) {
-	t.lastFull = time.Now()
+func (t *queueTab) loaded(keys []string, counts map[string]int) {
+	t.loading = false
+	if t.again { // out of date already: what you asked for meanwhile comes first
+		t.again = false
+		t.refresh(false)
+		return
+	}
 	sel := t.selected()
-	rows := t.a.m.Queue(t.q)
-	if reset || len(rows) != len(t.rows) {
-		t.list.reset(func() { t.rows = rows })
-		if sel != "" {
-			for i, v := range t.rows {
-				if v.Key == sel {
-					t.list.selectRow(i)
-					break
-				}
-			}
+	clear(t.views)
+	if t.wantReset || len(keys) != len(t.keys) {
+		bar := t.list.view.VerticalScrollBar().Value()
+		t.list.reset(func() { t.keys = keys })
+		if !t.wantReset {
+			t.list.view.VerticalScrollBar().SetValue(bar)
 		}
+		t.wantReset = false
+		t.reselect(sel)
 	} else {
-		t.rows = rows
+		t.keys = keys
 		t.list.redraw()
-	}
-	counts := t.a.m.QueueCounts()
-	for name, b := range t.chips {
-		b.SetText(fmt.Sprintf("%s  %d", chipWords[name], counts[name]))
-	}
-	for i, key := range t.moreKeys {
-		if i > 0 {
-			t.more.SetItemText(i, fmt.Sprintf("%s (%d)", filterWords[key], counts[key]))
+		if r := t.list.current(); sel != "" && r >= 0 && r < len(keys) && keys[r] != sel {
+			t.reselect(sel)
 		}
 	}
+	for name, b := range t.chips {
+		b.SetText(chipWords[name] + " " + compactCount(counts[name]))
+		b.SetToolTip(fmtCount(counts[name]) + " songs")
+	}
+	t.updateMore(counts)
 	t.retry.SetVisible(counts["failed"] > 0)
 	if t.q.Playlist != "" {
-		t.noticeT.SetText(fmt.Sprintf("Showing the playlist “%s”: %d songs", t.q.Playlist, len(t.rows)))
+		t.noticeT.SetText(fmt.Sprintf("Showing the playlist “%s”: %d songs", t.q.Playlist, len(t.keys)))
 		t.notice.Show()
 	} else {
 		t.notice.Hide()
 	}
 	switch {
-	case len(t.rows) > 0:
+	case len(t.keys) > 0:
 		t.stack.SetCurrentIndex(0)
 	case counts["all"] == 0:
 		t.stack.SetCurrentIndex(1)
@@ -461,6 +514,44 @@ func (t *queueTab) refresh(reset bool) {
 	}
 	if t.pane.IsVisible() {
 		t.fillPane()
+	}
+}
+
+// reselect finds the track that was selected, after the list changed under it.
+func (t *queueTab) reselect(key string) {
+	if key == "" {
+		return
+	}
+	if i := slices.Index(t.keys, key); i >= 0 {
+		t.list.selectRow(i)
+	}
+}
+
+// updateMore keeps the numbers under More, and offers each source tracks came from.
+func (t *queueTab) updateMore(counts map[string]int) {
+	var sources []string
+	for k := range counts {
+		if name, ok := strings.CutPrefix(k, "from:"); ok {
+			sources = append(sources, name)
+		}
+	}
+	slices.SortFunc(sources, func(a, b string) int { return counts["from:"+b] - counts["from:"+a] })
+	if !slices.Equal(sources, t.moreSources) {
+		t.moreSources = sources
+		for t.more.Count() > len(t.moreKeys) {
+			t.more.RemoveItem(t.more.Count() - 1)
+		}
+		for _, name := range sources {
+			t.more.AddItem("Came from " + core.FirstNonEmpty(core.SourceLabels[name], name))
+		}
+	}
+	for i, key := range t.moreKeys {
+		if i > 0 {
+			t.more.SetItemText(i, fmt.Sprintf("%s (%d)", filterWords[key], counts[key]))
+		}
+	}
+	for i, name := range sources {
+		t.more.SetItemText(len(t.moreKeys)+i, fmt.Sprintf("Came from %s (%d)", core.FirstNonEmpty(core.SourceLabels[name], name), counts["from:"+name]))
 	}
 }
 
@@ -492,18 +583,20 @@ func (t *queueTab) tick(o core.Overview) {
 		}
 	}
 	t.page.sub.SetText(strings.Join(parts, "  ·  "))
-	if t.a.current() != pageDownloads || len(t.rows) == 0 {
+	if t.a.current() != pageDownloads || len(t.keys) == 0 {
 		return
 	}
 	first, last := t.visible()
+	moved := false
 	for i := first; i <= last; i++ {
-		if t.rows[i].State.Active() {
-			if v, ok := t.a.m.JobView(t.rows[i].Key); ok {
-				t.rows[i] = v
-			}
+		if v, ok := t.viewAt(i); ok && v.State.Active() {
+			delete(t.views, i) // read again for this drawing
+			moved = true
 		}
 	}
-	t.list.redraw()
+	if moved {
+		t.list.redraw()
+	}
 	if t.pane.IsVisible() && t.paneKey != "" {
 		if v, ok := t.a.m.JobView(t.paneKey); ok && v.State.Active() {
 			t.fillPane()
@@ -514,15 +607,14 @@ func (t *queueTab) tick(o core.Overview) {
 // visible is the range of rows on screen.
 func (t *queueTab) visible() (int, int) {
 	v := t.list.view
-	h := 58
-	first := max(0, v.VerticalScrollBar().Value()/h)
-	last := first + v.Viewport().Height()/h + 1
-	return first, min(last, len(t.rows)-1)
+	first := max(0, v.VerticalScrollBar().Value()/queueRowHeight)
+	last := first + v.Viewport().Height()/queueRowHeight + 1
+	return first, min(last, len(t.keys)-1)
 }
 
 func (t *queueTab) selected() string {
-	if r := t.list.current(); r >= 0 && r < len(t.rows) {
-		return t.rows[r].Key
+	if r := t.list.current(); r >= 0 && r < len(t.keys) {
+		return t.keys[r]
 	}
 	return ""
 }
@@ -636,9 +728,12 @@ func (t *queueTab) fillPane() {
 	if len(v.Playlists) > 0 {
 		fmt.Fprintf(&b, "<p><b>From:</b> %s</p>", e(strings.Join(v.Playlists, ", ")))
 	}
+	if tr.SpotifyURL != "" {
+		fmt.Fprintf(&b, "<p><a style='color:%s' href='%s'>Open in Spotify</a></p>", th.Accent, e(tr.SpotifyURL))
+	}
 	if v.State == core.JobDone {
 		r := v.Rec
-		fmt.Fprintf(&b, "<p><b>Saved as:</b> %s</p><p><b>Quality:</b> %s<br><b>Came from:</b> %s</p>", e(filepath.Base(r.Path)), e(r.Quality.String()), e(core.SourceLabels[r.Source]))
+		fmt.Fprintf(&b, "<p><b>Saved as:</b> %s</p><p><b>Quality:</b> %s<br><b>Came from:</b> %s</p>", e(r.Path), e(r.Quality.String()), e(core.SourceLabels[r.Source]))
 		if r.SourceURL != "" && strings.HasPrefix(r.SourceURL, "http") {
 			fmt.Fprintf(&b, "<p><a style='color:%s' href='%s'>Open the source page</a></p>", th.Accent, e(r.SourceURL))
 		}
@@ -652,6 +747,9 @@ func (t *queueTab) fillPane() {
 			s = fmt.Sprintf("%d copies; the best", v.LibCount)
 		}
 		fmt.Fprintf(&b, "<p><b>In your library</b> (%s): %s<br>%s</p>", s, e(v.Lib.Q.String()), e(v.Lib.Path))
+		if v.NeedBetter && v.State != core.JobInLibrary {
+			b.WriteString("<p>It's below the quality you chose, so it's only downloaded if a source has it in better quality.</p>")
+		}
 	}
 	if v.State == core.JobWaiting {
 		fmt.Fprintf(&b, "<p>The app will try again at %s by itself.</p>", v.RetryAt.Format("15:04"))
@@ -688,7 +786,7 @@ func firstWords(s string, n int) string {
 // showPlaylist shows one playlist's tracks.
 func (t *queueTab) showPlaylist(name string) {
 	t.q.Playlist = name
-	t.q.Filter = ""
+	t.q.Filter, t.q.Source = "", ""
 	t.chips["all"].SetChecked(true)
 	t.refresh(true)
 	t.a.show(pageDownloads)
