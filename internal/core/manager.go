@@ -135,13 +135,14 @@ type Manager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	tools    *Tools
-	proxy    *LocalProxy
-	index    *LibIndex
-	state    *State
-	deezer   *Deezer
-	resolver *Resolver  // plain-text list lines → tracks
-	adds     *additions // what you added from the Search tab
+	tools       *Tools
+	proxy       *LocalProxy
+	index       *LibIndex
+	state       *State
+	deezer      *Deezer
+	resolver    *Resolver    // plain-text list lines → tracks
+	indexerDefs *indexerDefs // built-in torrent indexers (Jackett's definitions)
+	adds        *additions   // what you added from the Search tab
 
 	libMu     sync.RWMutex
 	full      *Library
@@ -210,6 +211,7 @@ func NewManager(cfgPath, dataDir string, cfg Config) *Manager {
 	m.bcMail.onLink = m.bandcampLinkArrived
 	m.resolver = newResolver(m.deezer, filepath.Join(dataDir, "cache", "catalog.json"))
 	m.adds = loadAdditions(filepath.Join(dataDir, "added.json"))
+	m.indexerDefs = loadIndexerDefs(filepath.Join(dataDir, "cache", "indexers"))
 	for _, n := range allSources {
 		m.health[healthKey(n)] = &sourceHealth{}
 	}
@@ -459,9 +461,9 @@ func (m *Manager) initialTarget(c Config) int {
 
 func sourcesChanged(a, b Config) bool {
 	ja, jb := fmt.Sprint(a.Sources, a.Torznab, a.Cookies, a.CookiesFromBrowser, a.YtDlpPath, a.VKToken,
-		a.YandexToken, a.Bandcamp, a.Format, a.TorrentTimeout, a.IndexerTimeout, a.YouTubePace, a.DirectInterface, a.Soulseek),
+		a.YandexToken, a.Bandcamp, a.Format, a.TorrentTimeout, a.IndexerTimeout, a.YouTubePace, a.DirectInterface, a.Soulseek, a.Indexers),
 		fmt.Sprint(b.Sources, b.Torznab, b.Cookies, b.CookiesFromBrowser, b.YtDlpPath, b.VKToken,
-			b.YandexToken, b.Bandcamp, b.Format, b.TorrentTimeout, b.IndexerTimeout, b.YouTubePace, b.DirectInterface, b.Soulseek)
+			b.YandexToken, b.Bandcamp, b.Format, b.TorrentTimeout, b.IndexerTimeout, b.YouTubePace, b.DirectInterface, b.Soulseek, b.Indexers)
 	return ja != jb
 }
 
@@ -616,7 +618,7 @@ func (m *Manager) youtubeCookies(cfg Config, bin string) *ytCookies {
 
 func (m *Manager) setupTorrentIfNeeded(cfg Config) {
 	sc := cfg.Source("torrent")
-	key := fmt.Sprint(cfg.Torznab, cfg.TorrentTimeout, cfg.IndexerTimeout, cfg.Format)
+	key := fmt.Sprint(cfg.Torznab, cfg.Indexers, cfg.TorrentTimeout, cfg.IndexerTimeout, cfg.Format, sc.Route)
 	m.srcMu.RLock()
 	same := m.torKey == key && (m.torrent != nil || m.srcErr["torrent"] != "")
 	m.srcMu.RUnlock()
@@ -631,23 +633,13 @@ func (m *Manager) setupTorrentIfNeeded(cfg Config) {
 	m.torKey = key
 	delete(m.srcErr, "torrent")
 	m.srcMu.Unlock()
-	if !cfg.Torznab.configured() {
-		m.setSrcErr("torrent", "needs your Jackett or Prowlarr address and API key (Sources → Torrent)")
-		return
-	}
-	if m.tools.Aria2c == "" {
-		m.setSrcErr("torrent", "the aria2c command wasn't found; install the aria2 package")
-		return
-	}
-	ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-	defer cancel()
-	feeds, err := resolveFeeds(ctx, cfg.Torznab, time.Duration(cfg.IndexerTimeout))
+	feeds, err := m.torrentFeeds(cfg)
 	if err != nil {
 		m.setSrcErr("torrent", err.Error())
 		Logf("Torrent: %v", err)
 		return
 	}
-	src := newTorrentSource(feeds, m.tools.Aria2c, filepath.Join(m.dataDir, "cache"), cfg.Format,
+	src := newTorrentSource(feeds, filepath.Join(m.dataDir, "cache"), cfg.Format,
 		time.Duration(cfg.TorrentTimeout), time.Duration(cfg.IndexerTimeout))
 	if tm, ok := src.dl.(*torrentManager); ok {
 		tm.jump = m.mayJump
@@ -656,6 +648,56 @@ func (m *Manager) setupTorrentIfNeeded(cfg Config) {
 	m.torrent = src
 	m.srcMu.Unlock()
 	Logf("Torrent: %d indexers", len(feeds))
+}
+
+// torrentFeeds makes the indexers torrents are searched on: the built-in ones you chose and
+// your Jackett or Prowlarr, if set.
+func (m *Manager) torrentFeeds(cfg Config) ([]*Torznab, error) {
+	route := NormalizeRoute(cfg.Source("torrent").Route)
+	ids := cfg.Indexers.enabled()
+	if len(ids) > 0 && (m.indexerDefs.count() == 0 || m.indexerDefs.stale()) {
+		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Minute)
+		n, err := m.indexerDefs.refresh(ctx, route)
+		cancel()
+		switch {
+		case err != nil && m.indexerDefs.count() == 0:
+			return nil, fmt.Errorf("couldn't fetch the indexer definitions from GitHub (%v); Jackett or Prowlarr can be set instead", err)
+		case err != nil:
+			Logf("Torrent: checking the indexer definitions for changes: %v", err)
+		case n > 0:
+			Logf("Torrent: %d indexer definitions fetched or updated", n)
+		}
+	}
+	flare := newFlareSolverr(cfg.Indexers.FlareSolverr)
+	var feeds []*Torznab
+	for _, id := range ids {
+		data := m.indexerDefs.get(id)
+		if data == nil {
+			continue
+		}
+		c, err := newCardigann(data, flare, route)
+		if err != nil {
+			Logf("Torrent: indexer %s: %v", id, err)
+			continue
+		}
+		feeds = append(feeds, newBuiltinFeed(c))
+	}
+	if cfg.Torznab.configured() {
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		ext, err := resolveFeeds(ctx, cfg.Torznab, time.Duration(cfg.IndexerTimeout))
+		cancel()
+		if err != nil && len(feeds) == 0 {
+			return nil, err
+		}
+		if err != nil {
+			Logf("Torrent: Jackett/Prowlarr: %v", err)
+		}
+		feeds = append(feeds, ext...)
+	}
+	if len(feeds) == 0 {
+		return nil, fmt.Errorf("no indexers chosen (Sources → Torrent → Enter)")
+	}
+	return feeds, nil
 }
 
 func (m *Manager) setSrcErr(name, msg string) {
@@ -1687,7 +1729,7 @@ func (m *Manager) RetryFailed(includeCancelled bool) int {
 
 // SetPaused pauses (or resumes) everything: searches and downloads in progress stop and go
 // back to the front of the queue, where they continue from the source they were at when you
-// resume; torrents are paused in aria2c, keeping what they have. Tracks being converted
+// resume; torrents are paused, keeping what they have. Tracks being converted
 // finish.
 func (m *Manager) SetPaused(p bool) {
 	if m.paused.Swap(p) == p {

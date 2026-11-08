@@ -50,6 +50,9 @@ type Backend interface {
 	SourceStatus() []SourceStatus
 	PauseSource(name string, paused bool)
 	TorrentFeeds() []FeedStatus
+	Indexers() []IndexerStatus // the built-in torrent indexers
+	SetIndexer(id string, on bool) error
+	RefreshIndexers(ctx context.Context) (changed int, err error)
 	BandcampMailStatus() (pending int, problem string)
 	AddBandcampLinks(text string) (found, added int, errs []string)
 

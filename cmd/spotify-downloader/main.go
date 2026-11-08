@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -124,12 +123,11 @@ func run(args []string) int {
 	pruneLogs(filepath.Join(*dataDir, "logs"), 20)
 
 	if *check {
-		aria2c, _ := exec.LookPath("aria2c")
 		query := *torrentQuery
 		if query == "" {
 			query = sampleAlbumQuery(filepath.Join(*dataDir, "library.json"))
 		}
-		if core.CheckTorrents(context.Background(), cfg.Torznab, aria2c, query) {
+		if core.CheckTorrents(context.Background(), cfg.Torznab, query) {
 			return 0
 		}
 		return 1

@@ -17,15 +17,14 @@ import (
 	"time"
 )
 
-// External programs: ffmpeg/ffprobe (required), yt-dlp (downloaded automatically) and
-// aria2c from the aria2 package (optional, only for torrents).
+// External programs: ffmpeg/ffprobe (required) and yt-dlp (downloaded automatically).
 
 type Tools struct {
-	FFmpeg, FFprobe, YtDlp, Aria2c string
-	JSRuntimes                     []string // passed to yt-dlp, which needs one for YouTube
+	FFmpeg, FFprobe, YtDlp string
+	JSRuntimes             []string // passed to yt-dlp, which needs one for YouTube
 }
 
-// findBaseTools finds ffmpeg, ffprobe, aria2c and a JavaScript runtime; yt-dlp is fetched
+// findBaseTools finds ffmpeg, ffprobe and a JavaScript runtime; yt-dlp is fetched
 // separately when a source needs it.
 func findBaseTools() (*Tools, error) {
 	t := &Tools{}
@@ -36,7 +35,6 @@ func findBaseTools() (*Tools, error) {
 	if t.FFprobe, err = exec.LookPath("ffprobe"); err != nil {
 		return nil, fmt.Errorf("ffprobe is not installed; it normally comes with ffmpeg")
 	}
-	t.Aria2c, _ = exec.LookPath("aria2c")
 	for _, rt := range []string{"deno", "node", "bun"} {
 		if _, err := exec.LookPath(rt); err == nil {
 			t.JSRuntimes = append(t.JSRuntimes, rt)

@@ -136,7 +136,7 @@ func TestJackettIndexerFeedsReportErrors(t *testing.T) {
 	if len(feeds) != 1 || feeds[0].Name != "Jackett: RuTracker.org" || !strings.HasSuffix(feeds[0].feed, "/indexers/rutracker/results/torznab/api") {
 		t.Fatalf("feeds: %+v", feeds)
 	}
-	src := newTorrentSource(feeds, "", t.TempDir(), "flac", time.Minute)
+	src := newTorrentSource(feeds, t.TempDir(), "flac", time.Minute)
 	_, err = src.Search(context.Background(), &Track{Title: "NYC", Artists: []string{"Interpol"}, Album: "Turn On The Bright Lights"})
 	if err == nil || !isUnavailable(err) || !strings.Contains(err.Error(), "login failed") {
 		t.Errorf("search error: %v", err)

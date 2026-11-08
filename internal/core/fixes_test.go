@@ -302,13 +302,13 @@ func TestDeadTorrentsAreRemembered(t *testing.T) {
 		w.WriteHeader(404)
 	}))
 	defer srv.Close()
-	s := newTorrentSource(nil, "", t.TempDir(), "flac", time.Minute)
+	s := newTorrentSource(nil, t.TempDir(), "flac", time.Minute)
 	r := torrentResult{Title: "Dead Album", Link: srv.URL + "/dl/1", Details: "https://tracker/1"}
 	if _, err := s.meta(context.Background(), r); err == nil {
 		t.Fatal("no error")
 	}
 	// A new source (as after a restart) doesn't ask again.
-	s2 := newTorrentSource(nil, "", filepath.Dir(s.dir), "flac", time.Minute)
+	s2 := newTorrentSource(nil, filepath.Dir(s.dir), "flac", time.Minute)
 	_, err := s2.meta(context.Background(), r)
 	if err == nil || !strings.Contains(err.Error(), "tried") || hits.Load() != 1 {
 		t.Errorf("%v, %d requests", err, hits.Load())

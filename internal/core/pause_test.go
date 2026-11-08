@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -175,12 +174,8 @@ func TestBusySourceIsSkippedForNow(t *testing.T) {
 	}
 }
 
-// Pausing stops a running torrent in aria2c (it keeps what it has) and resumes it.
-func TestRealAria2cPause(t *testing.T) {
-	aria2c, err := exec.LookPath("aria2c")
-	if err != nil {
-		t.Skip("aria2c not installed")
-	}
+// Pausing stops a running torrent (it keeps what it has) and resumes it.
+func TestTorrentPause(t *testing.T) {
 	name := "Pause Artist - Pause Album"
 	files := []string{"01 - Only Song.mp3"}
 	contents := [][]byte{bytes.Repeat([]byte{'p'}, 400_000)}
@@ -195,7 +190,7 @@ func TestRealAria2cPause(t *testing.T) {
 	torrentFile := filepath.Join(t.TempDir(), "album.torrent")
 	os.WriteFile(torrentFile, makeTorrent(name, files, contents, webseed.URL+"/"), 0o644)
 
-	m := newTorrentManager(newAria2(aria2c), t.TempDir(), 2*time.Minute)
+	m := newTorrentManager(newBTEngine(), t.TempDir(), 2*time.Minute)
 	m.gather = 100 * time.Millisecond
 	defer m.close()
 	task := &Task{Track: &Track{Title: "Only Song"}}

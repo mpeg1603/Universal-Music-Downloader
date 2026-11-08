@@ -9,7 +9,7 @@ import (
 )
 
 // The bandwidth cap applies to all downloads together. Downloads made by this program (HTTP,
-// HLS, and yt-dlp's through the local proxy) draw from one token bucket; torrents run in aria2c,
+// HLS, and yt-dlp's through the local proxy) draw from one token bucket; torrents run in the torrent client,
 // whose own overall limit is set to what the other downloads leave over, and vice versa. The
 // cap is also the target: the scheduler adds downloads while the total stays below it.
 
@@ -117,8 +117,8 @@ func (l *limitedReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// sample updates the measured speeds; torrent is aria2c's current overall download speed.
-// It returns the limit to give aria2c (0: none).
+// sample updates the measured speeds; torrent is the torrent client's current overall
+// download speed. It returns the limit to give the torrent client (0: none).
 func (b *Bandwidth) sample(torrent float64) float64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -884,7 +884,9 @@ func TestSoulseekSocial(t *testing.T) {
 	srv := newFakeSlskServer(t)
 	peer := newFakeSlskPeer(t, "remote")
 	peer.files[`Music\Deftones\White Pony\01 - Feiticeira.flac`] = []byte("x")
-	c := testSlskClient(t, srv, nil, func(c *SoulseekConfig) { c.Likes, c.Hates, c.Ignored = []string{"shoegaze"}, []string{"pop"}, []string{"pest"} })
+	c := testSlskClient(t, srv, nil, func(c *SoulseekConfig) {
+		c.Likes, c.Hates, c.Ignored = []string{"shoegaze"}, []string{"pop"}, []string{"pest"}
+	})
 	srv.mu.Lock()
 	srv.addrs["remote"] = slskAddr{ip: net.IPv4(127, 0, 0, 1), port: peer.port()}
 	srv.mu.Unlock()

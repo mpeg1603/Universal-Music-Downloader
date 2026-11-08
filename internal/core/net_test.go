@@ -293,7 +293,7 @@ func TestTorrentSearchDoesntWaitForSlowIndexers(t *testing.T) {
 		newTorznabFeed("slow", srv.URL+"/slow/api", "k", 3*time.Second),
 		newTorznabFeed("broken", srv.URL+"/broken/api", "k", 3*time.Second),
 	}
-	src := newTorrentSource(feeds, "", t.TempDir(), "flac", time.Minute, 3*time.Second)
+	src := newTorrentSource(feeds, t.TempDir(), "flac", time.Minute, 3*time.Second)
 	src.grace = 300 * time.Millisecond
 	for i := 0; i < 3; i++ {
 		start := time.Now()
@@ -313,7 +313,7 @@ func TestTorrentSearchDoesntWaitForSlowIndexers(t *testing.T) {
 		t.Errorf("health: %+v", st)
 	}
 	// Cached on disk: a new source (next run) answers without asking the indexers.
-	src2 := newTorrentSource([]*Torznab{newTorznabFeed("broken", srv.URL+"/broken/api", "k", time.Second)}, "", src.cacheDir[:len(src.cacheDir)-len("/torrent-searches")], "flac", time.Minute)
+	src2 := newTorrentSource([]*Torznab{newTorznabFeed("broken", srv.URL+"/broken/api", "k", time.Second)}, src.cacheDir[:len(src.cacheDir)-len("/torrent-searches")], "flac", time.Minute)
 	if res, err := src2.searchAll(context.Background(), "interpol antics 0"); err != nil || len(res) != 1 {
 		t.Errorf("cached: %v %v", res, err)
 	}

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -264,7 +263,7 @@ func TestTorrentSourceInEngine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := newTorrentSource(feeds, "", t.TempDir(), "mp3", time.Minute)
+	src := newTorrentSource(feeds, t.TempDir(), "mp3", time.Minute)
 	fetcher := &fakeFetcher{content: tone}
 	src.dl = fetcher
 	lucky := GetLucky()
@@ -450,7 +449,7 @@ func torrentSourceFor(t *testing.T, srv *httptest.Server, format string, f torre
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := newTorrentSource(feeds, "", t.TempDir(), format, time.Minute)
+	src := newTorrentSource(feeds, t.TempDir(), format, time.Minute)
 	src.dl = f
 	return src
 }
@@ -475,7 +474,7 @@ func TestTracksFoundAlongInATorrent(t *testing.T) {
 	dance := numbered("Lose Yourself to Dance", "Daft Punk", "Random Access Memories", 7)
 	contact := numbered("Contact", "Daft Punk", "Random Access Memories", 13)
 	cover := numbered("Get Lucky", "Someone Else", "Covers", 8)
-	src := newTorrentSource(nil, "", t.TempDir(), "flac", time.Minute)
+	src := newTorrentSource(nil, t.TempDir(), "flac", time.Minute)
 	got := src.alongside(c, lucky, []*Track{give, dance, contact, cover})
 	if len(got) != 2 || got[give.Key].Ref != meta.file+"#1" || got[dance.Key].Ref != meta.file+"#2" {
 		t.Fatalf("found along: %+v", got)
@@ -493,7 +492,7 @@ func TestTracksFoundAlongInATorrent(t *testing.T) {
 	if got := src.alongside(c, lucky, []*Track{give, omt}); len(got) != 1 || got[give.Key].Ref != meta.file+"#1" {
 		t.Errorf("lossless: %+v", got)
 	}
-	mp3 := newTorrentSource(nil, "", t.TempDir(), "mp3", time.Minute)
+	mp3 := newTorrentSource(nil, t.TempDir(), "mp3", time.Minute)
 	if got := mp3.alongside(c, lucky, []*Track{give, omt}); len(got) != 2 || got[omt.Key].Ref != meta.file+"#2" {
 		t.Errorf("mp3: %+v", got)
 	}
@@ -643,14 +642,10 @@ func (t throttled) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// TestRealAria2cDownloads drives the real aria2c (when installed) over RPC, on a torrent
-// served by a slow local web seed: two files requested together share one download, a third
+// TestTorrentDownloads drives the built-in torrent client on a torrent served by a slow local
+// web seed: two files requested together share one download, a third
 // requested while it runs joins that download, and the file nobody wants isn't fetched.
-func TestRealAria2cDownloads(t *testing.T) {
-	aria2c, err := exec.LookPath("aria2c")
-	if err != nil {
-		t.Skip("aria2c not installed")
-	}
+func TestTorrentDownloads(t *testing.T) {
 	name := "Test Artist - Test Album"
 	files := []string{"01 - First Song.mp3", "02 - Second Song.mp3", "03 - Third Song.mp3", "04 - Fourth Song.mp3"}
 	var contents [][]byte
@@ -678,7 +673,7 @@ func TestRealAria2cDownloads(t *testing.T) {
 	os.WriteFile(torrentFile, makeTorrent(name, files, contents, webseed.URL+"/"), 0o644)
 
 	downloads := t.TempDir()
-	m := newTorrentManager(newAria2(aria2c), downloads, 2*time.Minute)
+	m := newTorrentManager(newBTEngine(), downloads, 2*time.Minute)
 	m.gather = 300 * time.Millisecond
 	defer m.close()
 	type result struct {
@@ -709,7 +704,7 @@ func TestRealAria2cDownloads(t *testing.T) {
 	started := m.started
 	m.mu.Unlock()
 	if started != 1 {
-		t.Errorf("%d aria2c downloads for one torrent, want 1", started)
+		t.Errorf("%d downloads for one torrent, want 1", started)
 	}
 	if n := served[files[3]].Load(); n > 32768 {
 		t.Errorf("%d bytes of the unwanted file were downloaded", n)
@@ -720,13 +715,9 @@ func TestRealAria2cDownloads(t *testing.T) {
 	}
 }
 
-// TestAria2cRestartKeepsFinishedFiles adds a file to a running download after another file
-// was finished and handed over: aria2c restarts the download, which must leave that file alone.
-func TestAria2cRestartKeepsFinishedFiles(t *testing.T) {
-	aria2c, err := exec.LookPath("aria2c")
-	if err != nil {
-		t.Skip("aria2c not installed")
-	}
+// TestTorrentAddKeepsFinishedFiles adds a file to a running download after another file was
+// finished and handed over: that file must be left alone.
+func TestTorrentAddKeepsFinishedFiles(t *testing.T) {
 	name := "Test Artist - Other Album"
 	files := []string{"01 - Short.mp3", "02 - Long.mp3", "03 - Late.mp3"}
 	contents := [][]byte{bytes.Repeat([]byte("s"), 40_000), bytes.Repeat([]byte("l"), 700_000), bytes.Repeat([]byte("t"), 60_000)}
@@ -743,7 +734,7 @@ func TestAria2cRestartKeepsFinishedFiles(t *testing.T) {
 	torrentFile := filepath.Join(t.TempDir(), "album.torrent")
 	os.WriteFile(torrentFile, makeTorrent(name, files, contents, webseed.URL+"/"), 0o644)
 
-	m := newTorrentManager(newAria2(aria2c), t.TempDir(), 2*time.Minute)
+	m := newTorrentManager(newBTEngine(), t.TempDir(), 2*time.Minute)
 	m.gather = 200 * time.Millisecond
 	defer m.close()
 	ctx := context.Background()
@@ -789,14 +780,10 @@ func TestAria2cRestartKeepsFinishedFiles(t *testing.T) {
 	}
 }
 
-// TestAria2cWaitsForTracksOnTheirWay: a download about to start waits for the files of tracks
+// TestTorrentWaitsForTracksOnTheirWay: a download about to start waits for the files of tracks
 // known to be coming (expect), so they go into it instead of restarting it later, and stops
 // waiting as soon as the last of them arrives or drops out (unexpect).
-func TestAria2cWaitsForTracksOnTheirWay(t *testing.T) {
-	aria2c, err := exec.LookPath("aria2c")
-	if err != nil {
-		t.Skip("aria2c not installed")
-	}
+func TestTorrentWaitsForTracksOnTheirWay(t *testing.T) {
 	name := "Test Artist - Third Album"
 	files := []string{"01 - One.mp3", "02 - Two.mp3", "03 - Three.mp3"}
 	var contents [][]byte
@@ -813,7 +800,7 @@ func TestAria2cWaitsForTracksOnTheirWay(t *testing.T) {
 	torrentFile := filepath.Join(t.TempDir(), "album.torrent")
 	os.WriteFile(torrentFile, makeTorrent(name, files, contents, webseed.URL+"/"), 0o644)
 
-	m := newTorrentManager(newAria2(aria2c), t.TempDir(), 2*time.Minute)
+	m := newTorrentManager(newBTEngine(), t.TempDir(), 2*time.Minute)
 	m.gather, m.maxGather, m.along = 200*time.Millisecond, 600*time.Millisecond, 40*time.Second
 	defer m.close()
 	m.expect(torrentFile, 1)
@@ -860,19 +847,14 @@ func TestCheckTorrents(t *testing.T) {
 	name := "Daft Punk - Random Access Memories (2013) [MP3]"
 	srv := fakeIndexer(t, name, []string{"01 - Give Life Back to Music.mp3", "cover.jpg"}, nil, nil)
 	defer srv.Close()
-	fake := filepath.Join(t.TempDir(), "aria2c")
-	os.WriteFile(fake, []byte("#!/bin/sh\necho 'aria2 version 1.37.0'\n"), 0o755)
 	ctx := context.Background()
-	if !CheckTorrents(ctx, TorrentConfig{Feeds: []string{srv.URL}, Key: "secret"}, fake, "Daft Punk Random Access Memories") {
+	if !CheckTorrents(ctx, TorrentConfig{Feeds: []string{srv.URL}, Key: "secret"}, "Daft Punk Random Access Memories") {
 		t.Error("a working setup should pass")
 	}
-	if CheckTorrents(ctx, TorrentConfig{Feeds: []string{srv.URL}, Key: "wrong"}, fake, "Daft Punk Random Access Memories") {
+	if CheckTorrents(ctx, TorrentConfig{Feeds: []string{srv.URL}, Key: "wrong"}, "Daft Punk Random Access Memories") {
 		t.Error("a wrong API key should fail")
 	}
-	if CheckTorrents(ctx, TorrentConfig{Feeds: []string{srv.URL}, Key: "secret"}, "", "Daft Punk Random Access Memories") {
-		t.Error("missing aria2c should fail")
-	}
-	if CheckTorrents(ctx, TorrentConfig{}, fake, "x") {
+	if CheckTorrents(ctx, TorrentConfig{}, "x") {
 		t.Error("no configuration should fail")
 	}
 }

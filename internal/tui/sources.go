@@ -111,7 +111,7 @@ var sourceHelp = map[string]string{
 	"youtube_music": "Official \"song\" uploads, found by ISRC and by artist + title (Opus ~130 kbps). If YouTube asks to sign in (bot check), set \"Cookies from browser\" in its settings.",
 	"soundcloud":    "Public SoundCloud tracks; 30-second previews are detected and rejected.",
 	"youtube":       "Regular YouTube uploads (Opus ~130 kbps). Shares the bot-check pause and cookies with YouTube Music.",
-	"torrent":       "Your Jackett or Prowlarr indexers, downloaded with aria2c (only the file needed). Indexers that keep failing are left out for a while instead of slowing every search.",
+	"torrent":       "Torrents, searched on built-in indexers (Jackett's public site definitions; Enter chooses which) and, if you like, your own Jackett or Prowlarr, and downloaded by the built-in client (only the file needed; no seeding afterwards). Indexers that keep failing are left out for a while instead of slowing every search. Sites behind Cloudflare's browser check need FlareSolverr.",
 	"audius":        "Audius, an open platform where artists upload their own music (much independent electronic music). Full tracks as MP3 320; no account needed. Tracks for paying fans only are left out.",
 	"soulseek":      "Soulseek, a file-sharing network where people share their music folders, often in FLAC. The client is built in: Enter sets your account (a new name and password make a new account; or import it from Nicotine+), sharing and limits. Searches are paced and only a few files are requested at once, as the network asks. The Soulseek tab searches the network by hand, shows transfers and chat; tracks no source had go on its wishlist.",
 }
@@ -250,8 +250,13 @@ func (ui *tui) sourceSettings() {
 			"temporary copy: your browser and your cookies file are never written to. A browser, when set, is used instead of the file.", 0, 4, false, false)
 		height = 24
 	case "torrent":
-		text("Jackett / Prowlarr address(es), comma-separated", strings.Join(c.Torznab.Feeds, ", "), 60, func(c *core.Config, v string) { c.Torznab.Feeds = core.SplitList(v) })
-		secret("API key", c.Torznab.Key, func(c *core.Config, v string) { c.Torznab.Key = v })
+		builtin := !c.Indexers.NoBuiltin
+		form.AddCheckbox("Built-in indexers", builtin, func(b bool) { builtin = b })
+		apply = append(apply, func(c *core.Config) { c.Indexers.NoBuiltin = !builtin })
+		text("FlareSolverr address (for Cloudflare's checks)", c.Indexers.FlareSolverr, 40, func(c *core.Config, v string) { c.Indexers.FlareSolverr = v })
+		text("Jackett / Prowlarr address(es), optional", strings.Join(c.Torznab.Feeds, ", "), 60, func(c *core.Config, v string) { c.Torznab.Feeds = core.SplitList(v) })
+		secret("Jackett / Prowlarr API key", c.Torznab.Key, func(c *core.Config, v string) { c.Torznab.Key = v })
+		form.AddButton("Choose indexers…", func() { ui.pickIndexers() })
 		dur := func(label string, d core.Duration, set func(*core.Config, core.Duration)) {
 			v := time.Duration(d).String()
 			form.AddInputField(label, v, 10, nil, func(t string) { v = t })
@@ -263,7 +268,7 @@ func (ui *tui) sourceSettings() {
 		}
 		dur("Give up on an indexer search after", c.IndexerTimeout, func(c *core.Config, d core.Duration) { c.IndexerTimeout = d })
 		dur("Give up on a torrent download after", c.TorrentTimeout, func(c *core.Config, d core.Duration) { c.TorrentTimeout = d })
-		height = 21
+		height = 25
 	case "vk":
 		secret("Token", c.VKToken, func(c *core.Config, v string) { c.VKToken = v })
 		form.AddButton("Log in to get a token…", func() { close(); ui.vkLogin() })
@@ -600,4 +605,111 @@ func (ui *tui) soulseekSettings(sk core.SoulseekConfig, route string) {
 	form.SetCancelFunc(close)
 	form.SetBorder(true).SetTitle(" Soulseek settings (Tab moves · Esc closes) ")
 	ui.openModal(name, form, 110, min(max(ui.height-4, 20), form.GetFormItemCount()+5))
+}
+
+// pickIndexers lists the built-in indexers: Enter or space turns one on or off.
+func (ui *tui) pickIndexers() {
+	const name = "indexers"
+	t := tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
+	info := tview.NewTextView().SetDynamicColors(true).SetWrap(true)
+	musicOnly := true
+	var rows []core.IndexerStatus
+	fill := func() {
+		row, _ := t.GetSelection()
+		t.Clear()
+		headerRow(t, "On", "Indexer", "Language", "Music", "Searches", "Last problem")
+		rows = rows[:0]
+		for _, x := range ui.m.Indexers() {
+			if musicOnly && !x.Music && !x.On {
+				continue
+			}
+			rows = append(rows, x)
+		}
+		for i, x := range rows {
+			on, color := "·", tcell.ColorGray
+			if x.On {
+				on, color = "✓", tcell.ColorGreen
+			}
+			music := ""
+			if x.Music {
+				music = "♪"
+			}
+			searches, problem := "", ""
+			if x.Health != nil {
+				searches = fmt.Sprintf("%d (%d errors)", x.Health.Searches, x.Health.Errors)
+				problem = x.Health.LastErr
+			}
+			name := x.Name
+			if x.Default {
+				name += " ★"
+			}
+			cells := []*tview.TableCell{
+				tview.NewTableCell(on).SetTextColor(color),
+				tview.NewTableCell(tview.Escape(name)).SetExpansion(1).SetMaxWidth(40),
+				tview.NewTableCell(x.Language),
+				tview.NewTableCell(music).SetTextColor(tcell.ColorAqua),
+				tview.NewTableCell(searches).SetAlign(tview.AlignRight),
+				tview.NewTableCell(tview.Escape(core.FitWidth(problem, 50))).SetTextColor(tcell.ColorOrange),
+			}
+			for c, cell := range cells {
+				t.SetCell(i+1, c, cell)
+			}
+		}
+		if len(rows) == 0 {
+			t.SetCell(1, 1, tview.NewTableCell("[yellow]No definitions yet: u fetches them from GitHub (Jackett's)[-]").SetSelectable(false))
+		}
+		t.Select(min(max(row, 1), max(1, len(rows))), 0)
+	}
+	show := func() {
+		row, _ := t.GetSelection()
+		if row >= 1 && row-1 < len(rows) {
+			x := rows[row-1]
+			info.SetText(fmt.Sprintf("[::b]%s[::-] · %s\n%s", tview.Escape(x.Name), tview.Escape(x.Site), tview.Escape(x.Description)))
+		}
+	}
+	t.SetSelectionChangedFunc(func(int, int) { show() })
+	toggle := func() {
+		row, _ := t.GetSelection()
+		if row >= 1 && row-1 < len(rows) {
+			if err := ui.m.SetIndexer(rows[row-1].ID, !rows[row-1].On); err != nil {
+				ui.message("Indexers", err.Error())
+			}
+			fill()
+		}
+	}
+	t.SetSelectedFunc(func(int, int) { toggle() })
+	t.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		switch {
+		case ev.Key() == tcell.KeyEscape || ev.Rune() == 'q':
+			ui.closeModal(name)
+		case ev.Rune() == ' ':
+			toggle()
+		case ev.Rune() == 'a':
+			musicOnly = !musicOnly
+			fill()
+		case ev.Rune() == 'u':
+			info.SetText("[yellow]Fetching Jackett's definitions from GitHub…[-]")
+			go func() {
+				ctx, cancel := context.WithTimeout(ui.m.Context(), 3*time.Minute)
+				defer cancel()
+				n, err := ui.m.RefreshIndexers(ctx)
+				ui.app.QueueUpdateDraw(func() {
+					if err != nil {
+						info.SetText("[red]" + tview.Escape(err.Error()) + "[-]")
+					} else {
+						info.SetText(fmt.Sprintf("[green]%d definitions new or changed.[-]", n))
+					}
+					fill()
+				})
+			}()
+		default:
+			return ev
+		}
+		return nil
+	})
+	fill()
+	show()
+	box := tview.NewFlex().SetDirection(tview.FlexRow).AddItem(t, 0, 1, true).AddItem(info, 3, 0, false)
+	box.SetBorder(true).SetTitle(" Built-in indexers (Enter/space: on/off · ★ default · ♪ has music · a: all/music only · u: update from GitHub · Esc) ")
+	ui.openModal(name, box, 120, min(max(ui.height-4, 16), 40))
 }

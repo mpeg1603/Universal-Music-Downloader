@@ -101,6 +101,7 @@ type Config struct {
 	YouTubePace        float64     `json:"youtube_pace_seconds"` // minimum gap between YouTube requests
 
 	Torznab        TorrentConfig `json:"torznab"`
+	Indexers       IndexerConfig `json:"indexers"`
 	TorrentTimeout Duration      `json:"torrent_timeout"`
 	IndexerTimeout Duration      `json:"indexer_timeout"`
 

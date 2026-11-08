@@ -10,11 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -26,7 +24,7 @@ import (
 )
 
 // Torrents as a download source. Searches go through Torznab, the API that Jackett and
-// Prowlarr expose for the indexers you add to them; downloads go through aria2c, fetching
+// Prowlarr expose for the indexers you add to them; downloads go through the built-in client, fetching
 // only the file needed and not seeding afterwards. See TORRENTS.md.
 
 // --- settings -------------------------------------------------------------------------------
@@ -74,7 +72,8 @@ func saveTorrentConfig(c TorrentConfig) error {
 
 type Torznab struct {
 	Name string
-	feed string // ends in /api
+	cg   *cardigann // a built-in indexer (else a Jackett/Prowlarr feed)
+	feed string     // ends in /api
 	key  string
 	http *HTTP
 	sem  chan struct{} // searches at once on this indexer
@@ -103,6 +102,11 @@ func newTorznabFeed(name, feed, key string, timeout time.Duration) *Torznab {
 	h := newHTTP("Torznab feed "+name, 0)
 	h.retries, h.timeout = 1, timeout // a slow indexer is skipped, not waited for again and again
 	return &Torznab{Name: name, feed: feed, key: key, http: h, sem: make(chan struct{}, 2)}
+}
+
+// newBuiltinFeed wraps a built-in indexer, so it's searched and watched like a feed.
+func newBuiltinFeed(c *cardigann) *Torznab {
+	return &Torznab{Name: c.def.Name, cg: c, sem: make(chan struct{}, 1)}
 }
 
 func (z *Torznab) available() bool {
@@ -229,7 +233,8 @@ func (z *Torznab) caps(ctx context.Context) error {
 type torrentResult struct {
 	Title, Link, Magnet, Details string
 	InfoHash                     string
-	Seeders                      int // -1 when the indexer doesn't say
+	Indexer                      string // a built-in indexer's ID (its link may be a details page)
+	Seeders                      int    // -1 when the indexer doesn't say
 	Size                         int64
 	Categories                   []int
 }
@@ -249,6 +254,16 @@ func (r torrentResult) id() string {
 }
 
 func (z *Torznab) search(ctx context.Context, query string) ([]torrentResult, error) {
+	if z.cg != nil {
+		res, err := z.cg.search(ctx, query)
+		var out []torrentResult
+		for _, r := range res {
+			if !notMusic(r.Categories) {
+				out = append(out, r)
+			}
+		}
+		return out, err
+	}
 	body, err := z.get(ctx, url.Values{"t": {"search"}, "q": {query}, "cat": {"3000"}, "limit": {"100"}})
 	if err != nil {
 		return nil, err
@@ -524,8 +539,8 @@ func bdecodeValue(b []byte) (any, []byte, error) {
 	return nil, nil, fmt.Errorf("unexpected byte %q", b[0])
 }
 
-// torrentFiles lists the files of a .torrent as slash paths relative to aria2c's --dir, in
-// the order aria2c's --select-file numbers them (from 1).
+// torrentFiles lists the files of a .torrent as slash paths relative to the download folder,
+// in the torrent's order.
 func torrentFiles(data []byte) ([]string, error) {
 	names, _, err := torrentFileList(data)
 	return names, err
@@ -895,8 +910,8 @@ type torrentMeta struct {
 
 type TorrentSource struct {
 	feeds    []*Torznab
-	aria2c   string
-	dir      string // cached .torrent files (kept between runs)
+	eng      *btEngine // the built-in torrent client
+	dir      string    // cached .torrent files (kept between runs)
 	lossless bool
 	client   *http.Client
 	dl       torrentFetcher
@@ -912,14 +927,15 @@ type TorrentSource struct {
 }
 
 // newTorrentSource makes the torrent source; extra[0] is the per-indexer search timeout.
-func newTorrentSource(feeds []*Torznab, aria2c, cacheDir, format string, timeout time.Duration, extra ...time.Duration) *TorrentSource {
+func newTorrentSource(feeds []*Torznab, cacheDir, format string, timeout time.Duration, extra ...time.Duration) *TorrentSource {
 	dir := filepath.Join(cacheDir, "torrents")
 	indexerTimeout := 20 * time.Second
 	if len(extra) > 0 && extra[0] > 0 {
 		indexerTimeout = extra[0]
 	}
+	eng := newBTEngine()
 	return &TorrentSource{
-		feeds: feeds, aria2c: aria2c, dir: dir, grace: 6 * time.Second, timeout: indexerTimeout,
+		feeds: feeds, eng: eng, dir: dir, grace: 6 * time.Second, timeout: indexerTimeout,
 		cacheDir: filepath.Join(cacheDir, "torrent-searches"),
 		lossless: format == "flac" || format == "original",
 		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -928,7 +944,7 @@ func newTorrentSource(feeds []*Torznab, aria2c, cacheDir, format string, timeout
 			}
 			return nil
 		}},
-		dl:       newTorrentManager(newAria2(aria2c), filepath.Join(dir, "downloads"), timeout),
+		dl:       newTorrentManager(eng, filepath.Join(dir, "downloads"), timeout),
 		searches: cache[[]torrentResult]{retryAfter: time.Minute},
 		metas:    cache[*torrentMeta]{retryAfter: 10 * time.Minute},
 	}
@@ -938,7 +954,7 @@ func (s *TorrentSource) Name() string        { return "torrent" }
 func (s *TorrentSource) Label() string       { return "Torrent" }
 func (s *TorrentSource) MaxQuality() Quality { return Quality{Codec: "flac", Lossless: true} }
 
-// Close stops aria2c.
+// Close stops the torrent client.
 func (s *TorrentSource) Close() { s.dl.close() }
 
 // pause pauses (or resumes) the torrent downloads, keeping what they have.
@@ -956,7 +972,7 @@ func (s *TorrentSource) FeedStatus() []FeedStatus {
 	return out
 }
 
-// speed is aria2c's overall download speed (bytes/s).
+// speed is the overall torrent download speed (bytes/s).
 func (s *TorrentSource) speed() float64 {
 	if g, ok := s.dl.(interface{ globalSpeed() float64 }); ok {
 		return g.globalSpeed()
@@ -964,7 +980,7 @@ func (s *TorrentSource) speed() float64 {
 	return 0
 }
 
-// setLimit sets aria2c's overall download limit (bytes/s, 0: none).
+// setLimit sets the overall torrent download limit (bytes/s, 0: none).
 func (s *TorrentSource) setLimit(bps float64) bool {
 	if g, ok := s.dl.(interface{ setGlobalLimit(float64) bool }); ok {
 		return g.setGlobalLimit(bps)
@@ -1357,7 +1373,7 @@ func (s *TorrentSource) expect(c Candidate, coming bool) {
 // each track it might hold, was most of what torrent searching did.
 const deadFor = 12 * time.Hour
 
-// meta gets a result's .torrent (from its link, or a magnet's metadata via aria2c) and file list.
+// meta gets a result's .torrent (from its link, or a magnet's metadata from the swarm) and file list.
 func (s *TorrentSource) meta(ctx context.Context, r torrentResult) (*torrentMeta, error) {
 	return s.metas.get(ctx, r.id(), func() (*torrentMeta, error) {
 		sum := sha1.Sum([]byte(r.id()))
@@ -1399,6 +1415,26 @@ func (s *TorrentSource) meta(ctx context.Context, r torrentResult) (*torrentMeta
 
 func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]byte, error) {
 	magnet := r.Magnet
+	if cg := s.builtin(r.Indexer); cg != nil && r.Link != "" && magnet == "" {
+		// A built-in indexer's link may be the details page: its download selectors find the
+		// real link there.
+		page, err := cg.fetch(ctx, "GET", r.Link, nil)
+		if err != nil {
+			return nil, err
+		}
+		if bytes.HasPrefix(page, []byte("d")) && bytes.Contains(page[:min(len(page), 64)], []byte(":info")) || bytes.HasPrefix(page, []byte("d8:announce")) {
+			return page, nil
+		}
+		link := cg.downloadLink(ctx, page)
+		switch {
+		case strings.HasPrefix(link, "magnet:"):
+			magnet = link
+		case link != "":
+			r.Link = link
+		default:
+			return nil, failf("no download link on the page of “%s”", r.Title)
+		}
+	}
 	if r.Link != "" {
 		req, _ := http.NewRequestWithContext(ctx, "GET", r.Link, nil)
 		req.Header.Set("User-Agent", userAgent)
@@ -1421,37 +1457,28 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 	if magnet == "" {
 		return nil, failf("couldn't get the torrent file for “%s”", r.Title)
 	}
-	if s.aria2c == "" {
-		return nil, failf("“%s” only has a magnet link, which needs aria2c", r.Title)
-	}
-	// Only a magnet link: ask the swarm for the torrent's metadata. Several of these run at
-	// once: each gets its own ports and DHT table (a copy of aria2c's), so they don't fight
-	// over them.
-	tmp, err := os.MkdirTemp("", "spotify-downloader-meta-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tmp)
-	dht := filepath.Join(tmp, "dht.dat")
-	if home, err := os.UserHomeDir(); err == nil {
-		if data, err := os.ReadFile(filepath.Join(home, ".cache", "aria2", "dht.dat")); err == nil {
-			os.WriteFile(dht, data, 0o600)
-		}
-	}
-	port := 20000 + mrand.IntN(40000)
+	// Only a magnet link: ask the swarm for the torrent's metadata.
 	mctx, cancel := context.WithTimeout(ctx, 50*time.Second)
 	defer cancel()
-	out, err := command(mctx, s.aria2c, "--dir="+tmp, "--bt-metadata-only=true", "--bt-save-metadata=true",
-		"--bt-stop-timeout=45", "--dht-entry-point=dht.transmissionbt.com:6881", "--bt-tracker-connect-timeout=15",
-		"--bt-tracker-timeout=30", "--listen-port="+strconv.Itoa(port), "--dht-listen-port="+strconv.Itoa(port+1),
-		"--dht-file-path="+dht, "--summary-interval=0", "--show-console-readout=false", "--console-log-level=error",
-		"--download-result=hide", magnet).CombinedOutput()
-	matches, _ := filepath.Glob(filepath.Join(tmp, "*.torrent"))
-	if len(matches) == 0 {
-		debugf("aria2c metadata fetch for %q failed: %v %s", r.Title, err, lastLines(string(out), 2))
+	data, err := s.eng.metadata(mctx, magnet)
+	if err != nil {
+		debugf("metadata for the magnet link of %q: %v", r.Title, err)
 		return nil, failf("no peers answered for the magnet link of “%s”", r.Title)
 	}
-	return os.ReadFile(matches[0])
+	return data, nil
+}
+
+// builtin finds a built-in indexer by its ID.
+func (s *TorrentSource) builtin(id string) *cardigann {
+	if id == "" {
+		return nil
+	}
+	for _, f := range s.feeds {
+		if f.cg != nil && f.cg.def.ID == id {
+			return f.cg
+		}
+	}
+	return nil
 }
 
 func (s *TorrentSource) Download(ctx context.Context, c Candidate, t *Track, workdir string) (string, error) {
@@ -1471,7 +1498,7 @@ func (s *TorrentSource) Download(ctx context.Context, c Candidate, t *Track, wor
 // --- setup check (--check-torrents) ------------------------------------------------------------
 
 // checkTorrents walks through the torrent setup step by step and explains what to fix.
-func CheckTorrents(ctx context.Context, cfg TorrentConfig, aria2c, query string) bool {
+func CheckTorrents(ctx context.Context, cfg TorrentConfig, query string) bool {
 	ok := func(format string, args ...any) {
 		fmt.Printf("  %s %s\n", Paint("32", "✓"), fmt.Sprintf(format, args...))
 	}
@@ -1482,14 +1509,6 @@ func CheckTorrents(ctx context.Context, cfg TorrentConfig, aria2c, query string)
 	fmt.Println("Checking the torrent setup (TORRENTS.md explains each step):")
 
 	good := true
-	if aria2c == "" {
-		bad("aria2c not found")
-		hint("install the aria2 package: sudo pacman -S aria2 (Arch) or sudo apt install aria2 (Debian/Ubuntu)")
-		good = false
-	} else {
-		v, _ := exec.CommandContext(ctx, aria2c, "--version").Output()
-		ok("%s (%s)", strings.SplitN(string(v), "\n", 2)[0], aria2c)
-	}
 
 	if !cfg.configured() {
 		bad("no Jackett or Prowlarr configured")
@@ -1524,7 +1543,7 @@ func CheckTorrents(ctx context.Context, cfg TorrentConfig, aria2c, query string)
 		return false
 	}
 	defer os.RemoveAll(tmp)
-	src := newTorrentSource(working, aria2c, tmp, "mp3", time.Minute)
+	src := newTorrentSource(working, tmp, "mp3", time.Minute)
 	results, err := src.searchAll(ctx, query)
 	if err != nil {
 		bad("searching for %q failed: %v", query, err)
