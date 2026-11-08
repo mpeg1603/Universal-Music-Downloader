@@ -60,6 +60,8 @@ type Backend interface {
 	PauseSource(name string, paused bool)
 	SetSourceEnabled(name string, on bool) error
 	MoveSource(name string, delta int) error // -1 up, +1 down
+	CheckSource(ctx context.Context, name string) ConnectionCheck
+	CheckIndexer(ctx context.Context, id string) ConnectionCheck
 	TorrentFeeds() []FeedStatus
 	Indexers() []IndexerStatus // the built-in torrent indexers
 	SetIndexer(id string, on bool) error

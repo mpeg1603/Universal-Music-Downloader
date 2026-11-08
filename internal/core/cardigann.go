@@ -143,11 +143,13 @@ type cardigann struct {
 	pace   *rateLimiter
 
 	loginMu   sync.Mutex
-	loggedIn  time.Time // when the last login worked (zero: not logged in)
-	loginErr  error     // why the last login failed
-	loginTry  time.Time // when it was tried
-	inLogin   bool      // fetches are part of the login
-	loginPath string    // the login page's path, to notice being sent back to it
+	loggedIn  time.Time     // when the last login worked (zero: not logged in)
+	loginErr  error         // why the last login failed
+	loginTry  time.Time     // when it was tried
+	loginWait time.Duration // how long after a failure to try again
+	loginDone chan struct{} // closed when the login under way ends
+	inLogin   bool          // fetches are part of the login
+	loginPath string        // the login page's path, to notice being sent back to it
 }
 
 // errCgLoggedOut: the site sent a request back to its login page (the session ended).
@@ -471,6 +473,7 @@ func (c *cardigann) searchOnce(ctx context.Context, query string) ([]torrentResu
 	var out []torrentResult
 	var firstErr error
 	tried := 0
+	seen := map[string]bool{}
 	for _, p := range c.def.Search.Paths {
 		if len(p.Categories) > 0 && !overlaps(p.Categories, c.audio) {
 			continue
@@ -478,7 +481,7 @@ func (c *cardigann) searchOnce(ctx context.Context, query string) ([]torrentResu
 		if tried++; tried > 2 { // the first pages are enough, and the site is spared
 			break
 		}
-		results, err := c.searchPath(ctx, p.Path, p.Method, p.Inputs, p.Response.Type, vars)
+		results, err := c.searchPath(ctx, p.Path, p.Method, p.Inputs, p.Response.Type, vars, seen)
 		if errors.Is(err, errCgLoggedOut) {
 			return nil, err
 		}
@@ -505,12 +508,35 @@ func overlaps(a, b []string) bool {
 	return false
 }
 
-func (c *cardigann) searchPath(ctx context.Context, path, method string, inputs map[string]string, kind string, vars map[string]any) ([]torrentResult, error) {
+// urlEncoded is vars with every value URL-encoded, for templates that go into a URL.
+func urlEncoded(v any) any {
+	switch x := v.(type) {
+	case string:
+		return url.QueryEscape(x)
+	case []string:
+		out := make([]string, len(x))
+		for i, s := range x {
+			out[i] = url.QueryEscape(s)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = urlEncoded(e)
+		}
+		return out
+	}
+	return v
+}
+
+func (c *cardigann) searchPath(ctx context.Context, path, method string, inputs map[string]string, kind string, vars map[string]any, seen map[string]bool) ([]torrentResult, error) {
 	u, err := url.Parse(c.site)
 	if err != nil {
 		return nil, err
 	}
-	ref, err := url.Parse(c.render(path, vars))
+	// As Jackett does: what's put into the path is URL-encoded, with %20 for spaces.
+	encoded := urlEncoded(vars).(map[string]any)
+	ref, err := url.Parse(strings.ReplaceAll(c.render(path, encoded), "+", "%20"))
 	if err != nil {
 		return nil, fmt.Errorf("bad search path: %w", err)
 	}
@@ -519,12 +545,11 @@ func (c *cardigann) searchPath(ctx context.Context, path, method string, inputs 
 	raw := ""
 	for _, in := range []map[string]string{c.def.Search.Inputs, inputs} {
 		for k, v := range in {
-			val := c.render(v, vars)
 			if k == "$raw" {
-				raw += val
+				raw += c.render(v, encoded)
 				continue
 			}
-			values.Set(k, val)
+			values.Set(k, c.render(v, vars))
 		}
 	}
 	var body io.Reader
@@ -545,6 +570,13 @@ func (c *cardigann) searchPath(ctx context.Context, path, method string, inputs 
 			u.RawQuery += raw
 		}
 	}
+	if !strings.EqualFold(method, "post") {
+		if seen[u.String()] {
+			return nil, nil // the same page as another search path
+		}
+		seen[u.String()] = true
+	}
+	vars[searchURLVar] = u // relative links in the results are relative to this page
 	data, err := c.fetch(ctx, strings.ToUpper(FirstNonEmpty(method, "get")), u.String(), body)
 	if err != nil {
 		return nil, err
@@ -601,7 +633,11 @@ func (c *cardigann) fetch(ctx context.Context, method, u string, body io.Reader)
 		// FlareSolverr makes the request in its browser (a login's POST too) and the page
 		// comes from there; its cookies (the site's session among them) go into the jar.
 		if f, ok := c.flare.(*flareSolverr); ok {
-			ans, err := f.request(ctx, method, u, bodyData)
+			// Not tied to the search: a solve takes longer than a search waits, and once it's
+			// done the cookies serve every later search.
+			solve, cancel := context.WithTimeout(context.WithoutCancel(ctx), 80*time.Second)
+			defer cancel()
+			ans, err := f.request(solve, method, u, bodyData)
 			if err != nil {
 				return nil, err
 			}
@@ -660,6 +696,9 @@ func (c *cardigann) fetchAgain(ctx context.Context, method, u string, body []byt
 	return data, nil
 }
 
+// searchURLVar is where a search keeps the address of the page being read.
+const searchURLVar = "searchURL"
+
 const browserUA = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
 
 // fieldValue works out one field of a result.
@@ -709,14 +748,16 @@ func (c *cardigann) rowResult(find func(cgSelector) (string, bool), vars map[str
 	}
 	get := func(k string) string { s, _ := res[k].(string); return s }
 	r := torrentResult{Title: get("title"), Seeders: -1, Indexer: c.def.ID}
+	base, _ := vars[searchURLVar].(*url.URL) // Jackett's too: relative to the page they're on
+	if base == nil {
+		base, _ = url.Parse(c.site)
+	}
 	abs := func(s string) string {
 		if s == "" || strings.HasPrefix(s, "magnet:") {
 			return s
 		}
-		if u, err := url.Parse(c.site); err == nil {
-			if ref, err := url.Parse(s); err == nil {
-				return u.ResolveReference(ref).String()
-			}
+		if ref, err := url.Parse(s); err == nil && base != nil {
+			return base.ResolveReference(ref).String()
 		}
 		return s
 	}
@@ -880,7 +921,7 @@ func (c *cardigann) parseJSON(data []byte, vars map[string]any) ([]torrentResult
 
 // downloadLink finds the torrent or magnet link on a details page, with the definition's
 // download selectors.
-func (c *cardigann) downloadLink(ctx context.Context, page []byte) string {
+func (c *cardigann) downloadLink(ctx context.Context, page []byte, pageURL string) string {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(page))
 	if err != nil {
 		return ""
@@ -899,7 +940,7 @@ func (c *cardigann) downloadLink(ctx context.Context, page []byte) string {
 			if strings.HasPrefix(v, "magnet:") {
 				return v
 			}
-			if u, err := url.Parse(c.site); err == nil {
+			if u, err := url.Parse(pageURL); err == nil {
 				if ref, err := url.Parse(v); err == nil {
 					return u.ResolveReference(ref).String()
 				}

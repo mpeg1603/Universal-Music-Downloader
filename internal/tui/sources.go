@@ -30,6 +30,8 @@ func (ui *tui) buildSources() tview.Primitive {
 		switch {
 		case ev.Rune() == ' ':
 			ui.update(func(c *core.Config) { c.SetSource(s.Name, !c.Source(s.Name).Enabled) })
+		case ev.Rune() == 't':
+			ui.testSource(s.Name)
 		case ev.Rune() == 'K' || (ev.Key() == tcell.KeyUp && ev.Modifiers()&(tcell.ModShift|tcell.ModAlt) != 0):
 			move = -1
 		case ev.Rune() == 'J' || (ev.Key() == tcell.KeyDown && ev.Modifiers()&(tcell.ModShift|tcell.ModAlt) != 0):
@@ -594,6 +596,22 @@ func (ui *tui) soulseekSettings(sk core.SoulseekConfig, route string) {
 	ui.openModal(name, form, 110, min(max(ui.height-4, 20), form.GetFormItemCount()+5))
 }
 
+// testSource checks that a source answers and says how it went.
+func (ui *tui) testSource(name string) {
+	ui.srcTable.SetTitle(" Testing… ")
+	go func() {
+		r := ui.m.CheckSource(ui.m.Context(), name)
+		ui.app.QueueUpdateDraw(func() {
+			ui.srcTable.SetTitle(" Sources, tried top to bottom ")
+			word := "Not working"
+			if r.OK {
+				word = "OK"
+			}
+			ui.message("Test: "+r.Name, word+": "+r.Detail)
+		})
+	}()
+}
+
 // pickIndexers lists the built-in indexers: Enter or space turns one on or off.
 func (ui *tui) pickIndexers() {
 	const name = "indexers"
@@ -602,10 +620,11 @@ func (ui *tui) pickIndexers() {
 	musicOnly := true
 	find := ""
 	var rows []core.IndexerStatus
+	tested := map[string]core.ConnectionCheck{}
 	fill := func() {
 		row, _ := t.GetSelection()
 		t.Clear()
-		headerRow(t, "On", "Indexer", "Language", "Music", "Searches", "Last problem")
+		headerRow(t, "On", "Indexer", "Language", "Music", "Searches", "Test, or last problem")
 		rows = rows[:0]
 		for _, x := range ui.m.Indexers() {
 			if musicOnly && !x.Music && !x.On {
@@ -630,6 +649,13 @@ func (ui *tui) pickIndexers() {
 				searches = fmt.Sprintf("%d (%d errors)", x.Health.Searches, x.Health.Errors)
 				problem = x.Health.LastErr
 			}
+			problemColor := tcell.ColorOrange
+			if r, ok := tested[x.ID]; ok {
+				problem, problemColor = r.Detail, tcell.ColorRed
+				if r.OK {
+					problemColor = tcell.ColorGreen
+				}
+			}
 			name := x.Name
 			if x.Default {
 				name += " ★"
@@ -647,7 +673,7 @@ func (ui *tui) pickIndexers() {
 				tview.NewTableCell(x.Language),
 				tview.NewTableCell(music).SetTextColor(tcell.ColorAqua),
 				tview.NewTableCell(searches).SetAlign(tview.AlignRight),
-				tview.NewTableCell(tview.Escape(core.FitWidth(problem, 50))).SetTextColor(tcell.ColorOrange),
+				tview.NewTableCell(tview.Escape(core.FitWidth(problem, 50))).SetTextColor(problemColor),
 			}
 			for c, cell := range cells {
 				t.SetCell(i+1, c, cell)
@@ -690,10 +716,38 @@ func (ui *tui) pickIndexers() {
 		}
 	}
 	t.SetSelectedFunc(func(int, int) { toggle(true) })
+	test := func(sites []core.IndexerStatus) {
+		sem := make(chan struct{}, 6)
+		for _, x := range sites {
+			tested[x.ID] = core.ConnectionCheck{OK: true, Detail: "testing…"}
+			go func() {
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				r := ui.m.CheckIndexer(ui.m.Context(), x.ID)
+				ui.app.QueueUpdateDraw(func() {
+					tested[x.ID] = r
+					fill()
+				})
+			}()
+		}
+		fill()
+	}
 	t.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		switch {
 		case ev.Key() == tcell.KeyEscape || ev.Rune() == 'q':
 			ui.closeModal(name)
+		case ev.Rune() == 't':
+			if row, _ := t.GetSelection(); row >= 1 && row-1 < len(rows) {
+				test([]core.IndexerStatus{rows[row-1]})
+			}
+		case ev.Rune() == 'T':
+			var on []core.IndexerStatus
+			for _, x := range ui.m.Indexers() {
+				if x.On {
+					on = append(on, x)
+				}
+			}
+			test(on)
 		case ev.Rune() == ' ':
 			toggle(false)
 		case ev.Rune() == 'a':
@@ -727,7 +781,7 @@ func (ui *tui) pickIndexers() {
 	fill()
 	show()
 	box := tview.NewFlex().SetDirection(tview.FlexRow).AddItem(t, 0, 1, true).AddItem(info, 3, 0, false)
-	box.SetBorder(true).SetTitle(" Built-in indexers (space: on/off · Enter: on/off, or the account · / find · ★ default · ♪ music · a: all/music · u: update · Esc) ")
+	box.SetBorder(true).SetTitle(" Built-in indexers (space: on/off · Enter: on/off, or the account · / find · ★ default · ♪ music · a: all/music · t: test · T: test all on · u: update · Esc) ")
 	ui.openModal(name, box, 120, min(max(ui.height-4, 16), 40))
 }
 

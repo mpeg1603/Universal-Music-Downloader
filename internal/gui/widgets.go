@@ -286,6 +286,8 @@ func newToggle(tip string, changed func(on bool)) *qt.QCheckBox {
 		p.End()
 		p.Delete()
 	})
+	// A check box only takes clicks on its little box and its label: this one is all switch.
+	b.OnHitButton(func(_ func(*qt.QPoint) bool, _ *qt.QPoint) bool { return true })
 	if changed != nil {
 		b.OnClicked(func() { changed(b.IsChecked()) })
 	}

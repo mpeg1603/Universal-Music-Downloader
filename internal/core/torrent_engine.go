@@ -75,7 +75,7 @@ func (e *btEngine) ensure(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return failf("torrents are shut down")
+		return unavailablef("torrents are shut down")
 	}
 	if e.cl != nil {
 		return nil
@@ -294,6 +294,20 @@ func (e *btEngine) close() {
 	}
 }
 
+// publicTrackers are Jackett's (MagnetUtil.cs), for magnet links made from a hash alone.
+var publicTrackers = []string{
+	"udp://tracker.opentrackr.org:1337/announce",
+	"udp://open.demonii.com:1337/announce",
+	"udp://open.stealth.si:80/announce",
+	"udp://tracker.torrent.eu.org:451/announce",
+	"udp://vito-tracker.space:6969/announce",
+	"udp://vito-tracker.duckdns.org:6969/announce",
+	"udp://tracker.theoks.net:6969/announce",
+	"udp://tracker.srv00.com:6969/announce",
+	"udp://tracker.qu.ax:6969/announce",
+	"udp://tracker.corpscorp.online:80/announce",
+}
+
 // metadata gets the .torrent of a magnet link from its peers.
 func (e *btEngine) metadata(ctx context.Context, magnet string) ([]byte, error) {
 	if err := e.ensure(ctx); err != nil {
@@ -308,8 +322,11 @@ func (e *btEngine) metadata(ctx context.Context, magnet string) ([]byte, error) 
 	}
 	defer t.Drop()
 	t.DisallowDataDownload()
+	t.AddTrackers([][]string{publicTrackers}) // sites often give just the hash
 	select {
 	case <-t.GotInfo():
+	case <-t.Closed():
+		return nil, unavailablef("torrents are shut down")
 	case <-ctx.Done():
 		return nil, failf("no peer sent the torrent's details in time")
 	}

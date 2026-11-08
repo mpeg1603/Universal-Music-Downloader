@@ -22,7 +22,9 @@ import (
 
 const (
 	cgLoginKeep  = 12 * time.Hour   // a session is trusted this long without a new login
-	cgLoginPause = 30 * time.Minute // after a failed login
+	cgLoginPause = 30 * time.Minute // after a login the site refused
+	cgLoginRetry = 5 * time.Minute  // after one that couldn't reach the site
+	cgLoginTime  = 3 * time.Minute  // the most a login may take
 )
 
 // NeedsLogin says whether the indexer needs your account.
@@ -35,31 +37,50 @@ func (c *cardigann) ensureLogin(ctx context.Context, force bool) error {
 		return nil
 	}
 	c.loginMu.Lock()
-	defer c.loginMu.Unlock()
 	if !force && !c.loggedIn.IsZero() && time.Since(c.loggedIn) < cgLoginKeep {
+		c.loginMu.Unlock()
 		return nil
 	}
-	if c.loginErr != nil && time.Since(c.loginTry) < cgLoginPause {
+	if c.loginErr != nil && time.Since(c.loginTry) < c.loginWait {
+		defer c.loginMu.Unlock()
 		return c.loginErr
 	}
-	c.loginTry = time.Now()
-	c.inLogin = true
+	done := c.loginDone
+	if done == nil { // nobody's at it yet
+		done = make(chan struct{})
+		c.loginDone, c.loginTry, c.inLogin = done, time.Now(), true
+		// On its own clock: through FlareSolverr a login takes a minute or so, much longer
+		// than a search waits, so tied to a search it could never finish.
+		go func() {
+			lctx, cancel := context.WithTimeout(context.Background(), cgLoginTime)
+			defer cancel()
+			err := c.login(lctx, l)
+			c.loginMu.Lock()
+			defer c.loginMu.Unlock()
+			c.inLogin, c.loginDone, c.loginErr = false, nil, err
+			switch {
+			case err == nil:
+				c.loggedIn = time.Now()
+				Logf("Torrent: logged in to %s", c.def.Name)
+			case isUnavailable(err): // never got an answer about the account: soon again
+				c.loggedIn, c.loginWait = time.Time{}, cgLoginRetry
+				Logf("Torrent: %v", err)
+			default:
+				c.loggedIn, c.loginWait = time.Time{}, cgLoginPause
+				Logf("Torrent: %v", err)
+			}
+			close(done)
+		}()
+	}
 	c.loginMu.Unlock()
-	err := c.login(ctx, l)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err() // not the site's fault; the login carries on
+	}
 	c.loginMu.Lock()
-	c.inLogin = false
-	if ctx.Err() != nil {
-		return ctx.Err() // not the site's fault: try again next time
-	}
-	c.loginErr = err
-	if err == nil {
-		c.loggedIn = time.Now()
-		Logf("Torrent: logged in to %s", c.def.Name)
-	} else {
-		c.loggedIn = time.Time{}
-		Logf("Torrent: %v", err)
-	}
-	return err
+	defer c.loginMu.Unlock()
+	return c.loginErr
 }
 
 func (c *cardigann) login(ctx context.Context, l *cgLogin) error {
@@ -91,6 +112,11 @@ func (c *cardigann) login(ctx context.Context, l *cgLogin) error {
 		values := url.Values{}
 		for k, v := range l.Inputs {
 			values.Set(k, c.render(v, vars))
+		}
+		if c.flare != nil {
+			// Past a browser check on the login page first, so that the form goes out as this
+			// app's own request: a browser sending it loses it while it's being checked.
+			c.fetch(ctx, "GET", page, nil)
 		}
 		data, err = c.fetch(ctx, "POST", page, strings.NewReader(c.encodeForm(values)))
 	case "form":

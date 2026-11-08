@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/text/encoding/charmap"
 )
@@ -149,7 +152,7 @@ func TestCardigann(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 2 || asked[0] != "/sort-search/daft+punk/seeders/1/" {
+	if len(res) != 2 || asked[0] != "/sort-search/daft%2Bpunk/seeders/1/" {
 		t.Fatalf("%+v %v", res, asked)
 	}
 	r := res[0]
@@ -161,7 +164,7 @@ func TestCardigann(t *testing.T) {
 		t.Error("the movie should be left out")
 	}
 	page, _ := c.fetch(ctx, "GET", r.Link, nil)
-	if link := c.downloadLink(ctx, page); link != srv.URL+"/get/ram.torrent" {
+	if link := c.downloadLink(ctx, page, srv.URL+"/torrent/1/"); link != srv.URL+"/get/ram.torrent" {
 		t.Errorf("download link %q", link)
 	}
 
@@ -435,4 +438,130 @@ func TestRuTrackerLive(t *testing.T) {
 		t.Fatalf("not a torrent file: %q", file[:min(len(file), 80)])
 	}
 	t.Logf("torrent file of the top result: %d bytes", len(file))
+}
+
+const relativeDef = `
+id: rel
+name: Rel
+type: public
+encoding: UTF-8
+links:
+  - SITE/
+caps:
+  categorymappings:
+    - {id: 1, cat: Audio, desc: "Music"}
+SETTINGS
+search:
+  paths:
+    - path: "forum/search/{{ .Keywords }}/"
+  rows:
+    selector: "tr.r"
+  fields:
+    title:
+      selector: a.t
+    download:
+      selector: a.d
+      attribute: href
+    size:
+      text: "1 MB"
+    seeders:
+      text: 1
+`
+
+// What Jackett does and a copy can miss: keywords are URL-encoded in a path, and a relative link
+// is relative to the page it's on, not to the site.
+func TestCardigannPathsLikeJackett(t *testing.T) {
+	var asked []string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.EscapedPath())
+		fmt.Fprint(w, `<table><tr class="r"><td><a class="t">Band - Album</a><a class="d" href="download.php?id=5">get</a></td></tr></table>`)
+	}))
+	defer srv.Close()
+	def := strings.ReplaceAll(strings.ReplaceAll(relativeDef, "SITE", srv.URL), "SETTINGS", "")
+	c, err := newCardigann([]byte(def), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.pace.interval = 0
+	res, err := c.search(context.Background(), "100% a/b?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/forum/search/100%25%20a%2Fb%3F/"; len(asked) != 1 || asked[0] != want {
+		t.Errorf("asked %v, want %s", asked, want)
+	}
+	if len(res) != 1 || res[0].Link != srv.URL+"/forum/search/100%25%20a%2Fb%3F/download.php?id=5" {
+		t.Errorf("%+v", res)
+	}
+}
+
+// A login is on its own clock: a search that gives up early doesn't stop it, and it isn't
+// done twice.
+func TestCardigannLoginOutlivesSearch(t *testing.T) {
+	var logins atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/login.php":
+			logins.Add(1)
+			time.Sleep(300 * time.Millisecond)
+			http.SetCookie(w, &http.Cookie{Name: "s", Value: "1", Path: "/"})
+		case r.URL.Path == "/index.php":
+			if _, err := r.Cookie("s"); err == nil {
+				fmt.Fprint(w, "logged-in")
+			}
+		default:
+			fmt.Fprint(w, `<table><tr class="r"><td><a class="t">Band</a><a class="d" href="a.torrent">get</a></td></tr></table>`)
+		}
+	}))
+	defer srv.Close()
+	login := "login:\n  path: login.php\n  method: post\n  inputs:\n    u: \"{{ .Config.username }}\"\n  test:\n    path: index.php\n    contains: logged-in\nsettings:\n  - {name: username, type: text}\n  - {name: password, type: password}"
+	def := strings.ReplaceAll(strings.ReplaceAll(relativeDef, "SITE", srv.URL), "SETTINGS", login)
+	c, err := newCardigannWith([]byte(def), nil, "", map[string]string{"username": "me", "password": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.pace.interval = 0
+	short, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := c.search(short, "band"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a short search: %v", err)
+	}
+	res, err := c.search(context.Background(), "band")
+	if err != nil || len(res) != 1 || logins.Load() != 1 {
+		t.Errorf("%d results, %v, %d logins", len(res), err, logins.Load())
+	}
+}
+
+func TestCheckFeed(t *testing.T) {
+	body := `<table><tr class="r"><td><a class="t">Band</a><a class="d" href="a.torrent">get</a></td></tr></table>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+	defer srv.Close()
+	c, err := newCardigann([]byte(strings.ReplaceAll(strings.ReplaceAll(relativeDef, "SITE", srv.URL), "SETTINGS", "")), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.pace.interval = 0
+	f := newBuiltinFeed(c)
+	if r := checkFeed(context.Background(), f); !r.OK || !strings.Contains(r.Detail, "1 results") {
+		t.Errorf("%+v", r)
+	}
+	body = "<table></table>"
+	if r := checkFeed(context.Background(), f); r.OK {
+		t.Errorf("an empty page counts as working: %+v", r)
+	}
+	srv.Close()
+	if r := checkFeed(context.Background(), f); r.OK || r.Detail == "" {
+		t.Errorf("a site that's down: %+v", r)
+	}
+}
+
+// When the sites can't keep up, a track goes elsewhere and comes back instead of waiting.
+func TestTorrentSearchLine(t *testing.T) {
+	s := &TorrentSource{lane: make(chan struct{}, 1)}
+	s.lane <- struct{}{}
+	if _, err := s.Search(context.Background(), MakeTrack("Song", []string{"Band"}, "", 4)); !isBusy(err) {
+		t.Errorf("%v", err)
+	}
 }

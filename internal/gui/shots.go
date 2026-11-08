@@ -325,10 +325,34 @@ func (s *shotter) playlists() {
 	}
 }
 
+// clickAt clicks a widget with the mouse, at a point inside it.
+func clickAt(w *qt.QWidget, o *qt.QObject, x, y float64) {
+	for _, kind := range []qt.QEvent__Type{qt.QEvent__MouseButtonPress, qt.QEvent__MouseButtonRelease} {
+		e := qt.NewQMouseEvent(kind, qt.NewQPointF3(x, y), qt.LeftButton, qt.LeftButton, qt.NoModifier)
+		qt.QCoreApplication_SendEvent(o, e.QEvent)
+	}
+	_ = w
+}
+
 func (s *shotter) sources() {
 	a, t := s.a, s.a.sources
 	a.show(pageSources)
 	pump(100 * time.Millisecond)
+	if len(t.cards) > 0 {
+		c := t.cards[0]
+		before := c.toggle.IsChecked()
+		clickAt(c.toggle.QWidget, c.toggle.QObject, 32, 11) // the far end of the switch
+		pump(150 * time.Millisecond)
+		if c.toggle.IsChecked() == before {
+			s.fail("clicking the far end of a source's switch did nothing")
+		}
+		clickAt(c.toggle.QWidget, c.toggle.QObject, 6, 11)
+		pump(150 * time.Millisecond)
+		if c.toggle.IsChecked() != before {
+			s.fail("clicking the near end of a source's switch did nothing")
+		}
+		fmt.Fprintln(os.Stderr, "source switches: answer clicks at both ends")
+	}
 	first := t.rows[0].Name
 	t.move(first, 1)
 	pump(100 * time.Millisecond)

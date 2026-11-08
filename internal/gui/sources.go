@@ -34,7 +34,8 @@ type sourceCard struct {
 	detail                *qt.QLabel
 	detailBtn             *qt.QPushButton
 	up, down              *qt.QPushButton
-	pause                 *qt.QPushButton
+	pause, testB          *qt.QPushButton
+	check                 *qt.QLabel
 	open                  bool
 }
 
@@ -45,6 +46,7 @@ func newSourcesTab(a *app) *sourcesTab {
 	t.paste = a.iconButton("link", "Paste Bandcamp links", "", "Some releases are waiting for the links Bandcamp emailed you", t.pasteBandcampLinks)
 	t.paste.Hide()
 	p.actions.AddWidget(t.paste.QWidget)
+	p.actions.AddWidget(a.iconButton("signal", "Test all", "", "Check that every source that's on answers", t.testAll).QWidget)
 	scroll, box, _ := scrolling()
 	box.SetSpacing(8)
 	t.box = box
@@ -90,6 +92,9 @@ func (t *sourcesTab) buildCard(name string) *sourceCard {
 	top.AddWidget(c.up.QWidget)
 	top.AddWidget(c.down.QWidget)
 	top.AddWidget(c.pause.QWidget)
+	c.testB = button("Test", "", func() { t.test(c) })
+	c.testB.SetToolTip("Check that this source answers")
+	top.AddWidget(c.testB.QWidget)
 	setup := button("Set up…", "", func() { t.settings(name) })
 	top.AddWidget(setup.QWidget)
 	box.AddLayout(top.QLayout)
@@ -104,6 +109,9 @@ func (t *sourcesTab) buildCard(name string) *sourceCard {
 	c.problem.SetTextFormat(qt.PlainText)
 	c.problem.Hide()
 	indent(c.problem)
+	c.check = richText("", "hint")
+	c.check.Hide()
+	indent(c.check)
 	statRow := hbox(48, 0, 0, 0)
 	statRow.SetSpacing(8)
 	c.stats = oneLine("", "muted")
@@ -125,6 +133,37 @@ func (t *sourcesTab) try(err error) {
 		t.a.message("That didn't work", err.Error())
 	}
 	t.refresh()
+}
+
+// checkHTML is how a connection test went.
+func checkHTML(r core.ConnectionCheck) string {
+	color, mark := th.OK, "✓"
+	if !r.OK {
+		color, mark = th.Bad, "✗"
+	}
+	return "<span style='color:" + color + "'>" + mark + " " + html.EscapeString(r.Detail) + "</span>"
+}
+
+func (t *sourcesTab) test(c *sourceCard) {
+	c.testB.SetEnabled(false)
+	c.check.SetText("Testing…")
+	c.check.Show()
+	go func() {
+		r := t.a.m.CheckSource(t.a.m.Context(), c.name)
+		mainthread.Start(func() {
+			c.testB.SetEnabled(true)
+			c.check.SetText(checkHTML(r))
+			t.refresh()
+		})
+	}()
+}
+
+func (t *sourcesTab) testAll() {
+	for i, s := range t.rows {
+		if s.Enabled && i < len(t.cards) && t.cards[i].testB.IsEnabled() {
+			t.test(t.cards[i])
+		}
+	}
 }
 
 func (t *sourcesTab) move(name string, delta int) { t.try(t.a.m.MoveSource(name, delta)) }
@@ -185,6 +224,10 @@ func (t *sourcesTab) refresh() {
 		c.up.SetEnabled(i > 0)
 		c.down.SetEnabled(i < len(t.rows)-1)
 		c.pause.SetVisible(s.Enabled)
+		c.testB.SetVisible(s.Enabled)
+		if !s.Enabled {
+			c.check.Hide()
+		}
 		if s.Paused || !s.Until.IsZero() {
 			c.pause.SetIcon(iconOf("play", 16, th.Text2))
 		} else {

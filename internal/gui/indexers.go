@@ -32,7 +32,7 @@ func (a *app) pickIndexers() {
 	top.AddWidget(music.QWidget)
 	box.AddLayout(top.QLayout)
 	table := a.newTable("indexers", column{title: "On", width: 44}, column{title: "Site", width: 330, flex: true}, column{title: "Language", width: 90},
-		column{title: "Music", width: 60}, column{title: "Searches", width: 130}, column{title: "Last problem", width: 220})
+		column{title: "Music", width: 60}, column{title: "Searches", width: 130}, column{title: "Test, or last problem", width: 260})
 	box.AddWidget2(table.view.QWidget, 1)
 	info := qt.NewQLabel2()
 	info.SetWordWrap(true)
@@ -40,6 +40,16 @@ func (a *app) pickIndexers() {
 
 	var rows []core.IndexerStatus
 	var settings map[string]map[string]string
+	tested := map[string]core.ConnectionCheck{}
+	table.color = func(r, c int) string {
+		if x, ok := tested[rows[r].ID]; ok && c == 5 {
+			if x.OK {
+				return th.OK
+			}
+			return th.Bad
+		}
+		return ""
+	}
 	table.key = func(r int) string { return rows[r].ID }
 	table.count = func() int { return len(rows) }
 	table.text = func(r, c int) string {
@@ -74,6 +84,9 @@ func (a *app) pickIndexers() {
 				return fmt.Sprintf("%d (%d errors)", x.Health.Searches, x.Health.Errors)
 			}
 		case 5:
+			if t, ok := tested[x.ID]; ok {
+				return t.Detail
+			}
 			if x.Health != nil {
 				return x.Health.LastErr
 			}
@@ -142,6 +155,37 @@ func (a *app) pickIndexers() {
 			a.indexerAccount(*x)
 			fill()
 		}
+	})
+	// test checks these sites a few at a time and shows how each went.
+	test := func(sites []core.IndexerStatus) {
+		sem := make(chan struct{}, 6)
+		for _, x := range sites {
+			tested[x.ID] = core.ConnectionCheck{OK: true, Detail: "testing…"}
+			go func() {
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				r := a.m.CheckIndexer(a.m.Context(), x.ID)
+				mainthread.Start(func() {
+					tested[x.ID] = r
+					fill()
+				})
+			}()
+		}
+		fill()
+	}
+	add("Test", func() {
+		if x := selected(); x != nil {
+			test([]core.IndexerStatus{*x})
+		}
+	})
+	add("Test all that are on", func() {
+		var on []core.IndexerStatus
+		for _, x := range a.m.Indexers() {
+			if x.On {
+				on = append(on, x)
+			}
+		}
+		test(on)
 	})
 	var update *qt.QPushButton
 	update = add("Get the latest site list", func() {

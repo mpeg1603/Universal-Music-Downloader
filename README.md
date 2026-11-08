@@ -88,6 +88,10 @@ while the total stays below it (up to "Most downloads at once") and never goes a
 no bandwidth set, it runs "Most downloads at once" downloads in parallel. Searching runs
 separately ("Searches at once"), ahead of the downloads, so they never sit idle.
 
+**Testing a connection.** Sources → *Test* checks that a source answers, and *Test all* every
+source that's on (`t` in the terminal app). Sources → Torrent → *Choose sites* tests each torrent
+site the same way (`t`, and `T` for all that are on); a site that works again is used again at once.
+
 **Queue jumping.** Soulseek and torrents have limits of their own (a few Soulseek downloads at
 once, a few torrents at once). While bandwidth is to spare, a track that would wait for such a
 busy source moves on to the next source in the order instead of holding a place in line; once
@@ -199,7 +203,7 @@ connection to Deezer the lines are read as `Artist - Title`.
 | `1` Queue | every track: state, progress, speed, quality | `Enter` details (every source tried and why it didn't work), `c` cancel, `r` restart (search again from the first source; for a downloaded or in-library track, download again), `p` do next, `R` retry everything not found, `f` filter, `o` sort, `O` reverse the order, `/` find in the queue, `Esc` show everything |
 | `2` Search | find music by name; your playlist files, and the playlists in them | `/` find, `Enter` add a result (or show a playlist's tracks), `Tab` next list, `a` add a file, `d` remove, `space` on/off, `+` `-` priority (higher goes first), `R` read the files again |
 | `3` Library | library folders, scan status, threshold | `a` add folder (suggestions show as you type: `↑` `↓` pick, `Tab` completes, `Enter` accepts, `Esc` closes), `d` remove, `s` rescan, `t` threshold, `u` upgrade the library |
-| `4` Sources | the sources in order, their route, state and counts; torrent indexers | `space` on/off, `K` `J` move up/down, `Enter` settings (route, tokens, cookies, email, indexers, the Soulseek account), `e` route, `p` pause/resume, `b` paste Bandcamp download links |
+| `4` Sources | the sources in order, their route, state and counts; torrent indexers | `space` on/off, `K` `J` move up/down, `Enter` settings (route, tokens, cookies, email, indexers, the Soulseek account), `e` route, `p` pause/resume, `b` paste Bandcamp download links, `t` test it |
 | `5` Soulseek | a full Soulseek client in six pages: Search, Transfers, Browse, Users, Chat, Interests (see *Soulseek*) | `<` `>` switch pages, `/` search, `u` the user menu, `m` message, `b` browse their files, `i` user info, `n` message someone, `j` join a room, `A` away/online, `o` check your port, `R` reconnect |
 | `6` Settings | downloads folder, format, layout, threshold, bandwidth, parallel downloads and searches | `Tab`/arrows move, `Esc` leaves a field, **Save** applies |
 | `7` Log | what happened | `v` detailed log, `End` follow |

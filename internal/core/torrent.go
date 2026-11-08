@@ -929,7 +929,9 @@ type TorrentSource struct {
 
 	searches cache[[]torrentResult]
 	metas    cache[*torrentMeta]
-	cacheDir string // search results (kept for a while between runs)
+	lane     chan struct{} // tracks being looked for at once
+	metaSem  chan struct{} // magnet links being asked about at once
+	cacheDir string        // search results (kept for a while between runs)
 
 	hintMu sync.Mutex
 	hints  map[string]torrentHint // by track key: found in another track's torrent
@@ -953,6 +955,7 @@ func newTorrentSource(feeds []*Torznab, cacheDir, format string, timeout time.Du
 			}
 			return nil
 		}},
+		lane: make(chan struct{}, torrentSearchesAtOnce), metaSem: make(chan struct{}, torrentMagnetsAtOnce),
 		dl:       newTorrentManager(eng, filepath.Join(dir, "downloads"), timeout),
 		searches: cache[[]torrentResult]{retryAfter: time.Minute},
 		metas:    cache[*torrentMeta]{retryAfter: 10 * time.Minute},
@@ -1004,7 +1007,7 @@ type cachedSearch struct {
 
 func (s *TorrentSource) searchCachePath(query string) string {
 	sum := sha1.Sum([]byte(strings.ToLower(query)))
-	return filepath.Join(s.cacheDir, hex.EncodeToString(sum[:10])+".json")
+	return filepath.Join(s.cacheDir, "v2-"+hex.EncodeToString(sum[:10])+".json") // v2: links resolved as Jackett does
 }
 
 // searchAll queries every working indexer at once and merges the results. It doesn't wait for
@@ -1034,7 +1037,8 @@ func (s *TorrentSource) searchAll(ctx context.Context, query string) ([]torrentR
 			return nil, unavailablef("every torrent indexer is paused after repeated errors (see Sources → Torrent)")
 		}
 		// Not tied to the track that asked first: other tracks wait for the same answer.
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.timeout+5*time.Second)
+		// Twice the timeout: it's per indexer, and an indexer takes one search at a time.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*s.timeout+5*time.Second)
 		defer cancel()
 		type answer struct {
 			i       int
@@ -1098,6 +1102,9 @@ func (s *TorrentSource) searchAll(ctx context.Context, query string) ([]torrentR
 			}
 			return nil, firstErr
 		}
+		if len(out) == 0 && waiting > 0 {
+			return nil, nil // "nothing", but not from everyone: not to be remembered
+		}
 		if data, err := json.Marshal(cachedSearch{At: time.Now(), Results: out}); err == nil {
 			if os.MkdirAll(s.cacheDir, 0o755) == nil {
 				writeFileAtomic(s.searchCachePath(query), data)
@@ -1111,6 +1118,16 @@ func (s *TorrentSource) Search(ctx context.Context, t *Track) ([]Candidate, erro
 	if c, ok := s.takeHint(t.Key); ok {
 		debugf("%s: in “%s”, which another track's download found", t, c.Album)
 		return []Candidate{c}, nil
+	}
+	// With every track searching at once the sites, one request at a time each, fall behind
+	// and then nobody gets an answer. Who can't get in soon goes on to the next sources.
+	select {
+	case s.lane <- struct{}{}:
+		defer func() { <-s.lane }()
+	case <-time.After(torrentLaneWait):
+		return nil, busyf("%d tracks are being looked for on the torrent sites; tried again later", cap(s.lane))
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 	seen, inspected := map[string]bool{}, map[string]bool{}
 	looked := 0
@@ -1382,6 +1399,12 @@ func (s *TorrentSource) expect(c Candidate, coming bool) {
 // each track it might hold, was most of what torrent searching did.
 const deadFor = 12 * time.Hour
 
+const (
+	torrentSearchesAtOnce = 8
+	torrentMagnetsAtOnce  = 16
+	torrentLaneWait       = 6 * time.Second // how long a track waits for its turn
+)
+
 // meta gets a result's .torrent (from its link, or a magnet's metadata from the swarm) and file list.
 func (s *TorrentSource) meta(ctx context.Context, r torrentResult) (*torrentMeta, error) {
 	m, err := s.fetchMeta(ctx, r)
@@ -1401,7 +1424,7 @@ func (s *TorrentSource) fetchMeta(ctx context.Context, r torrentResult) (*torren
 				return &torrentMeta{file: p, files: files, sizes: sizes}, nil
 			}
 		}
-		dead := strings.TrimSuffix(p, ".torrent") + ".dead"
+		dead := strings.TrimSuffix(p, ".torrent") + ".failed"
 		if st, err := os.Stat(dead); err == nil && time.Since(st.ModTime()) < deadFor {
 			why, _ := os.ReadFile(dead)
 			return nil, failf("%s (tried %s ago)", why, FmtWait(time.Since(st.ModTime()).Round(time.Minute)))
@@ -1413,7 +1436,9 @@ func (s *TorrentSource) fetchMeta(ctx context.Context, r torrentResult) (*torren
 		}
 		data, err := s.torrentBytes(context.WithoutCancel(ctx), r)
 		if err != nil {
-			markDead(err)
+			if !isUnavailable(err) { // the site or the client being down says nothing of the torrent
+				markDead(err)
+			}
 			return nil, err
 		}
 		files, sizes, err := torrentFileList(data)
@@ -1448,7 +1473,7 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 				page = d
 			}
 		}
-		link := cg.downloadLink(ctx, page)
+		link := cg.downloadLink(ctx, page, r.Link)
 		switch {
 		case strings.HasPrefix(link, "magnet:"):
 			magnet = link
@@ -1490,12 +1515,18 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 	if magnet == "" {
 		return nil, failf("couldn't get the torrent file for “%s”", r.Title)
 	}
-	// Only a magnet link: ask the swarm for the torrent's metadata.
+	// Only a magnet link: ask the swarm for the torrent's metadata. A few at a time, each with
+	// its full 50 seconds: hundreds at once get in each other's way and all come back empty.
+	s.metaSem <- struct{}{}
+	defer func() { <-s.metaSem }()
 	mctx, cancel := context.WithTimeout(ctx, 50*time.Second)
 	defer cancel()
 	data, err := s.eng.metadata(mctx, magnet)
 	if err != nil {
 		debugf("metadata for the magnet link of %q: %v", r.Title, err)
+		if isUnavailable(err) {
+			return nil, err
+		}
 		return nil, failf("no peers answered for the magnet link of “%s”", r.Title)
 	}
 	return data, nil
