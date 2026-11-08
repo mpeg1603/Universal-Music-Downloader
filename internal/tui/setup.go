@@ -193,6 +193,9 @@ func (w *setupWizard) show() {
 	if w.step > 0 {
 		form.AddButton("Back", func() { w.step--; w.show() })
 	}
+	if st.More != "" {
+		form.AddButton("What's this?", func() { ui.message(st.Title, st.More) })
+	}
 	switch {
 	case st.ID == "done":
 		form.AddButton("Save and start", next)

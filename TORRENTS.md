@@ -39,9 +39,10 @@ Universal Music Downloader ──search "Artist Album"──▶ built-in indexer
 1. **Sources** tab → **Torrent** → `Enter`.
 2. **Built-in indexers** is on by default, with a dozen general public sites (1337x, The Pirate
    Bay, LimeTorrents, TorrentDownload(s), KickassTorrents, TheRARBG, uIndex, TorrentGalaxy,
-   MagnetCat, ExtraTorrent, NoNaMe Club). **Choose indexers…** lists every public definition
-   (about 80, a few dozen with music categories):
-   - `space` turns one on or off;
+   MagnetCat, ExtraTorrent, NoNaMe Club, RuTracker.RU). **Choose indexers…** lists every public
+   definition (about 80, a few dozen with music categories), plus RuTracker.org:
+   - `space` turns one on or off; `/` finds one by name;
+   - `Enter` on one that needs an account (RuTracker.org) asks for it;
    - `a` shows all of them or only those with music;
    - `u` fetches the newest definitions from GitHub now (otherwise weekly);
    - the list shows each one's language, whether it has music, how its searches went and its
@@ -72,12 +73,29 @@ All good.
 
 The definitions are kept in `~/.local/share/universal-music-downloader/cache/indexers/`.
 
+## RuTracker.org (needs your account)
+
+RuTracker.org, the big Russian tracker with a lot of lossless music, needs an account (free
+registration on the site). Jackett runs it from its own code rather than a definition, so the
+app comes with a definition of its own for it, which searches only its music forums. In
+**Choose indexers…**, select **RuTracker.org** → `Enter` → your username and password → **Save
+and turn on**. They're kept in `config.json`, readable only by you.
+
+The app logs in once and keeps the session; it logs in again only when RuTracker sends a request
+back to its login page. A failed login isn't tried again for 30 minutes (RuTracker asks for a
+captcha after a few failures): log in once in your browser then, check the password, and save
+again. RuTracker sits behind Cloudflare's check for some addresses (VPNs especially): then it
+needs FlareSolverr (below). Torrent files are downloaded with your login.
+
+(RuTracker.RU, a different, public site, needs no account and is on by default.)
+
 ## FlareSolverr (sites behind Cloudflare)
 
 Some sites sit behind Cloudflare's "checking your browser" page; their searches then fail with
 an error that mentions *Cloudflare*. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr)
 solves those pages (it runs a real browser), and is the one part that isn't built in. If you run
-it, put its address (`http://127.0.0.1:8191`) in **FlareSolverr address**. Without it, such
+it, put its address (`http://127.0.0.1:8191`) in **FlareSolverr address**. The app then sends the
+blocked request again with FlareSolverr's cookies (searches, logins and torrent files alike). Without it, such
 sites are left out after three failures and the others carry on. Install it with Docker
 (`docker run -d -p 127.0.0.1:8191:8191 ghcr.io/flaresolverr/flaresolverr:latest`) or from its
 releases page.

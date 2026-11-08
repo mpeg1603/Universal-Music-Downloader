@@ -8,7 +8,8 @@ type SetupStep struct {
 	ID     string // what it sets up (a source's name for the download methods)
 	Title  string
 	Help   string
-	Source bool // a download method: set it up or leave it off
+	More   string // a longer explanation, shown on request ("What's this?")
+	Source bool   // a download method: set it up or leave it off
 }
 
 var SetupSteps = []SetupStep{
@@ -35,10 +36,10 @@ var SetupSteps = []SetupStep{
 		"often in FLAC. Needs a Soulseek account (a new name and password make one), or import it from Nicotine+. " +
 		"You share your library in return (many users don't send files to people who share nothing). Opening the " +
 		"listening port in your router helps (UPnP below does it for you where the router allows; with a VPN, set " +
-		"Soulseek's route to direct): docs/soulseek-port-forwarding.md has the steps, MikroTik included."},
-	{ID: "torrent", Source: true, Title: "Torrents", Help: "Albums and discographies from public torrent sites (built-in, " +
-		"from Jackett's site definitions), downloaded by the built-in client; only the files needed. Sites behind " +
-		"Cloudflare's browser check need FlareSolverr. Your own Jackett or Prowlarr can be added too."},
+		"Soulseek's route to direct): docs/soulseek-port-forwarding.md has the steps, MikroTik included.", More: soulseekMore},
+	{ID: "torrent", Source: true, Title: "Torrents", Help: "Albums and discographies from torrent sites, searched by the app " +
+		"itself (Jackett's site definitions are built in) and downloaded by its own BitTorrent client, only the files " +
+		"needed. Jackett, Prowlarr and FlareSolverr are optional programs; \"What's this?\" explains them.", More: torrentMore},
 	{ID: "vk", Source: true, Title: "VK", Help: "VK's music with your account's token (MP3 up to 320)."},
 	{ID: "yandex", Source: true, Title: "Yandex Music", Help: "Yandex Music with your account's token (FLAC with Plus)."},
 	{ID: "done", Title: "All set", Help: "Settings are saved. Sources can be turned on or off and reordered in the Sources " +
