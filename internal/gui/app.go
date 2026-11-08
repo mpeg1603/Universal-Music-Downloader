@@ -22,9 +22,11 @@ type app struct {
 	counts *qt.QLabel
 	pause  *qt.QPushButton
 
-	queue  *queueTab
-	search *searchTab
-	log    *logTab
+	queue    *queueTab
+	search   *searchTab
+	library  *libraryTab
+	settings *settingsTab
+	log      *logTab
 }
 
 // Run opens the window and returns when it's closed. The backend is started already.
@@ -78,9 +80,13 @@ func (a *app) build() {
 	a.tabs.AddTab(a.queue.w, "&1 Queue")
 	a.search = newSearchTab(a)
 	a.tabs.AddTab(a.search.w, "&2 Search")
-	for _, name := range []string{"&3 Library", "&4 Sources", "&5 Soulseek", "&6 Settings"} {
+	a.library = newLibraryTab(a)
+	a.tabs.AddTab(a.library.w, "&3 Library")
+	for _, name := range []string{"&4 Sources", "&5 Soulseek"} {
 		a.tabs.AddTab(placeholder(strings.TrimPrefix(name[3:], " ")), name)
 	}
+	a.settings = newSettingsTab(a)
+	a.tabs.AddTab(a.settings.w, "&6 Settings")
 	a.log = newLogTab(a)
 	a.tabs.AddTab(a.log.w, "&7 Log")
 	a.tabs.OnCurrentChanged(func(i int) {
@@ -89,6 +95,8 @@ func (a *app) build() {
 			a.queue.refresh(false)
 		case 1:
 			a.search.refresh()
+		case 2:
+			a.library.refresh()
 		}
 	})
 	box.AddWidget2(a.tabs.QWidget, 1)
@@ -116,8 +124,11 @@ func (a *app) changed(k core.EventKind) {
 	switch k {
 	case core.EventQueue, core.EventConfig:
 		a.queue.changed()
-		if a.tabs.CurrentIndex() == 1 {
+		switch a.tabs.CurrentIndex() {
+		case 1:
 			a.search.refresh()
+		case 2:
+			a.library.refresh()
 		}
 	case core.EventLog:
 		a.log.refresh()

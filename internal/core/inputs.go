@@ -78,3 +78,29 @@ func MusicQuery(find, artist, album, track, year string) string {
 	}
 	return strings.TrimSpace(q)
 }
+
+// AddLibraryDir adds a library folder (only ever read).
+func (m *Manager) AddLibraryDir(p string) error {
+	p = CleanPath(p)
+	if st, err := os.Stat(p); err != nil || !st.IsDir() {
+		return fmt.Errorf("%s is not a folder", p)
+	}
+	return m.UpdateConfig(func(c *Config) {
+		if !ContainsString(c.LibraryDirs, p) {
+			c.LibraryDirs = append(c.LibraryDirs, p)
+		}
+	})
+}
+
+// RemoveLibraryDir stops checking a library folder (nothing in it is touched).
+func (m *Manager) RemoveLibraryDir(p string) error {
+	return m.UpdateConfig(func(c *Config) {
+		var keep []string
+		for _, x := range c.LibraryDirs {
+			if x != p {
+				keep = append(keep, x)
+			}
+		}
+		c.LibraryDirs = keep
+	})
+}

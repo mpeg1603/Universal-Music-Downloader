@@ -49,6 +49,8 @@ type Backend interface {
 	// Your library.
 	LibraryStatus() LibScanStatus
 	Rescan()
+	AddLibraryDir(path string) error // only ever read
+	RemoveLibraryDir(path string) error
 	UpgradeCounts() map[Threshold]int // library files below each quality level
 	UpgradeLibrary(th Threshold) (playlist string, tracks int, err error)
 
