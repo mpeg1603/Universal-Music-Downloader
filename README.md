@@ -477,13 +477,27 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o universal-music-downloader.e
 go test ./...      # some tests need ffmpeg installed; no network needed
 ```
 
+**The window (in progress).** `universal-music-downloader-gui` is the same app in a Qt window,
+over the same backend; the terminal app stays. It needs Qt 6 to build (`qt6-base` on Arch,
+`qt6-base-dev` on Debian/Ubuntu) and a C++ compiler; the first build compiles the Qt bindings
+and takes a while:
+
+```sh
+go build -o universal-music-downloader-gui ./cmd/universal-music-downloader-gui
+```
+
+So far it has the Queue and Log tabs, the header with the speeds, and pause; the other tabs
+follow (see [docs/ROADMAP.md](docs/ROADMAP.md)). Both programs use the same settings and state,
+but not at the same time.
+
 The code is in three parts:
 
 - `internal/core`: the backend: playlists, library, sources, Soulseek, the queue, settings.
   Frontends use it only through `core.Backend` (`internal/core/api.go`): methods and the
   plain views they return.
-- `internal/tui`: the terminal app, one file per tab.
-- `cmd/universal-music-downloader`: the program: options, the headless mode, and starting the app.
+- `internal/tui`: the terminal app, one file per tab; `internal/gui`: the Qt window.
+- `cmd/universal-music-downloader`: the program: options, the headless mode, and starting the app;
+  `cmd/universal-music-downloader-gui`: the window's.
 
 ## License
 
