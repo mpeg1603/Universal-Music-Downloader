@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,12 +19,19 @@ import (
 // (github.com/Jackett/Jackett, src/Jackett.Common/Definitions): the public ones that need no
 // login. They're fetched from GitHub the first time, kept in the data folder and checked for
 // changes once a week. Jackett itself (or Prowlarr) can still be added on top.
+//
+// Some come with the app (indexers/*.yml): sites Jackett runs from C# code rather than a
+// definition, written for this app in the same format; RuTracker.org, which needs your
+// account (cardigann_login.go).
+
+//go:embed indexers/*.yml
+var ownIndexers embed.FS
 
 const jackettDefsAPI = "https://api.github.com/repos/Jackett/Jackett/contents/src/Jackett.Common/Definitions?ref=master"
 
 // defaultIndexers are searched unless you choose others: general trackers with music.
 var defaultIndexers = []string{"1337x", "thepiratebay", "limetorrents", "torrentdownload", "torrentdownloads",
-	"kickasstorrents-to", "therarbg", "uindex", "torrentgalaxyclone", "magnetcat", "extratorrent-st", "noname-club"}
+	"kickasstorrents-to", "therarbg", "uindex", "torrentgalaxyclone", "magnetcat", "extratorrent-st", "noname-club", "rutracker-ru"}
 
 // IndexerConfig chooses the built-in indexers.
 type IndexerConfig struct {
@@ -31,6 +39,9 @@ type IndexerConfig struct {
 	Chosen       bool     `json:"chosen,omitempty"`     // On was set by you (else the defaults)
 	On           []string `json:"on,omitempty"`
 	FlareSolverr string   `json:"flaresolverr,omitempty"` // e.g. http://127.0.0.1:8191, for Cloudflare's checks
+	// Settings are your settings for an indexer (its ID → setting → value): a login's
+	// username and password.
+	Settings map[string]map[string]string `json:"settings,omitempty"`
 }
 
 func (c IndexerConfig) enabled() []string {
@@ -47,6 +58,14 @@ func (c IndexerConfig) enabled() []string {
 type IndexerInfo struct {
 	ID, Name, Description, Language, Site string
 	Music                                 bool // has music categories (searched with them)
+	Login                                 bool // needs your account (Settings)
+	Settings                              []IndexerSetting
+}
+
+// IndexerSetting is one of an indexer's settings a frontend asks for.
+type IndexerSetting struct {
+	Name, Label string
+	Secret      bool // a password
 }
 
 type indexerDefs struct {
@@ -55,6 +74,7 @@ type indexerDefs struct {
 	mu       sync.Mutex
 	defs     map[string][]byte
 	info     map[string]IndexerInfo
+	own      map[string]bool // came with the app
 	checked  time.Time
 	updating bool
 }
@@ -74,21 +94,54 @@ func loadIndexerDefs(dir string) *indexerDefs {
 	files, _ := filepath.Glob(filepath.Join(dir, "*.yml"))
 	for _, f := range files {
 		if data, err := os.ReadFile(f); err == nil {
-			d.add(data)
+			d.add(data, false)
 		}
 	}
+	d.addOwn()
 	return d
 }
 
-// add keeps a definition if it's public and needs no login.
-func (d *indexerDefs) add(data []byte) (string, bool) {
+// addOwn adds the definitions that come with the app (over any of the same name).
+func (d *indexerDefs) addOwn() {
+	files, _ := ownIndexers.ReadDir("indexers")
+	for _, f := range files {
+		if data, err := ownIndexers.ReadFile("indexers/" + f.Name()); err == nil {
+			if _, ok := d.add(data, true); !ok {
+				Logf("Torrent: the built-in definition %s doesn't load", f.Name())
+			}
+		}
+	}
+}
+
+// add keeps a definition if it's public and needs no login; own: one that comes with the app
+// (it may need a login).
+func (d *indexerDefs) add(data []byte, own bool) (string, bool) {
 	def, _, err := parseCardigann(data)
-	if err != nil || def.Type != "public" || def.Login != nil {
+	if err != nil || !own && (def.Type != "public" || def.Login != nil) || def.Login != nil && !def.Login.supported() {
 		return "", false
 	}
+	if _, mine := d.own[def.ID]; mine && !own {
+		return "", false // the app's own wins over Jackett's
+	}
+	if own {
+		if d.own == nil {
+			d.own = map[string]bool{}
+		}
+		d.own[def.ID] = true
+	}
+	info := IndexerInfo{ID: def.ID, Name: def.Name, Description: def.Description, Language: def.Language,
+		Site: def.Links[0], Music: len(def.musicCats()) > 0, Login: def.Login != nil}
+	for _, s := range def.Settings {
+		switch s.Type {
+		case "text", "password":
+			info.Settings = append(info.Settings, IndexerSetting{Name: s.Name, Label: FirstNonEmpty(s.Label, s.Name), Secret: s.Type == "password"})
+		}
+	}
+	if !info.Login {
+		info.Settings = nil // the public ones' settings (sort order and such) keep their defaults
+	}
 	d.defs[def.ID] = data
-	d.info[def.ID] = IndexerInfo{ID: def.ID, Name: def.Name, Description: def.Description, Language: def.Language,
-		Site: def.Links[0], Music: len(def.musicCats()) > 0}
+	d.info[def.ID] = info
 	return def.ID, true
 }
 
@@ -198,7 +251,7 @@ func (d *indexerDefs) refresh(ctx context.Context, route string) (int, error) {
 			defer mu.Unlock()
 			idx.SHAs[j.name] = j.sha
 			d.mu.Lock()
-			_, keep := d.add(data)
+			_, keep := d.add(data, false)
 			d.mu.Unlock()
 			if keep {
 				writeFileAtomic(filepath.Join(d.dir, j.name), data)
@@ -266,6 +319,29 @@ func (m *Manager) SetIndexer(id string, on bool) error {
 			c.Indexers.On = []string{}
 		}
 	})
+}
+
+// SetIndexerSettings saves your settings for an indexer (a login), and turns it on.
+func (m *Manager) SetIndexerSettings(id string, settings map[string]string) error {
+	if err := m.UpdateConfig(func(c *Config) {
+		if c.Indexers.Settings == nil {
+			c.Indexers.Settings = map[string]map[string]string{}
+		}
+		clean := map[string]string{}
+		for k, v := range settings {
+			if v = strings.TrimSpace(v); v != "" {
+				clean[k] = v
+			}
+		}
+		if len(clean) == 0 {
+			delete(c.Indexers.Settings, id)
+		} else {
+			c.Indexers.Settings[id] = clean
+		}
+	}); err != nil {
+		return err
+	}
+	return m.SetIndexer(id, len(settings) > 0)
 }
 
 // RefreshIndexers fetches the indexer definitions that changed on GitHub.

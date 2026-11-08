@@ -54,6 +54,7 @@ type Backend interface {
 	TorrentFeeds() []FeedStatus
 	Indexers() []IndexerStatus // the built-in torrent indexers
 	SetIndexer(id string, on bool) error
+	SetIndexerSettings(id string, settings map[string]string) error // a login; turns it on
 	RefreshIndexers(ctx context.Context) (changed int, err error)
 	BandcampMailStatus() (pending int, problem string)
 	AddBandcampLinks(text string) (found, added int, errs []string)

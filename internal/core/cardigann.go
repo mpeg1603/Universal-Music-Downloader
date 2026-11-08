@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -45,10 +47,11 @@ type cgDef struct {
 	Settings []struct {
 		Name    string `yaml:"name"`
 		Type    string `yaml:"type"`
+		Label   string `yaml:"label"`
 		Default any    `yaml:"default"`
 	} `yaml:"settings"`
-	Login    *yaml.Node `yaml:"login"`
-	Search   cgSearch   `yaml:"search"`
+	Login    *cgLogin `yaml:"login"`
+	Search   cgSearch `yaml:"search"`
 	Download struct {
 		Selectors []cgSelector `yaml:"selectors"`
 	} `yaml:"download"`
@@ -73,6 +76,37 @@ type cgSearch struct {
 		Filters  []cgFilter `yaml:"filters"`
 	} `yaml:"rows"`
 	Fields yaml.Node `yaml:"fields"` // in order: later fields use earlier ones
+}
+
+// cgLogin is how a site that needs an account is logged in to. Methods "post" (the inputs
+// sent to path), "form" (path's form filled in and sent) and "cookie" (a cookie you copy from
+// your browser, the setting "cookie").
+type cgLogin struct {
+	Path       string            `yaml:"path"`
+	SubmitPath string            `yaml:"submitpath"`
+	Method     string            `yaml:"method"`
+	Form       string            `yaml:"form"`
+	Inputs     map[string]string `yaml:"inputs"`
+	Error      []struct {
+		Selector string `yaml:"selector"`
+	} `yaml:"error"`
+	Captcha struct {
+		Selector string `yaml:"selector"`
+	} `yaml:"captcha"` // the site asks for a captcha (not in Jackett's format)
+	Test struct {
+		Path     string `yaml:"path"`
+		Selector string `yaml:"selector"`
+		Contains string `yaml:"contains"` // not in Jackett's format
+	} `yaml:"test"`
+}
+
+// supported: the login methods this app can do.
+func (l *cgLogin) supported() bool {
+	switch strings.ToLower(FirstNonEmpty(l.Method, "form")) {
+	case "post", "form", "cookie":
+		return true
+	}
+	return false
 }
 
 type cgFilter struct {
@@ -105,9 +139,19 @@ type cardigann struct {
 	cats   map[string]int // site category → Torznab category
 	audio  []string       // the site's music categories
 	http   *http.Client
-	flare  *flareSolverr
+	flare  challengeSolver // gets past browser checks (nil: none)
 	pace   *rateLimiter
+
+	loginMu   sync.Mutex
+	loggedIn  time.Time // when the last login worked (zero: not logged in)
+	loginErr  error     // why the last login failed
+	loginTry  time.Time // when it was tried
+	inLogin   bool      // fetches are part of the login
+	loginPath string    // the login page's path, to notice being sent back to it
 }
+
+// errCgLoggedOut: the site sent a request back to its login page (the session ended).
+var errCgLoggedOut = errors.New("logged out")
 
 // Torznab category numbers for Cardigann category names.
 var torznabCats = map[string]int{"Console": 1000, "Movies": 2000, "Audio": 3000, "Audio/MP3": 3010, "Audio/Video": 3020,
@@ -158,13 +202,20 @@ func (d *cgDef) musicCats() []string {
 	return out
 }
 
-func newCardigann(data []byte, flare *flareSolverr, route string) (*cardigann, error) {
+func newCardigann(data []byte, flare challengeSolver, route string) (*cardigann, error) {
+	return newCardigannWith(data, flare, route, nil)
+}
+
+// newCardigannWith makes an indexer with your settings for it (a login's username and
+// password, say) over the definition's defaults.
+func newCardigannWith(data []byte, flare challengeSolver, route string, settings map[string]string) (*cardigann, error) {
 	d, fields, err := parseCardigann(data)
 	if err != nil {
 		return nil, err
 	}
+	jar, _ := cookiejar.New(nil)
 	c := &cardigann{def: d, fields: fields, config: map[string]any{}, cats: map[string]int{}, audio: d.musicCats(), flare: flare,
-		http: &http.Client{Timeout: 30 * time.Second, Transport: router.Transport(route), CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		http: &http.Client{Timeout: 30 * time.Second, Jar: jar, Transport: router.Transport(route), CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if req.URL.Scheme == "magnet" || len(via) > 8 {
 				return http.ErrUseLastResponse
 			}
@@ -184,7 +235,15 @@ func newCardigann(data []byte, flare *flareSolverr, route string) (*cardigann, e
 			c.config[s.Name] = fmt.Sprint(firstOf(s.Default, ""))
 		}
 	}
+	for k, v := range settings {
+		c.config[k] = v
+	}
 	c.config["sitelink"] = c.site
+	if d.Login != nil {
+		if u, err := url.Parse(c.site + strings.TrimLeft(d.Login.Path, "/")); err == nil {
+			c.loginPath = u.Path
+		}
+	}
 	for _, m := range d.Caps.CategoryMappings {
 		c.cats[m.ID] = torznabCat(m.Cat)
 	}
@@ -390,6 +449,23 @@ func (c *cardigann) vars(keywords string) map[string]any {
 
 // search runs a music search on the site.
 func (c *cardigann) search(ctx context.Context, query string) ([]torrentResult, error) {
+	if err := c.ensureLogin(ctx, false); err != nil {
+		return nil, err
+	}
+	res, err := c.searchOnce(ctx, query)
+	if errors.Is(err, errCgLoggedOut) {
+		if err := c.ensureLogin(ctx, true); err != nil {
+			return nil, err
+		}
+		res, err = c.searchOnce(ctx, query)
+	}
+	if errors.Is(err, errCgLoggedOut) {
+		return nil, unavailablef("%s keeps logging this app out", c.def.Name)
+	}
+	return res, err
+}
+
+func (c *cardigann) searchOnce(ctx context.Context, query string) ([]torrentResult, error) {
 	keywords := c.applyFilters(query, c.def.Search.KeywordsFilters, c.vars(query))
 	vars := c.vars(keywords)
 	var out []torrentResult
@@ -403,6 +479,9 @@ func (c *cardigann) search(ctx context.Context, query string) ([]torrentResult, 
 			break
 		}
 		results, err := c.searchPath(ctx, p.Path, p.Method, p.Inputs, p.Response.Type, vars)
+		if errors.Is(err, errCgLoggedOut) {
+			return nil, err
+		}
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -450,7 +529,7 @@ func (c *cardigann) searchPath(ctx context.Context, path, method string, inputs 
 	}
 	var body io.Reader
 	if strings.EqualFold(method, "post") {
-		body = strings.NewReader(values.Encode() + raw)
+		body = strings.NewReader(c.encodeForm(values) + raw)
 	} else {
 		q := u.Query()
 		for k, vs := range values {
@@ -458,7 +537,7 @@ func (c *cardigann) searchPath(ctx context.Context, path, method string, inputs 
 				q.Add(k, v)
 			}
 		}
-		u.RawQuery = q.Encode()
+		u.RawQuery = c.encodeForm(q)
 		if raw != "" {
 			if u.RawQuery != "" {
 				u.RawQuery += "&"
@@ -506,17 +585,60 @@ func (c *cardigann) fetch(ctx context.Context, method, u string, body io.Reader)
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	resp.Body.Close()
+	c.loginMu.Lock()
+	inLogin := c.inLogin
+	c.loginMu.Unlock()
+	if c.loginPath != "" && !inLogin && resp.Request != nil && resp.Request.URL.Path == c.loginPath {
+		c.loginMu.Lock()
+		c.loggedIn = time.Time{}
+		c.loginMu.Unlock()
+		return nil, errCgLoggedOut
+	}
 	if isChallenge(data) || resp.StatusCode == 403 && bytes.Contains(data, []byte("cloudflare")) {
 		if c.flare == nil {
 			return nil, blockedf("%s shows a browser check (Cloudflare); set FlareSolverr in Sources → Torrent to get past it", c.def.Name)
 		}
+		// The solver gets past the check (on the front page for anything but a page to
+		// read); its cookies then let the request through.
+		target := u
 		if method != "GET" {
-			return nil, blockedf("%s shows a browser check", c.def.Name)
+			target = c.site
 		}
-		if data, err = c.flare.get(ctx, u); err != nil {
+		if err := c.flare.clear(ctx, target); err != nil {
 			return nil, err
 		}
+		return c.fetchAgain(ctx, method, u, bodyData)
 	} else if resp.StatusCode >= 400 {
+		return nil, unavailablef("%s answered HTTP %d", c.def.Name, resp.StatusCode)
+	}
+	if enc := strings.ToLower(c.def.Encoding); enc == "windows-1251" || enc == "cp1251" {
+		if d, err := charmap.Windows1251.NewDecoder().Bytes(data); err == nil {
+			data = d
+		}
+	}
+	return data, nil
+}
+
+// fetchAgain sends a request once more with FlareSolverr's cookies, after a browser check.
+func (c *cardigann) fetchAgain(ctx context.Context, method, u string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	if method == "POST" {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	c.flare.prepare(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, unavailablef("%s: %s", c.def.Name, describeNetErr(err))
+	}
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	resp.Body.Close()
+	if isChallenge(data) {
+		return nil, blockedf("%s still shows a browser check after %s passed it", c.def.Name, c.flare.Name())
+	}
+	if resp.StatusCode >= 400 {
 		return nil, unavailablef("%s answered HTTP %d", c.def.Name, resp.StatusCode)
 	}
 	if enc := strings.ToLower(c.def.Encoding); enc == "windows-1251" || enc == "cp1251" {
@@ -783,46 +905,47 @@ func (c *cardigann) downloadLink(ctx context.Context, page []byte) string {
 // service (github.com/FlareSolverr/FlareSolverr) loads the page in a real browser, and its
 // cookies and user agent are reused for a while.
 type flareSolverr struct {
+	solverCookies
 	url  string
 	http *http.Client
-	mu   sync.Mutex
-	ua   string
-	jar  map[string][]*http.Cookie // by host
 }
 
-func newFlareSolverr(u string) *flareSolverr {
+// newFlareSolverr is nil (no solver) without an address.
+func newFlareSolverr(u string) challengeSolver {
 	if strings.TrimSpace(u) == "" {
 		return nil
 	}
-	return &flareSolverr{url: strings.TrimRight(u, "/") + "/v1", http: &http.Client{Timeout: 90 * time.Second}, jar: map[string][]*http.Cookie{}}
-}
-
-func (f *flareSolverr) prepare(req *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	req.Header.Set("User-Agent", FirstNonEmpty(f.ua, browserUA))
-	for _, ck := range f.jar[req.URL.Host] {
-		req.AddCookie(ck)
+	if !strings.Contains(u, "://") {
+		u = "http://" + u
 	}
+	return &flareSolverr{url: strings.TrimRight(u, "/") + "/v1", http: &http.Client{Timeout: 90 * time.Second}}
 }
 
-func (f *flareSolverr) get(ctx context.Context, u string) ([]byte, error) {
+func (f *flareSolverr) Name() string { return "FlareSolverr" }
+
+func (f *flareSolverr) clear(ctx context.Context, u string) error {
+	host := ""
+	if pu, err := url.Parse(u); err == nil {
+		host = pu.Hostname()
+	}
+	if f.fresh(host) {
+		return blockedf("%s still shows a browser check after FlareSolverr passed it", host)
+	}
 	body, _ := json.Marshal(map[string]any{"cmd": "request.get", "url": u, "maxTimeout": 60000})
 	req, err := http.NewRequestWithContext(ctx, "POST", f.url, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := f.http.Do(req)
 	if err != nil {
-		return nil, unavailablef("FlareSolverr at %s: %s", f.url, describeNetErr(err))
+		return unavailablef("FlareSolverr at %s: %s", f.url, describeNetErr(err))
 	}
 	defer resp.Body.Close()
 	var out struct {
 		Status   string
 		Message  string
 		Solution struct {
-			Response  string
 			UserAgent string `json:"userAgent"`
 			Cookies   []struct {
 				Name, Value string
@@ -830,19 +953,12 @@ func (f *flareSolverr) get(ctx context.Context, u string) ([]byte, error) {
 		}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Status != "ok" {
-		return nil, unavailablef("FlareSolverr couldn't get past the check: %s", FirstNonEmpty(out.Message, fmt.Sprint(err)))
+		return unavailablef("FlareSolverr couldn't get past the check: %s", FirstNonEmpty(out.Message, fmt.Sprint(err)))
 	}
-	host := ""
-	if pu, err := url.Parse(u); err == nil {
-		host = pu.Host
-	}
-	f.mu.Lock()
-	f.ua = out.Solution.UserAgent
 	var jar []*http.Cookie
 	for _, ck := range out.Solution.Cookies {
 		jar = append(jar, &http.Cookie{Name: ck.Name, Value: ck.Value})
 	}
-	f.jar[host] = jar
-	f.mu.Unlock()
-	return []byte(out.Solution.Response), nil
+	f.set(host, out.Solution.UserAgent, jar)
+	return nil
 }

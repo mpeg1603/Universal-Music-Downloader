@@ -685,7 +685,7 @@ func torrentFeeds(parent context.Context, cfg Config, defs *indexerDefs) ([]*Tor
 		if data == nil {
 			continue
 		}
-		c, err := newCardigann(data, flare, route)
+		c, err := newCardigannWith(data, flare, route, cfg.Indexers.Settings[id])
 		if err != nil {
 			Logf("Torrent: indexer %s: %v", id, err)
 			continue

@@ -614,6 +614,7 @@ func (ui *tui) pickIndexers() {
 	t := tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
 	info := tview.NewTextView().SetDynamicColors(true).SetWrap(true)
 	musicOnly := true
+	find := ""
 	var rows []core.IndexerStatus
 	fill := func() {
 		row, _ := t.GetSelection()
@@ -622,6 +623,9 @@ func (ui *tui) pickIndexers() {
 		rows = rows[:0]
 		for _, x := range ui.m.Indexers() {
 			if musicOnly && !x.Music && !x.On {
+				continue
+			}
+			if find != "" && !strings.Contains(strings.ToLower(x.Name+" "+x.ID+" "+x.Site), strings.ToLower(find)) {
 				continue
 			}
 			rows = append(rows, x)
@@ -644,6 +648,13 @@ func (ui *tui) pickIndexers() {
 			if x.Default {
 				name += " ★"
 			}
+			if x.Login {
+				if len(ui.m.Config().Indexers.Settings[x.ID]) > 0 {
+					name += " 🔑"
+				} else {
+					name += " (account: Enter)"
+				}
+			}
 			cells := []*tview.TableCell{
 				tview.NewTableCell(on).SetTextColor(color),
 				tview.NewTableCell(tview.Escape(name)).SetExpansion(1).SetMaxWidth(40),
@@ -656,7 +667,9 @@ func (ui *tui) pickIndexers() {
 				t.SetCell(i+1, c, cell)
 			}
 		}
-		if len(rows) == 0 {
+		if len(rows) == 0 && find != "" {
+			t.SetCell(1, 1, tview.NewTableCell("[yellow]None match \""+tview.Escape(find)+"\" (/ to change, a to show all, not just music)[-]").SetSelectable(false))
+		} else if len(rows) == 0 {
 			t.SetCell(1, 1, tview.NewTableCell("[yellow]No definitions yet: u fetches them from GitHub (Jackett's)[-]").SetSelectable(false))
 		}
 		t.Select(min(max(row, 1), max(1, len(rows))), 0)
@@ -665,29 +678,46 @@ func (ui *tui) pickIndexers() {
 		row, _ := t.GetSelection()
 		if row >= 1 && row-1 < len(rows) {
 			x := rows[row-1]
-			info.SetText(fmt.Sprintf("[::b]%s[::-] · %s\n%s", tview.Escape(x.Name), tview.Escape(x.Site), tview.Escape(x.Description)))
+			text := fmt.Sprintf("[::b]%s[::-] · %s\n%s", tview.Escape(x.Name), tview.Escape(x.Site), tview.Escape(x.Description))
+			if x.Login {
+				text += "\n[yellow]Needs your account on the site: Enter sets it.[-]"
+			}
+			info.SetText(text)
 		}
 	}
 	t.SetSelectionChangedFunc(func(int, int) { show() })
-	toggle := func() {
+	account := func(x core.IndexerStatus) {
+		ui.indexerAccount(x, func() { fill() })
+	}
+	toggle := func(enter bool) {
 		row, _ := t.GetSelection()
 		if row >= 1 && row-1 < len(rows) {
-			if err := ui.m.SetIndexer(rows[row-1].ID, !rows[row-1].On); err != nil {
+			x := rows[row-1]
+			if x.Login && (enter || !x.On && len(ui.m.Config().Indexers.Settings[x.ID]) == 0) {
+				account(x)
+				return
+			}
+			if err := ui.m.SetIndexer(x.ID, !x.On); err != nil {
 				ui.message("Indexers", err.Error())
 			}
 			fill()
 		}
 	}
-	t.SetSelectedFunc(func(int, int) { toggle() })
+	t.SetSelectedFunc(func(int, int) { toggle(true) })
 	t.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		switch {
 		case ev.Key() == tcell.KeyEscape || ev.Rune() == 'q':
 			ui.closeModal(name)
 		case ev.Rune() == ' ':
-			toggle()
+			toggle(false)
 		case ev.Rune() == 'a':
 			musicOnly = !musicOnly
 			fill()
+		case ev.Rune() == '/':
+			ui.askText("Find an indexer", "Name or address (empty: all)", find, func(v string) {
+				find = strings.TrimSpace(v)
+				fill()
+			})
 		case ev.Rune() == 'u':
 			info.SetText("[yellow]Fetching Jackett's definitions from GitHub…[-]")
 			go func() {
@@ -711,6 +741,46 @@ func (ui *tui) pickIndexers() {
 	fill()
 	show()
 	box := tview.NewFlex().SetDirection(tview.FlexRow).AddItem(t, 0, 1, true).AddItem(info, 3, 0, false)
-	box.SetBorder(true).SetTitle(" Built-in indexers (Enter/space: on/off · ★ default · ♪ has music · a: all/music only · u: update from GitHub · Esc) ")
+	box.SetBorder(true).SetTitle(" Built-in indexers (space: on/off · Enter: on/off, or the account · / find · ★ default · ♪ music · a: all/music · u: update · Esc) ")
 	ui.openModal(name, box, 120, min(max(ui.height-4, 16), 40))
+}
+
+// indexerAccount asks for an indexer's settings (a login), saves them and turns it on.
+func (ui *tui) indexerAccount(x core.IndexerStatus, done func()) {
+	const name = "indexer-account"
+	have := ui.m.Config().Indexers.Settings[x.ID]
+	form := tview.NewForm().SetItemPadding(0)
+	values := map[string]string{}
+	for _, s := range x.Settings {
+		key := s.Name
+		values[key] = have[key]
+		if s.Secret {
+			form.AddPasswordField(s.Label, have[key], 30, '*', func(v string) { values[key] = v })
+		} else {
+			form.AddInputField(s.Label, have[key], 30, nil, func(v string) { values[key] = v })
+		}
+	}
+	form.AddTextView("", "Kept in the settings file, readable only by you. The app logs in once and keeps the session; "+
+		"a failed login isn't tried again for 30 minutes (sites lock accounts or ask for captchas after many).", 0, 3, false, false)
+	close := func() { ui.closeModal(name); done() }
+	form.AddButton("Save and turn on", func() {
+		if err := ui.m.SetIndexerSettings(x.ID, values); err != nil {
+			ui.message(x.Name, err.Error())
+			return
+		}
+		close()
+	})
+	if len(have) > 0 {
+		form.AddButton("Forget the account", func() {
+			if err := ui.m.SetIndexerSettings(x.ID, nil); err != nil {
+				ui.message(x.Name, err.Error())
+				return
+			}
+			close()
+		})
+	}
+	form.AddButton("Cancel", close)
+	form.SetCancelFunc(close)
+	form.SetBorder(true).SetTitle(" " + x.Name + ": your account (" + x.Site + ") ")
+	ui.openModal(name, form, 90, form.GetFormItemCount()+8)
 }

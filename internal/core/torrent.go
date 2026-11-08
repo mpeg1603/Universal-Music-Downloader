@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // Torrents as a download source. Searches go through Torznab, the API that Jackett and
@@ -1418,12 +1420,17 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 	if cg := s.builtin(r.Indexer); cg != nil && r.Link != "" && magnet == "" {
 		// A built-in indexer's link may be the details page: its download selectors find the
 		// real link there.
-		page, err := cg.fetch(ctx, "GET", r.Link, nil)
+		page, err := cg.fetchFile(ctx, r.Link)
 		if err != nil {
 			return nil, err
 		}
 		if bytes.HasPrefix(page, []byte("d")) && bytes.Contains(page[:min(len(page), 64)], []byte(":info")) || bytes.HasPrefix(page, []byte("d8:announce")) {
 			return page, nil
+		}
+		if strings.EqualFold(cg.def.Encoding, "windows-1251") {
+			if d, err := charmap.Windows1251.NewDecoder().Bytes(page); err == nil {
+				page = d
+			}
 		}
 		link := cg.downloadLink(ctx, page)
 		switch {
@@ -1434,6 +1441,16 @@ func (s *TorrentSource) torrentBytes(ctx context.Context, r torrentResult) ([]by
 		default:
 			return nil, failf("no download link on the page of “%s”", r.Title)
 		}
+	}
+	if cg := s.builtin(r.Indexer); cg != nil && cg.def.NeedsLogin() && r.Link != "" {
+		data, err := cg.fetchFile(ctx, r.Link) // with the login
+		if err != nil {
+			return nil, err
+		}
+		if bytes.HasPrefix(data, []byte("d")) {
+			return data, nil
+		}
+		return nil, failf("%s didn't send a torrent file for “%s”", cg.def.Name, r.Title)
 	}
 	if r.Link != "" {
 		req, _ := http.NewRequestWithContext(ctx, "GET", r.Link, nil)
