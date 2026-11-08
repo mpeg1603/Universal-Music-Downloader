@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -20,6 +21,7 @@ func (m *Manager) setupSoulseek(cfg Config) {
 		if old != nil {
 			m.srcMu.Lock()
 			m.slsk, m.slskSrc, m.slskKey = nil, nil, ""
+			m.slskClosed = time.Now()
 			m.srcMu.Unlock()
 			old.Close()
 			Logf("Soulseek: logged out")
@@ -35,10 +37,27 @@ func (m *Manager) setupSoulseek(cfg Config) {
 		m.shareFolders(cfg, false)
 		return
 	}
+	c := newSlskClient(cfg.Soulseek, NormalizeRoute(sc.Route), m.shares)
+	c.banFile = filepath.Join(m.dataDir, "soulseek-ban.txt")
 	if old != nil {
 		old.Close()
+		old.mu.Lock()
+		c.bannedTill = old.bannedTill
+		old.mu.Unlock()
 	}
-	c := newSlskClient(cfg.Soulseek, NormalizeRoute(sc.Route), m.shares)
+	// A new client keeps the search budget and answers, and logs in at least 30 seconds
+	// after the last one logged out.
+	m.srcMu.Lock()
+	if m.slskBudget == nil {
+		m.slskBudget, m.slskAnswers = c.budget, c.answers
+	}
+	c.budget, c.answers = m.slskBudget, m.slskAnswers
+	if old != nil {
+		m.slskClosed = time.Now()
+	}
+	c.notBefore = m.slskClosed.Add(30 * time.Second)
+	m.srcMu.Unlock()
+	c.budget.set(cfg.Soulseek.SearchInterval(), cfg.Soulseek.SearchesPerHour())
 	c.setWishlist(m.soulseekWish)
 	src := newSoulseekSource(c, cfg.Format)
 	src.jump, src.goodSeeder = m.mayJump, m.seederAffinity

@@ -232,9 +232,13 @@ type slskClient struct {
 	wishNext   time.Time
 	dist       slskDist
 
-	searchPace *rateLimiter
-	searchMin  time.Duration // a search collects answers for at least this long
-	searchMax  time.Duration // and at most this long
+	budget     *slskSearchBudget // how often searches may go out
+	answers    *slskSearchCache  // searches made in the last hour, and their answers
+	notBefore  time.Time         // the first login waits until then (a new client after a settings change)
+	banFile    string            // where a ban's end is kept across restarts ("": not kept)
+	bannedTill time.Time         // the server banned us until then: don't connect before
+	searchMin  time.Duration     // a search collects answers for at least this long
+	searchMax  time.Duration     // and at most this long
 	searchSem  chan struct{}
 	answerSem  chan struct{}
 	handshakes chan struct{}
@@ -250,7 +254,7 @@ func newSlskClient(cfg SoulseekConfig, route string, shares *slskShares) *slskCl
 		addrWait: map[string][]chan slskAddr{}, pending: map[uint32]*slskConnReq{}, peers: map[string]*slskConn{},
 		dialing: map[string]*slskDial{}, searches: map[uint32]*slskSearch{}, folderWait: map[uint32]chan []slskFile{}, browseWait: map[string]chan []slskFile{}, speeds: map[string]float64{}, downloads: map[string]*slskDownload{},
 		userLocks: map[string]chan struct{}{}, wishEvery: 12 * time.Minute,
-		searchPace: &rateLimiter{interval: cfg.SearchInterval()}, searchMin: 4 * time.Second, searchMax: 12 * time.Second, searchSem: make(chan struct{}, 2),
+		budget: newSlskSearchBudget(cfg.SearchInterval(), cfg.SearchesPerHour()), answers: &slskSearchCache{}, searchMin: 4 * time.Second, searchMax: 12 * time.Second, searchSem: make(chan struct{}, 2),
 		answerSem: make(chan struct{}, 12), handshakes: make(chan struct{}, 64)}
 	c.ups = newSlskUploads(c)
 	c.upLimit.setRate(float64(cfg.UploadKBps) * 1024)
@@ -308,9 +312,7 @@ func (c *slskClient) apply(cfg SoulseekConfig) {
 	c.mu.Unlock()
 	c.dlGate.setLimit(cfg.MaxDownloads())
 	c.upLimit.setRate(float64(cfg.UploadKBps) * 1024)
-	c.searchPace.mu.Lock()
-	c.searchPace.interval = cfg.SearchInterval()
-	c.searchPace.mu.Unlock()
+	c.budget.set(cfg.SearchInterval(), cfg.SearchesPerHour())
 	if fmt.Sprint(old.Rooms) != fmt.Sprint(cfg.Rooms) {
 		for _, r := range cfg.Rooms {
 			if !ContainsString(old.Rooms, r) {
@@ -572,27 +574,56 @@ func (c *slskClient) setState(f func(*SlskState)) {
 	c.mu.Unlock()
 }
 
+// The server asks clients not to connect and disconnect quickly: the first retry comes after
+// 30 seconds, then twice as long each time, up to 30 minutes; a login the server doesn't
+// answer (a ban, most likely) waits 10 minutes at least, and a ban it announced is waited
+// out in full.
 func (c *slskClient) run() {
-	backoff := 15 * time.Second
+	const firstWait = 30 * time.Second
+	backoff := firstWait
+	c.mu.Lock()
+	c.bannedTill = later(c.bannedTill, loadBan(c.banFile))
+	c.mu.Unlock()
+	if d := time.Until(c.notBefore); d > 0 {
+		c.setState(func(s *SlskState) {
+			s.Connecting, s.Problem = false, "logging in again at "+c.notBefore.Format("15:04:05")+" (the server asks clients not to reconnect quickly)"
+		})
+		select {
+		case <-time.After(d):
+		case <-c.ctx.Done():
+			return
+		}
+	}
 	for c.ctx.Err() == nil {
+		if !c.waitBan() {
+			return
+		}
 		start := time.Now()
 		err, permanent := c.session()
 		if c.ctx.Err() != nil {
 			return
 		}
 		if time.Since(start) > 10*time.Minute {
-			backoff = 15 * time.Second
+			backoff = firstWait
 		}
 		msg := "disconnected"
 		if err != nil {
 			msg = err.Error()
 		}
+		if errors.Is(err, errSlskNoLoginAnswer) {
+			backoff = max(backoff, 10*time.Minute)
+		}
 		var wait <-chan time.Time
-		if !permanent {
+		if until := c.banEnd(); !until.IsZero() {
+			permanent = false
+			msg = fmt.Sprintf("banned by the Soulseek server until %s (too many searches or other requests); not connecting before then", until.Format("15:04"))
+			c.logf("%s", msg)
+			wait = time.After(0) // waitBan does the waiting
+		} else if !permanent {
 			wait = time.After(backoff)
 			c.logf("%s; connecting again in %s", msg, FmtWait(backoff))
 			msg += "; connecting again at " + time.Now().Add(backoff).Format("15:04:05")
-			backoff = min(backoff*2, 10*time.Minute)
+			backoff = min(backoff*2, 30*time.Minute)
 		} else {
 			c.logf("%s", msg)
 		}
@@ -602,10 +633,62 @@ func (c *slskClient) run() {
 		select {
 		case <-wait:
 		case <-c.reconnect:
-			backoff = 15 * time.Second
+			if !errors.Is(err, errSlskNoLoginAnswer) {
+				backoff = firstWait
+			}
 		case <-c.ctx.Done():
 			return
 		}
+	}
+}
+
+var errSlskNoLoginAnswer = errors.New("the Soulseek server didn't answer the login (it does that for banned accounts and addresses)")
+
+// banEnd is when the server's ban ends; zero when there's none.
+func (c *slskClient) banEnd() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if time.Until(c.bannedTill) <= 0 {
+		return time.Time{}
+	}
+	return c.bannedTill
+}
+
+// waitBan waits for a ban to end (reconnecting by hand doesn't shorten it). false: closing.
+func (c *slskClient) waitBan() bool {
+	until := c.banEnd()
+	if until.IsZero() {
+		return true
+	}
+	c.setState(func(s *SlskState) {
+		s.Online, s.Connecting, s.Permanent = false, false, false
+		s.Problem = fmt.Sprintf("banned by the Soulseek server until %s (too many searches or other requests); not connecting before then", until.Format("15:04"))
+	})
+	select {
+	case <-time.After(time.Until(until)):
+		return true
+	case <-c.ctx.Done():
+		return false
+	}
+}
+
+// serverNotice reads what the server says for a ban: everything stops, and the client
+// stays away until the ban is over, plus a few minutes.
+func (c *slskClient) serverNotice(from, text string) {
+	d, ok := slskBanLength(text)
+	if !ok || !(strings.EqualFold(from, "server") || from == "") {
+		return
+	}
+	until := time.Now().Add(d + 5*time.Minute)
+	c.mu.Lock()
+	c.bannedTill = later(c.bannedTill, until)
+	until = c.bannedTill
+	srv := c.srv
+	c.mu.Unlock()
+	saveBan(c.banFile, until)
+	c.logf("the server banned this account for %s; not connecting again before %s", FmtWait(d), until.Format("15:04"))
+	if srv != nil {
+		srv.close()
 	}
 }
 
@@ -633,7 +716,7 @@ func (c *slskClient) session() (err error, permanent bool) {
 	code, body, err := readSlskFrame(sc.r, 4, slskLimitServer)
 	if err != nil || code != ssLogin {
 		// A banned account or address gets no answer at all.
-		return errors.New("the Soulseek server didn't answer the login (it does that for banned accounts and addresses)"), false
+		return errSlskNoLoginAnswer, false
 	}
 	conn.SetReadDeadline(time.Time{})
 	r := &slskRead{b: body}
@@ -873,6 +956,7 @@ func (c *slskClient) onServer(code uint32, r *slskRead) bool {
 				c.chat.private(user, text, time.Unix(int64(ts), 0), false)
 				c.logf("message from %s: %s", user, FitWidth(text, 120))
 			}
+			c.serverNotice(user, text)
 		}
 	case ssSayChatroom:
 		room, user, text := r.str(), r.str(), r.str()
@@ -914,6 +998,7 @@ func (c *slskClient) onServer(code uint32, r *slskRead) bool {
 		text := r.str()
 		c.chat.private("(server)", text, time.Now(), false)
 		c.logf("message from the server admins: %s", text)
+		c.serverNotice("", text)
 	case ssCantCreateRoom:
 		room := r.str()
 		c.chat.notice(room, "the server refused to create this room")
@@ -1197,7 +1282,7 @@ func (s *slskSearch) snapshot() ([]slskResponse, time.Time) {
 }
 
 // searchBacklog is how long a search started now would wait for its turn.
-func (c *slskClient) searchBacklog() time.Duration { return c.searchPace.backlog() }
+func (c *slskClient) searchBacklog() time.Duration { return c.budget.backlog() }
 
 // slskQuery makes search text the network handles well: plain words, no punctuation
 // (SoulseekQt answers nothing when some characters are in it), no words the server would
@@ -1220,11 +1305,36 @@ func slskQuery(s string) string {
 }
 
 // Search sends a search to the network and collects the answers that arrive in the next
-// few seconds. Searches are paced (see SoulseekConfig.SearchGap) and at most two run at once.
+// few seconds. Searches are budgeted (slskSearchBudget), at most two run at once, and the
+// same search within an hour gets the answers of the first (also while it's under way).
 func (c *slskClient) Search(ctx context.Context, text string) ([]slskResponse, error) {
 	text = slskQuery(text)
 	if len(text) < 3 {
 		return nil, nil
+	}
+	for {
+		s, mine := c.answers.get(text)
+		if !mine {
+			select {
+			case <-s.done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			if s.err != nil { // that one was given up on: search again
+				continue
+			}
+			c.debugf("answers to %q kept from %s ago", text, FmtWait(time.Since(s.at)))
+			return s.resps, nil
+		}
+		resps, err := c.search(ctx, text)
+		c.answers.finish(s, resps, err)
+		return resps, err
+	}
+}
+
+func (c *slskClient) search(ctx context.Context, text string) ([]slskResponse, error) {
+	if until := c.banEnd(); !until.IsZero() {
+		return nil, unavailablef("banned by the Soulseek server until %s", until.Format("15:04"))
 	}
 	if !c.waitOnline(ctx, 45*time.Second) {
 		if ctx.Err() != nil {
@@ -1238,8 +1348,11 @@ func (c *slskClient) Search(ctx context.Context, text string) ([]slskResponse, e
 		return nil, ctx.Err()
 	}
 	defer func() { <-c.searchSem }()
-	if err := c.searchPace.wait(ctx); err != nil {
+	if err := c.budget.wait(ctx); err != nil {
 		return nil, err
+	}
+	if !c.online() {
+		return nil, unavailablef("%s", c.offlineReason())
 	}
 	token := c.nextToken()
 	s := &slskSearch{}

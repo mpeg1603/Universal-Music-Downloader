@@ -164,12 +164,17 @@ type Manager struct {
 	bcMail   *bandcampMail // Bandcamp's emailed download links
 	slsk     *slskClient   // the Soulseek client, while the source is on
 	slskKey  string        // the settings it logged in with
-	slskSrc  *Soulseek
-	shares   *slskShares          // what's shared on Soulseek
-	shareKey string               // the folders scanned for it
-	wishPos  int                  // where the Soulseek wishlist goes on
-	browsed  map[string]time.Time // Soulseek users looked through for queued tracks (seederAffinity)
-	browsing int
+	// What outlives a client (a new login after a settings change, or turning Soulseek off
+	// and on): the search budget and answers, and when the last client logged out.
+	slskBudget  *slskSearchBudget
+	slskAnswers *slskSearchCache
+	slskClosed  time.Time
+	slskSrc     *Soulseek
+	shares      *slskShares          // what's shared on Soulseek
+	shareKey    string               // the folders scanned for it
+	wishPos     int                  // where the Soulseek wishlist goes on
+	browsed     map[string]time.Time // Soulseek users looked through for queued tracks (seederAffinity)
+	browsing    int
 	manualDownloads
 	cookies  *ytCookies // your YouTube login, for yt-dlp
 	cookieID string     // the settings cookies was made from

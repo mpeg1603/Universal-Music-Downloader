@@ -261,14 +261,32 @@ Soulseek source on in the Sources tab (`space`). Don't run another Soulseek clie
 same account at the same time: each logs the other out (the app then stays offline until you
 press `R` in the Soulseek tab, instead of fighting over the login).
 
-**Being a good citizen.** The network's rules ask clients not to flood it, and it bans those
-that do. So the app sends **one search every 5 seconds** at most (configurable, never less
-than 3), at most two at a time; requests **at most 2 files at once** (configurable 1–4) and
-only one from any user; passes over a user who hasn't started sending within 5 minutes
-(configurable) instead of asking again; asks for its place in a queue only every few
-minutes; and never retries the server in a tight loop (15 seconds, then longer, up to 10
-minutes). Users who can send right away, and quickly, are tried first. Soulseek downloads
-count toward the bandwidth setting.
+**Being a good citizen.** The network's rules ask clients not to flood it, and the server
+bans those that do for 30 minutes ("…too many operations at once… Do not quickly repeat a
+search…"). It publishes no limits; one search every 5 seconds got this app banned after about
+170 searches. So now:
+
+- **Searches are budgeted**: one every 10 seconds at most (configurable, never less than 8), at
+  most **120 an hour** and a quarter of that in any 10 minutes (configurable, 20 to 200), at
+  most two at a time. When the budget is used up, tracks move on to other sources (queue
+  jumping) instead of waiting.
+- **The same search isn't sent twice within an hour**: its answers are kept, and a search
+  that's under way is shared by everything asking for the same thing.
+- **Albums are searched once**: a track's first search is its album (`Artist Album`), since
+  people share album folders; the album's other tracks are then found in the same answers
+  without a search of their own. The song itself is searched only when the album search had
+  nothing.
+- **A ban is waited out in full**: when the server says you're banned, the app logs out and
+  doesn't connect again until the ban is over plus 5 minutes, also across restarts (`R` doesn't
+  shorten it). A login the server doesn't answer (that's how bans look from outside) is tried
+  again after 10 minutes at least; other reconnects start at 30 seconds and grow to 30
+  minutes. A new login after a settings change waits 30 seconds after the last one.
+- Downloads: **at most 2 files at once** (configurable 1–4) and only one from any user; a user
+  who hasn't started sending within 5 minutes (configurable) is passed over instead of asked
+  again; places in queues are asked for only every few minutes.
+
+Users who can send right away, and quickly, are tried first. Soulseek downloads count toward
+the bandwidth setting.
 
 **Sharing.** Many users don't send files to people who share nothing, and the network's
 rules expect clients to share. By default your library folders and the downloads folder are

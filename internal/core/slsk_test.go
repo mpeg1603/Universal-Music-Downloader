@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -50,6 +51,12 @@ func newFakeSlskServer(t *testing.T) *fakeSlskServer {
 }
 
 func (s *fakeSlskServer) addr() string { return s.ln.Addr().String() }
+
+func (s *fakeSlskServer) logins() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.got[ssLogin])
+}
 
 func (s *fakeSlskServer) serve(sc *slskConn) {
 	defer sc.close()
@@ -402,6 +409,7 @@ func testSlskClient(t *testing.T, srv *fakeSlskServer, shares *slskShares, mutat
 	}
 	c := newSlskClient(cfg, RouteSystem, shares)
 	c.searchMin, c.searchMax = 300*time.Millisecond, 3*time.Second
+	c.budget = newSlskSearchBudget(0, 1000)
 	c.Start()
 	t.Cleanup(c.Close)
 	deadline := time.Now().Add(10 * time.Second)
@@ -453,7 +461,7 @@ func TestSoulseekDownload(t *testing.T) {
 		t.Fatalf("%v %s %+v", v.State, v.Reason, v.Rec)
 	}
 	mu.Lock()
-	if len(searches) != 1 || searches[0] != "Daft Punk Get Lucky" {
+	if len(searches) != 1 || searches[0] != "Daft Punk Random Access Memories" { // the album first
 		t.Errorf("searches %q", searches)
 	}
 	mu.Unlock()
@@ -920,5 +928,132 @@ func TestSoulseekSocial(t *testing.T) {
 	srv.waitFor(ssMessageAcked, 1)
 	if c.chat.Unread() != 0 {
 		t.Error("an ignored user's message shows")
+	}
+}
+
+func TestSlskSearchBudget(t *testing.T) {
+	b := newSlskSearchBudget(10*time.Second, 120) // 30 in any 10 minutes
+	now := time.Now()
+	var slots []time.Time
+	for range 31 {
+		s := b.slot(now)
+		b.sent = append(b.sent, s)
+		b.next = s.Add(b.gap)
+		slots = append(slots, s)
+	}
+	for i := 1; i < 30; i++ {
+		if d := slots[i].Sub(slots[i-1]); d != 10*time.Second {
+			t.Fatalf("gap %d: %s", i, d)
+		}
+	}
+	if d := slots[30].Sub(slots[0]); d != 10*time.Minute { // the 31st waits for the first to age out
+		t.Errorf("31st search after %s, want 10m", d)
+	}
+	// The hourly cap: 120 slots, then the 121st waits for the first to be an hour old.
+	b = newSlskSearchBudget(0, 120)
+	for range 120 {
+		s := b.slot(now)
+		b.sent = append(b.sent, s)
+	}
+	if d := b.slot(now).Sub(b.sent[0]); d != time.Hour {
+		t.Errorf("121st search %s after the first, want 1h", d)
+	}
+	// Giving a slot back (the search was cancelled while waiting).
+	b = newSlskSearchBudget(time.Hour, 120)
+	b.next = time.Now().Add(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := b.wait(ctx); err == nil || len(b.sent) != 0 {
+		t.Errorf("cancelled wait: %v, %d slots kept", err, len(b.sent))
+	}
+}
+
+func TestSlskBanLength(t *testing.T) {
+	msg := "System Message: You have been banned for 30 minutes. This is usually the result of doing too many operations at once."
+	if d, ok := slskBanLength(msg); !ok || d != 30*time.Minute {
+		t.Errorf("%s %v", d, ok)
+	}
+	if _, ok := slskBanLength("hello there"); ok {
+		t.Error("not a ban")
+	}
+	path := filepath.Join(t.TempDir(), "ban")
+	until := time.Now().Add(20 * time.Minute).Truncate(time.Second)
+	saveBan(path, until)
+	if got := loadBan(path); !got.Equal(until) {
+		t.Errorf("loaded %v, want %v", got, until)
+	}
+	saveBan(path, time.Now().Add(-time.Minute))
+	if got := loadBan(path); !got.IsZero() {
+		t.Errorf("an ended ban: %v", got)
+	}
+}
+
+// The same search isn't sent twice: the second gets the first's answers, also while the
+// first is under way; and a ban message from the server stops everything until it's over.
+func TestSlskSearchKeptAndBan(t *testing.T) {
+	srv := newFakeSlskServer(t)
+	peer := newFakeSlskPeer(t, "remote")
+	peer.files[`Music\Daft Punk\Random Access Memories\08 - Get Lucky.flac`] = []byte("x")
+	var n atomic.Int32
+	srv.onSearch = func(token uint32, text string) { n.Add(1); peer.answerSearch(token) }
+	c := testSlskClient(t, srv, nil, nil)
+	if !c.online() {
+		t.Fatalf("not online: %+v", c.State())
+	}
+	srv.mu.Lock()
+	srv.addrs["remote"] = slskAddr{ip: net.IPv4(127, 0, 0, 1), port: peer.port()}
+	peer.clientAt = net.JoinHostPort("127.0.0.1", strconv.Itoa(c.listenPort()))
+	srv.mu.Unlock()
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	got := make([]int, 3)
+	for i := range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, _ := c.Search(ctx, "Daft Punk  random access memories")
+			got[i] = len(r)
+		}()
+	}
+	wg.Wait()
+	if r, _ := c.Search(ctx, "daft punk random access memories"); n.Load() != 1 || len(r) != 1 || got[0] != 1 || got[2] != 1 {
+		t.Errorf("%d searches sent; answers %v, %d", n.Load(), got, len(r))
+	}
+
+	c.banFile = filepath.Join(t.TempDir(), "ban")
+	c.serverNotice("server", "System Message: You have been banned for 30 minutes. This is usually the result of doing too many operations at once.")
+	deadline := time.Now().Add(5 * time.Second)
+	for c.online() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if c.online() {
+		t.Fatal("still online after the ban")
+	}
+	if until := loadBan(c.banFile); time.Until(until) < 30*time.Minute {
+		t.Errorf("ban kept until %v", until)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if st := c.State(); !strings.Contains(st.Problem, "banned") || st.Online {
+		t.Errorf("state %+v", st)
+	}
+	if _, err := c.Search(ctx, "something else"); err == nil || !strings.Contains(err.Error(), "banned") {
+		t.Errorf("search while banned: %v", err)
+	}
+	logins := srv.logins()
+	c.Reconnect()
+	time.Sleep(500 * time.Millisecond)
+	if srv.logins() != logins {
+		t.Error("logged in again during the ban")
+	}
+}
+
+func TestSlskQueries(t *testing.T) {
+	tr := GetLucky()
+	if q := slskQueries(tr); len(q) != 2 || q[0] != "Daft Punk Random Access Memories" || q[1] != "Daft Punk Get Lucky" {
+		t.Errorf("%q", q)
+	}
+	single := Track{Title: "Get Lucky", Artists: []string{"Daft Punk"}, Album: "Get Lucky (Radio Edit)"}
+	if q := slskQueries(&single); len(q) != 1 || q[0] != "Daft Punk Get Lucky" {
+		t.Errorf("single: %q", q)
 	}
 }

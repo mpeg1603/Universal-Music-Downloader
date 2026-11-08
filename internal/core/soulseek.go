@@ -26,7 +26,8 @@ type SoulseekConfig struct {
 	NoUPnP   bool   `json:"no_upnp,omitempty"`     // don't ask the router to forward the port
 
 	Downloads int      `json:"downloads_at_once,omitempty"`        // 1-4; 0: 2
-	SearchGap float64  `json:"seconds_between_searches,omitempty"` // 0: 5; at least 3
+	SearchGap float64  `json:"seconds_between_searches,omitempty"` // 0: 10; at least 8
+	PerHour   int      `json:"searches_per_hour,omitempty"`        // 0: 120; 20 to 200
 	QueueWait Duration `json:"queue_wait,omitempty"`               // give up on a user's queue after; 0: 5m
 
 	NoShare     bool     `json:"no_sharing,omitempty"`
@@ -69,11 +70,21 @@ func (c SoulseekConfig) MaxDownloads() int {
 	return min(c.Downloads, 4)
 }
 
+// SearchInterval is the least time between two searches. The server bans clients that search
+// too often (see slsk_budget.go): at least 8 seconds, 10 by default.
 func (c SoulseekConfig) SearchInterval() time.Duration {
 	if c.SearchGap <= 0 {
-		return 5 * time.Second
+		return 10 * time.Second
 	}
-	return time.Duration(max(c.SearchGap, 3) * float64(time.Second))
+	return time.Duration(max(c.SearchGap, 8) * float64(time.Second))
+}
+
+// SearchesPerHour caps the searches in any hour (and a quarter of it in any 10 minutes).
+func (c SoulseekConfig) SearchesPerHour() int {
+	if c.PerHour <= 0 {
+		return 120
+	}
+	return min(max(c.PerHour, 20), 200)
 }
 
 func (c SoulseekConfig) QueueTimeout() time.Duration {
@@ -119,8 +130,8 @@ func (c SoulseekConfig) validate() error {
 	if c.Downloads < 0 || c.Downloads > 4 {
 		return fmt.Errorf("Soulseek downloads at once: 1 to 4 (the network asks for restraint)")
 	}
-	if c.SearchGap != 0 && c.SearchGap < 3 {
-		return fmt.Errorf("seconds between Soulseek searches: at least 3")
+	if c.SearchGap < 0 || c.PerHour < 0 || c.PerHour > 200 {
+		return fmt.Errorf("Soulseek searches: at most 200 an hour (the server bans clients that search too much)")
 	}
 	if c.UploadSlots < 0 || c.UploadSlots > 20 {
 		return fmt.Errorf("Soulseek upload slots: 1 to 20")
@@ -218,18 +229,37 @@ func (s *Soulseek) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 	if ok && time.Since(hit.at) < 30*time.Minute {
 		return hit.cands, nil
 	}
-	// Soulseek matches every word against file paths, so plain words work best.
-	var queries []string
-	for _, q := range songQueries(t, 2) {
-		queries = append(queries, queryText(q))
-	}
-	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) {
+	return searchUntilFound(ctx, t, slskQueries(t), func(q string) ([]Candidate, error) {
 		resps, err := s.c.Search(ctx, q)
 		if err != nil {
 			return nil, err
 		}
 		return s.candidates(t, resps), nil
 	})
+}
+
+// slskQueries are a track's Soulseek searches. Searches are scarce (the server bans clients
+// that search much), and people share whole album folders, so the album comes first: its
+// answers are kept for an hour and serve the album's other tracks without a search of their
+// own. Then the song itself. Soulseek matches every word against file paths, so plain words.
+func slskQueries(t *Track) []string {
+	var queries []string
+	album := baseAlbum(t.Album)
+	if album != "" && !strings.EqualFold(normalize(album), normalize(searchTitle(t.Title))) {
+		artist := t.AlbumArtistStr()
+		if variousArtists(artist) {
+			artist = ""
+		}
+		if q := queryText(artist + " " + album); len(strings.Fields(q)) >= 2 {
+			queries = append(queries, q)
+		}
+	}
+	for _, q := range songQueries(t, 1) {
+		if q = queryText(q); !ContainsFold(queries, q) {
+			queries = append(queries, q)
+		}
+	}
+	return queries
 }
 
 // candidates picks, from each user's answer, the file that fits the track best. Users who

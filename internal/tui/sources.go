@@ -555,7 +555,8 @@ func (ui *tui) soulseekSettings(sk core.SoulseekConfig, route string) {
 	b.check("Ask the router to forward the port (UPnP)", !sk.NoUPnP, func(c *core.Config, v bool) { c.Soulseek.NoUPnP = !v })
 	head("Downloading (the network asks for restraint)")
 	b.number("Downloads at once (1-4)", float64(sk.MaxDownloads()), 3, func(c *core.Config, v float64) { c.Soulseek.Downloads = int(v) })
-	b.number("Seconds between searches (3 or more)", sk.SearchInterval().Seconds(), 5, func(c *core.Config, v float64) { c.Soulseek.SearchGap = v })
+	b.number("Seconds between searches (8 or more)", sk.SearchInterval().Seconds(), 5, func(c *core.Config, v float64) { c.Soulseek.SearchGap = v })
+	b.number("Most searches an hour (20 to 200; the server bans floods)", float64(sk.SearchesPerHour()), 5, func(c *core.Config, v float64) { c.Soulseek.PerHour = int(v) })
 	b.text("Give up waiting in a user's queue after", fmtDurationShort(sk.QueueTimeout()), 8, func(c *core.Config, s string) error {
 		d, err := time.ParseDuration(s)
 		if err != nil || d < time.Minute {
