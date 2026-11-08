@@ -6,6 +6,7 @@ import (
 	"universal-music-downloader/internal/core"
 
 	qt "github.com/mappu/miqt/qt6"
+	"github.com/mappu/miqt/qt6/mainthread"
 )
 
 // The Settings page: changes are saved as they're made (checked first; what can't be used is
@@ -33,6 +34,11 @@ type settingsTab struct {
 	notify    *qt.QCheckBox
 	advanced  *qt.QWidget
 	advancedB *qt.QPushButton
+
+	cacheSize  map[string]*qt.QLabel
+	cacheBtn   []*qt.QPushButton
+	cacheTotal *qt.QLabel
+	cacheBusy  bool
 }
 
 // layouts are the file layouts offered by name.
@@ -163,6 +169,8 @@ func newSettingsTab(a *app) *settingsTab {
 	ab.AddLayout(again.QLayout)
 	body.AddWidget(appCard.QWidget)
 
+	body.AddWidget(t.buildCaches())
+
 	// advanced
 	t.advancedB = button("▸  Advanced", "link", func() {
 		on := !t.advanced.IsVisible()
@@ -200,6 +208,86 @@ func newSettingsTab(a *app) *settingsTab {
 	body.AddStretch()
 	t.load()
 	return t
+}
+
+// buildCaches is the card that shows, and clears, what the app keeps for itself.
+func (t *settingsTab) buildCaches() *qt.QWidget {
+	f, box := card()
+	head := hbox()
+	head.SetSpacing(8)
+	head.AddWidget2(text("Temporary files", "h2").QWidget, 1)
+	t.cacheTotal = text("", "muted")
+	head.AddWidget(t.cacheTotal.QWidget)
+	all := button("Clear everything", "danger", func() {
+		t.clearCache("", "Clear all temporary files?", "Nothing you downloaded is touched, and what's in use right now is left alone. The next Sort & merge plan will take longer.")
+	})
+	t.cacheBtn = append(t.cacheBtn, all)
+	head.AddWidget(all.QWidget)
+	box.AddLayout(head.QLayout)
+	box.AddWidget(text("What the app keeps to save time. It's all made again when needed, and it's trimmed on its own every hour.", "hint").QWidget)
+	t.cacheSize = map[string]*qt.QLabel{}
+	for _, c := range core.CacheKinds {
+		c := c
+		size := text("", "muted")
+		size.SetAlignment(qt.AlignRight | qt.AlignVCenter)
+		size.SetFixedWidth(84)
+		t.cacheSize[c.Name] = size
+		b := button("Clear", "", func() {
+			t.clearCache(c.Name, "Clear "+c.Label+"?", c.About+"\n\nWhat's in use right now is left alone.")
+		})
+		t.cacheBtn = append(t.cacheBtn, b)
+		field := qt.NewQWidget2()
+		fr := qt.NewQHBoxLayout(field)
+		fr.SetContentsMargins(0, 0, 0, 0)
+		fr.SetSpacing(10)
+		fr.AddStretch()
+		fr.AddWidget(size.QWidget)
+		fr.AddWidget(b.QWidget)
+		settingRow(box, c.Label, c.About, field)
+	}
+	return f.QWidget
+}
+
+// readCaches measures them, away from the window's thread.
+func (t *settingsTab) readCaches() {
+	go func() {
+		usage := t.a.m.CacheUsage()
+		mainthread.Start(func() {
+			var total int64
+			for _, c := range usage {
+				total += c.Bytes
+				if l := t.cacheSize[c.Name]; l != nil {
+					l.SetText(core.FmtBytes(c.Bytes))
+				}
+			}
+			t.cacheTotal.SetText(core.FmtBytes(total))
+		})
+	}()
+}
+
+func (t *settingsTab) clearCache(name, title, body string) {
+	if t.cacheBusy || !t.a.confirm(title, body) {
+		return
+	}
+	t.cacheBusy = true
+	for _, b := range t.cacheBtn {
+		b.SetEnabled(false)
+	}
+	go func() {
+		_, freed, err := t.a.m.ClearCache(name)
+		mainthread.Start(func() {
+			t.cacheBusy = false
+			for _, b := range t.cacheBtn {
+				b.SetEnabled(true)
+			}
+			if err != nil {
+				t.a.message("Temporary files", err.Error())
+			} else {
+				t.a.toast("Cleared " + core.FmtBytes(freed) + ".")
+			}
+			t.readCaches()
+		})
+	}()
 }
 
 // spin is a number field saved when it changes (typed numbers when you're done typing).

@@ -336,10 +336,7 @@ func (ui *tui) buildPlaylistTables() {
 	})
 	ui.playlistsTable.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		row, _ := ui.playlistsTable.GetSelection()
-		var sel *core.PlaylistStatus
-		if row >= 1 && row-1 < len(ui.playlists) {
-			sel = &ui.playlists[row-1]
-		}
+		sel := ui.playlistAt(row)
 		switch {
 		case ev.Key() == tcell.KeyTab:
 			ui.app.SetFocus(ui.findField)
@@ -392,6 +389,18 @@ func (ui *tui) buildPlaylistTables() {
 	})
 }
 
+// playlistAt is the playlist on a row of the table; the finished ones come after a heading.
+func (ui *tui) playlistAt(row int) *core.PlaylistStatus {
+	i := row - 1
+	if len(ui.playlists) > ui.playlistsOpen && row > ui.playlistsOpen+1 {
+		i--
+	}
+	if i < 0 || i >= len(ui.playlists) || row == ui.playlistsOpen+1 && len(ui.playlists) > ui.playlistsOpen {
+		return nil
+	}
+	return &ui.playlists[i]
+}
+
 func (ui *tui) refreshPlaylistTables() {
 	ui.inputs = ui.m.Inputs()
 	t := ui.inputsTable
@@ -409,10 +418,26 @@ func (ui *tui) refreshPlaylistTables() {
 	if len(ui.inputs) == 0 {
 		t.SetCell(1, 1, tview.NewTableCell("[yellow]a adds playlist CSVs (or a folder of them) and text lists; or find music above[-]").SetSelectable(false))
 	}
-	ui.playlists = ui.m.Playlists()
+	var open, finished []core.PlaylistStatus
+	for _, s := range ui.m.Playlists() {
+		if s.Finished() {
+			finished = append(finished, s)
+		} else {
+			open = append(open, s)
+		}
+	}
+	ui.playlists, ui.playlistsOpen = append(open, finished...), len(open)
 	p := ui.playlistsTable
 	p.Clear()
 	headerRow(p, "On", "Priority", "Playlist", "Tracks", "Downloaded", "In library", "To do", "Not found")
+	if len(finished) > 0 {
+		p.SetCell(len(open)+1, 2, tview.NewTableCell(fmt.Sprintf("[::b]Finished playlists (%d)[::-]", len(finished))).SetSelectable(false))
+		for c := range 8 {
+			if c != 2 {
+				p.SetCell(len(open)+1, c, tview.NewTableCell("").SetSelectable(false))
+			}
+		}
+	}
 	for i, s := range ui.playlists {
 		on, color := "✓", tcell.ColorGreen
 		if !s.Enabled {
@@ -433,14 +458,22 @@ func (ui *tui) refreshPlaylistTables() {
 			default:
 				cell.SetAlign(tview.AlignRight)
 			}
-			p.SetCell(i+1, c, cell)
+			row := i + 1
+			if i >= len(open) {
+				row++ // under the heading
+			}
+			p.SetCell(row, c, cell)
 		}
 	}
 	if r, _ := ui.inputsTable.GetSelection(); r < 1 && len(ui.inputs) > 0 {
 		ui.inputsTable.Select(1, 0)
 	}
 	if r, _ := ui.playlistsTable.GetSelection(); r < 1 && len(ui.playlists) > 0 {
-		ui.playlistsTable.Select(1, 0)
+		first := 1
+		if ui.playlistsOpen == 0 { // the first row is the heading
+			first = 2
+		}
+		ui.playlistsTable.Select(first, 0)
 	}
 }
 

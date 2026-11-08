@@ -870,6 +870,13 @@ type cacheEntry[T any] struct {
 	at   time.Time
 }
 
+// forget drops what's kept for key, so the next get works it out again.
+func (c *cache[T]) forget(key string) {
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
+}
+
 func (c *cache[T]) get(ctx context.Context, key string, f func() (T, error)) (T, error) {
 	c.mu.Lock()
 	if c.entries == nil {
@@ -1377,6 +1384,15 @@ const deadFor = 12 * time.Hour
 
 // meta gets a result's .torrent (from its link, or a magnet's metadata from the swarm) and file list.
 func (s *TorrentSource) meta(ctx context.Context, r torrentResult) (*torrentMeta, error) {
+	m, err := s.fetchMeta(ctx, r)
+	if err == nil && !fileExists(m.file) { // cleaned up since it was fetched
+		s.metas.forget(r.id())
+		return s.fetchMeta(ctx, r)
+	}
+	return m, err
+}
+
+func (s *TorrentSource) fetchMeta(ctx context.Context, r torrentResult) (*torrentMeta, error) {
 	return s.metas.get(ctx, r.id(), func() (*torrentMeta, error) {
 		sum := sha1.Sum([]byte(r.id()))
 		p := filepath.Join(s.dir, hex.EncodeToString(sum[:10])+".torrent")

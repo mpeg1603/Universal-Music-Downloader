@@ -80,6 +80,9 @@ func sortFind(ctx context.Context, roots, exclude []string, progress func(int)) 
 	var found []*sortAudio
 	for _, root := range roots {
 		root = CleanPath(root)
+		realRoot := realPath(root)
+		// The walk doesn't follow links, so below the root a path is already its real path.
+		resolved := func(p string) string { return filepath.Join(realRoot, strings.TrimPrefix(p, root)) }
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -92,7 +95,7 @@ func sortFind(ctx context.Context, roots, exclude []string, progress func(int)) 
 			}
 			name := d.Name()
 			if d.IsDir() {
-				if p != root && (strings.HasPrefix(name, ".") || excluded[realPath(p)]) {
+				if p != root && (strings.HasPrefix(name, ".") || excluded[resolved(p)]) {
 					return fs.SkipDir
 				}
 				return nil
@@ -100,7 +103,7 @@ func sortFind(ctx context.Context, roots, exclude []string, progress func(int)) 
 			if strings.HasPrefix(name, "._") || !sortExts[strings.ToLower(filepath.Ext(name))] || !d.Type().IsRegular() {
 				return nil
 			}
-			real := realPath(p)
+			real := resolved(p)
 			if seen[real] {
 				return nil
 			}
@@ -336,6 +339,25 @@ func (m *sortMeta) fillFromFilename(stem string) {
 // sortResolve works out artist, album and title: from the tags, then the names of the file and
 // its folders, then the web; each step only fills what's still missing.
 func sortResolve(ctx context.Context, a *sortAudio, id *sortIdentifier) sortMeta {
+	r := sortPrepare(a)
+	if id != nil && r.wantsWeb() {
+		r.web(ctx, id)
+	}
+	return r.finish()
+}
+
+// sortResolving is a file on its way to a description. The steps are apart because the web is
+// slow: everything else is done for all the files first.
+type sortResolving struct {
+	a      *sortAudio
+	m      sortMeta
+	stem   string
+	dirs   []string
+	folder sortFolderHint
+}
+
+// sortPrepare reads what the tags and the names of the file and its folders say.
+func sortPrepare(a *sortAudio) *sortResolving {
 	m := sortMetaFromTags(a.Tags)
 	stem := strings.TrimSuffix(filepath.Base(a.Path), filepath.Ext(a.Path))
 	m.fillFromFilename(stem)
@@ -358,18 +380,36 @@ func sortResolve(ctx context.Context, a *sortAudio, id *sortIdentifier) sortMeta
 	if m.album != "" && m.disc == 0 {
 		m.disc = folder.disc
 	}
-	if id != nil && (m.artist == "" || m.title == "" || (m.album == "" && !m.single)) {
-		name := sortParseFilename(stem)
-		var query []string
-		for _, s := range []string{name.artist, name.album, name.title} {
-			if s != "" {
-				query = append(query, s)
-			}
-		}
-		if match := id.lookup(ctx, a, &m, strings.Join(query, " ")); match != nil {
-			m.applyMatch(match)
+	return &sortResolving{a: a, m: m, stem: stem, dirs: dirs, folder: folder}
+}
+
+// wantsWeb: something's missing. A song already in an Artist/Singles folder isn't: that's
+// where it was filed before, and there's no use asking about all of them again.
+func (r *sortResolving) wantsWeb() bool {
+	m := &r.m
+	return m.artist == "" || m.title == "" || (m.album == "" && !m.single && !r.folder.singles)
+}
+
+func (r *sortResolving) nameQuery() string {
+	name := sortParseFilename(r.stem)
+	var query []string
+	for _, s := range []string{name.artist, name.album, name.title} {
+		if s != "" {
+			query = append(query, s)
 		}
 	}
+	return strings.Join(query, " ")
+}
+
+func (r *sortResolving) web(ctx context.Context, id *sortIdentifier) {
+	if match := id.lookup(ctx, r.a, &r.m, r.nameQuery()); match != nil {
+		r.m.applyMatch(match)
+	}
+}
+
+// finish is what's left when the tags, names and the web have had their say.
+func (r *sortResolving) finish() sortMeta {
+	m, folder, dirs := r.m, r.folder, r.dirs
 	if m.artist == "" {
 		// Last resort: "Artist - Album/", "Artist/2001 - Album/", or exactly <root>/Artist/Album/
 		// and <root>/Artist/Singles/ (so sorting again keeps untagged files in place).

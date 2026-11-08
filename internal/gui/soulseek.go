@@ -25,9 +25,10 @@ type soulseekTab struct {
 	off   *emptyState
 	offB  *qt.QPushButton
 
-	state, summary, share *qt.QLabel
-	reconnect, away       *qt.QPushButton
-	portNote              string
+	state, summary, warn, share *qt.QLabel
+	conn, setup, detailsB       *qt.QPushButton
+	awayAct                     *qt.QAction
+	portNote                    string
 
 	segs  []*qt.QPushButton
 	pages *qt.QStackedWidget
@@ -57,22 +58,30 @@ func newSoulseekTab(a *app) *soulseekTab {
 	p := a.newPage("Soulseek", "A community where people share their music with each other directly.", "soulseek")
 	t.w = p.w
 
-	t.reconnect = a.iconButton("refresh", "Reconnect", "", "Connect to the Soulseek network again", func() {
-		a.m.SoulseekReconnect()
-		a.toast("Reconnecting to Soulseek.")
-	})
-	t.away = button("Set me away", "", func() {
+	// everything about the connection is in one menu
+	settings := func() {
+		a.sources.soulseekSettings(a.m.Config().Soulseek)
+		t.refresh()
+	}
+	menu := qt.NewQMenu2()
+	t.awayAct = menu.AddActionWithText("Set me away")
+	t.awayAct.SetToolTip("Tells others you're not at your computer. Downloads and sharing carry on.")
+	t.awayAct.OnTriggered(func() {
 		a.m.SoulseekSetAway(!a.m.SoulseekStatus().Away)
 		t.refresh()
 	})
-	t.away.SetToolTip("Tells others you're not at your computer. Downloads and sharing carry on.")
-	setup := button("Set up…", "", func() {
-		a.sources.soulseekSettings(a.m.Config().Soulseek)
-		t.refresh()
+	menu.AddActionWithText("Reconnect").OnTriggered(func() {
+		a.m.SoulseekReconnect()
+		a.toast("Reconnecting to Soulseek.")
 	})
-	for _, b := range []*qt.QPushButton{t.reconnect, t.away, setup} {
-		p.actions.AddWidget(b.QWidget)
-	}
+	menu.AddActionWithText("Check my connection").OnTriggered(t.checkPort)
+	menu.AddSeparator()
+	menu.AddActionWithText("Set up…").OnTriggered(settings)
+	t.conn = a.iconButton("sources", "Connection", "", "", nil)
+	t.conn.SetMenu(menu)
+	t.setup = button("Set up…", "", settings)
+	p.actions.AddWidget(t.conn.QWidget)
+	p.actions.AddWidget(t.setup.QWidget)
 
 	t.off = a.newEmpty("people", "Soulseek isn't set up yet", "It needs a free account: pick any new name and password and it's made for you. Your own music is shared in return.")
 	t.offB = button("Set up Soulseek", "primary", func() {
@@ -101,9 +110,17 @@ func newSoulseekTab(a *app) *soulseekTab {
 	top.AddWidget(t.state.QWidget)
 	t.summary = text("", "hint")
 	top.AddWidget2(t.summary.QWidget, 1)
-	top.AddWidget(button("Check my connection", "link", t.checkPort).QWidget)
+	t.detailsB = button("Details", "link", func() {
+		t.share.SetVisible(!t.share.IsVisible())
+		t.refresh()
+	})
+	top.AddWidget(t.detailsB.QWidget)
 	ib.AddLayout(top.QLayout)
+	t.warn = richText("", "muted")
+	t.warn.Hide()
+	ib.AddWidget(t.warn.QWidget)
 	t.share = richText("", "muted")
+	t.share.Hide()
 	ib.AddWidget(t.share.QWidget)
 	bb.AddWidget(info.QWidget)
 
@@ -112,8 +129,6 @@ func newSoulseekTab(a *app) *soulseekTab {
 	t.segs = buttons
 	segRow.AddWidget(segs.QWidget)
 	segRow.AddStretch()
-	segRow.AddWidget(a.iconButton("message", "Message someone", "", "Write to a Soulseek user", t.messageSomeone).QWidget)
-	segRow.AddWidget(a.iconButton("people", "Join a room", "", "Join a chat room", t.joinRoom).QWidget)
 	bb.AddLayout(segRow.QLayout)
 
 	t.pages = qt.NewQStackedWidget2()
@@ -171,14 +186,13 @@ func (t *soulseekTab) refresh() {
 			t.off.body.SetText("Turn it on in Sources to log in as " + v.Username + ".")
 			t.offB.SetText("Go to Sources")
 		}
-		for _, b := range []*qt.QPushButton{t.reconnect, t.away} {
-			b.Hide()
-		}
+		t.conn.Hide()
+		t.setup.Show()
 		return
 	}
 	t.stack.SetCurrentIndex(1)
-	t.reconnect.Show()
-	t.away.Show()
+	t.conn.Show()
+	t.setup.Hide()
 	switch {
 	case v.Online && v.Away:
 		setPill(t.state, "Away", "warn")
@@ -190,45 +204,66 @@ func (t *soulseekTab) refresh() {
 		setPill(t.state, "Offline", "bad")
 	}
 	if v.Away {
-		t.away.SetText("I'm back")
+		t.awayAct.SetText("I'm back")
 	} else {
-		t.away.SetText("Set me away")
+		t.awayAct.SetText("Set me away")
 	}
-	var b strings.Builder
+	var line []string
 	switch {
 	case v.Online:
-		fmt.Fprintf(&b, "Signed in as %s since %s", v.User, v.Since.Format("15:04"))
-		if v.Privileges > 0 {
-			fmt.Fprintf(&b, ", privileged for %s", core.FmtWait(v.Privileges.Round(time.Hour)))
-		}
+		line = append(line, "Signed in as "+v.User)
 	case v.Connecting:
-		b.WriteString("Connecting to " + v.Server + "…")
+		line = append(line, "Connecting…")
 	default:
-		b.WriteString(core.FirstNonEmpty(v.Problem, "Not connected"))
+		x := core.FirstNonEmpty(v.Problem, "Not connected")
 		if v.Permanent {
-			b.WriteString(" Press Reconnect to try again.")
+			x += ". Reconnect is in the Connection menu"
 		}
+		line = append(line, x)
 	}
-	b.WriteString(fmt.Sprintf(".  Downloading %d of %d at once", v.DlUsed, v.DlLimit))
+	down := fmt.Sprintf("Downloading %d of %d", v.DlUsed, v.DlLimit)
 	if v.DlWaiting > 0 {
-		fmt.Fprintf(&b, " (%d waiting)", v.DlWaiting)
+		down += fmt.Sprintf(" (%d waiting)", v.DlWaiting)
 	}
-	fmt.Fprintf(&b, ", sending %d of %d", v.UpActive, v.UpSlots)
+	up := fmt.Sprintf("Sending %d of %d", v.UpActive, v.UpSlots)
 	if v.UpQueued > 0 {
-		fmt.Fprintf(&b, " (%d queued)", v.UpQueued)
+		up += fmt.Sprintf(" (%d queued)", v.UpQueued)
 	}
 	if v.UpSpeed > 0 {
-		b.WriteString(" at " + core.FmtRate(v.UpSpeed))
+		up += " at " + core.FmtRate(v.UpSpeed)
 	}
-	b.WriteString(".")
-	t.summary.SetText(b.String())
+	t.summary.SetText(strings.Join(append(line, down, up), "  ·  "))
+	if t.share.IsVisible() {
+		t.detailsB.SetText("Hide details")
+	} else {
+		t.detailsB.SetText("Details")
+	}
 
 	e := html.EscapeString
 	span := func(color, s string) string { return "<span style='color:" + color + "'>" + e(s) + "</span>" }
+	// what needs your attention is always shown; the rest is under Details
+	var warn []string
+	if v.NoShare {
+		warn = append(warn, span(th.Warn, "Not sharing anything; many people won't send you files"))
+	}
+	if v.Port <= 0 {
+		warn = append(warn, span(th.Warn, "Not reachable by others"))
+	}
+	if t.portNote != "" {
+		warn = append(warn, t.portNote)
+	}
+	t.warn.SetText(strings.Join(warn, "  ·  "))
+	t.warn.SetVisible(len(warn) > 0)
 	var s []string
+	if v.Online {
+		x := "Online since " + v.Since.Format("15:04")
+		if v.Privileges > 0 {
+			x += ", privileged for " + core.FmtWait(v.Privileges.Round(time.Hour))
+		}
+		s = append(s, e(x))
+	}
 	switch {
 	case v.NoShare:
-		s = append(s, span(th.Warn, "Not sharing anything; many people won't send you files"))
 	case v.ShareScanning:
 		s = append(s, "Reading your shared folders…")
 	case v.ShareScanned.IsZero():
@@ -255,11 +290,6 @@ func (t *soulseekTab) refresh() {
 			x += " (" + v.PortNote + ")"
 		}
 		s = append(s, e(x))
-	} else {
-		s = append(s, span(th.Warn, "Not reachable by others"))
-	}
-	if t.portNote != "" {
-		s = append(s, t.portNote)
 	}
 	if v.WishTracks > 0 {
 		x := fmt.Sprintf("Wishlist: %d songs no source had", v.WishTracks)
@@ -432,11 +462,11 @@ func (t *soulseekTab) buildSearch() *qt.QWidget {
 	row.AddWidget2(s.find.QWidget, 1)
 	row.AddWidget(s.go_.QWidget)
 	box.AddLayout(row.QLayout)
-	s.note = text("Searches are spaced out on purpose: the network bans clients that flood it.", "hint")
+	s.note = text("Type what you're after and press Enter. Searches are spaced out, so one may wait its turn.", "hint")
 	box.AddWidget(s.note.QWidget)
 	s.table = t.a.newTable("slsk-results", column{title: "File", width: 420, flex: true}, column{title: "From", width: 140},
-		column{title: "Size", width: 86, right: true}, column{title: "Quality", width: 104}, column{title: "Length", width: 74, right: true},
-		column{title: "Availability", width: 104}, column{title: "Their speed", width: 100, right: true})
+		column{title: "Size", width: 96, right: true}, column{title: "Quality", width: 128}, column{title: "Length", width: 74, right: true},
+		column{title: "Availability", width: 104}, column{title: "Their speed", width: 116, right: true})
 	tb := s.table
 	tb.count = func() int { return len(s.res) }
 	tb.key = func(r int) string { return s.res[r].User + "\x00" + s.res[r].Path }
@@ -1087,6 +1117,8 @@ func (t *soulseekTab) buildChat() *qt.QWidget {
 			t.refreshChats()
 		}
 	})
+	left.AddWidget(t.a.iconButton("message", "Message someone", "", "Write to a Soulseek user", t.messageSomeone).QWidget)
+	left.AddWidget(t.a.iconButton("people", "Join a room", "", "Join a chat room", t.joinRoom).QWidget)
 	left.AddWidget2(s.convs.QWidget, 1)
 	left.AddWidget(t.a.iconButton("x", "Close this chat", "", "Leaves a room, so it isn't joined next time", func() {
 		if s.current != "" {
@@ -1322,8 +1354,9 @@ func (t *soulseekTab) buildInterests() *qt.QWidget {
 		}
 		return nil
 	}
-	recActs.AddWidget(button("Mine", "", func() { s.global = false; t.loadRecs("") }).QWidget)
-	recActs.AddWidget(button("Everyone's", "", func() { s.global = true; t.loadRecs("") }).QWidget)
+	whose, whoseBtns := segments([]string{"Mine", "Everyone's"}, func(i int) { s.global = i == 1; t.loadRecs("") })
+	whoseBtns[0].SetChecked(true)
+	recActs.AddWidget(whose.QWidget)
 	recActs.AddStretch()
 	recActs.AddWidget(t.a.iconButton("heart", "Like", "", "Add to what you like", func() {
 		if r := sel(); r != nil {

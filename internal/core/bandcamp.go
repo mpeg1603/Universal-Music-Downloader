@@ -91,7 +91,7 @@ func encodingQuality(enc string) Quality {
 
 // busy is how long a request would wait for its turn now; the scheduler skips Bandcamp for a
 // while rather than have searches queue up for it.
-func (b *Bandcamp) busy() time.Duration { return b.http.limiter.backlog() }
+func (b *Bandcamp) busy(*Track) time.Duration { return b.http.limiter.backlog() }
 
 func (b *Bandcamp) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 	return searchUntilFound(ctx, t, songQueries(t, 2), func(q string) ([]Candidate, error) {
@@ -347,6 +347,8 @@ func (b *Bandcamp) fetchFree(ctx context.Context, pageURL, workdir, albumURL str
 		for _, m := range matches {
 			if !strings.HasSuffix(m, ".part") {
 				file = m
+				now := time.Now()
+				os.Chtimes(m, now, now) // recently used: the last to be cleaned up
 			}
 		}
 		if file == "" {

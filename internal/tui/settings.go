@@ -102,6 +102,34 @@ func (ui *tui) fillSettings() {
 	})
 	f.AddButton("Undo changes", func() { ui.fillSettings() })
 	f.AddButton("Run the setup again", ui.runSetup)
+	f.AddButton("Clear temporary files", ui.pickCache)
+}
+
+// pickCache lists what the app keeps for itself; picking one clears it.
+func (ui *tui) pickCache() {
+	list := tview.NewList()
+	clear := func(name, what string) func() {
+		return func() {
+			ui.closeModal("cache")
+			ui.confirm("Clear "+what+"? What's in use right now is left alone.", "Clear", func() {
+				files, freed, err := ui.m.ClearCache(name)
+				if err != nil {
+					ui.message("Temporary files", err.Error())
+					return
+				}
+				ui.message("Temporary files", fmt.Sprintf("Removed %d files (%s).", files, core.FmtBytes(freed)))
+			})
+		}
+	}
+	var total int64
+	for _, c := range ui.m.CacheUsage() {
+		total += c.Bytes
+		list.AddItem(fmt.Sprintf("%s (%s)", c.Label, core.FmtBytes(c.Bytes)), c.About, 0, clear(c.Name, c.Label))
+	}
+	list.AddItem(fmt.Sprintf("Everything above (%s)", core.FmtBytes(total)), "The next Sort & merge plan will take longer.", 0, clear("", "all temporary files"))
+	list.SetDoneFunc(func() { ui.closeModal("cache") })
+	list.SetBorder(true).SetTitle(" Clear temporary files (Enter picks · Esc closes) ")
+	ui.openModal("cache", list, 76, list.GetItemCount()*2+2)
 }
 
 func fmtDurationShort(d time.Duration) string {

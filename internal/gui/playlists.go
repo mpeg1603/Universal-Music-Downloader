@@ -16,13 +16,17 @@ type playlistsTab struct {
 	a      *app
 	w      *qt.QWidget
 	list   *rowList
-	rows   []core.PlaylistStatus
+	rows   []core.PlaylistStatus // the category being shown
+	all    []core.PlaylistStatus
 	inputs *qt.QListWidget
 	inRows []core.InputStatus
 	stack  *qt.QStackedWidget
 
 	show, onoff, up, down, remove *qt.QPushButton
 	inToggle, inRemove            *qt.QPushButton
+	segs                          []*qt.QPushButton
+	note                          *qt.QLabel
+	finished                      bool // showing the finished ones
 	loading, again                bool
 	reread                        *throttle
 }
@@ -49,6 +53,20 @@ func newPlaylistsTab(a *app) *playlistsTab {
 	bb := qt.NewQVBoxLayout(body)
 	bb.SetContentsMargins(0, 0, 0, 0)
 	bb.SetSpacing(10)
+
+	seg, segs := segments([]string{"In progress", "Finished playlists"}, func(i int) {
+		t.finished = i == 1
+		t.showCategory()
+	})
+	t.segs = segs
+	segs[0].SetChecked(true)
+	segRow := hbox()
+	segRow.AddWidget(seg.QWidget)
+	segRow.AddStretch()
+	bb.AddLayout(segRow.QLayout)
+	t.note = text("", "hint")
+	t.note.Hide()
+	bb.AddWidget(t.note.QWidget)
 
 	frame, fb := card()
 	fb.SetContentsMargins(8, 8, 8, 8)
@@ -227,6 +245,8 @@ func (t *playlistsTab) updateButtons() {
 	for _, b := range []*qt.QPushButton{t.show, t.onoff, t.up, t.down} {
 		b.SetEnabled(on)
 	}
+	t.up.SetVisible(!t.finished) // nothing left to put first
+	t.down.SetVisible(!t.finished)
 	t.remove.SetEnabled(on && core.IsAddition(p.Name))
 	if on && !p.Enabled {
 		t.onoff.SetText("Turn on")
@@ -241,6 +261,50 @@ func (t *playlistsTab) updateButtons() {
 	} else {
 		t.inToggle.SetText("Turn off")
 	}
+}
+
+// showCategory shows the playlists still being worked on, or the finished ones.
+func (t *playlistsTab) showCategory() {
+	sel := ""
+	if p := t.selected(); p != nil {
+		sel = p.Name
+	}
+	var open, finished []core.PlaylistStatus
+	for _, p := range t.all {
+		if p.Finished() {
+			finished = append(finished, p)
+		} else {
+			open = append(open, p)
+		}
+	}
+	rows := open
+	if t.finished {
+		rows = finished
+	}
+	if len(rows) != len(t.rows) {
+		t.list.reset(func() { t.rows = rows })
+	} else {
+		t.rows = rows
+		t.list.redraw()
+	}
+	for i, p := range t.rows {
+		if p.Name == sel && t.list.current() != i {
+			t.list.selectRow(i)
+		}
+	}
+	t.segs[0].SetText(fmt.Sprintf("In progress (%s)", fmtCount(len(open))))
+	t.segs[1].SetText(fmt.Sprintf("Finished playlists (%s)", fmtCount(len(finished))))
+	switch {
+	case len(rows) > 0 || len(t.all) == 0:
+		t.note.Hide()
+	case t.finished:
+		t.note.SetText("Playlists move here once every song is downloaded, in your library, or couldn't be found.")
+		t.note.Show()
+	default:
+		t.note.SetText("Every playlist has finished. They're under Finished playlists.")
+		t.note.Show()
+	}
+	t.updateButtons()
 }
 
 // refresh reads the playlists and files again, away from the window's thread.
@@ -263,21 +327,8 @@ func (t *playlistsTab) loaded(rows []core.PlaylistStatus, inputs []core.InputSta
 		t.refresh()
 		return
 	}
-	sel := ""
-	if p := t.selected(); p != nil {
-		sel = p.Name
-	}
-	if len(rows) != len(t.rows) {
-		t.list.reset(func() { t.rows = rows })
-	} else {
-		t.rows = rows
-		t.list.redraw()
-	}
-	for i, p := range t.rows {
-		if p.Name == sel && t.list.current() != i {
-			t.list.selectRow(i)
-		}
-	}
+	t.all = rows
+	t.showCategory()
 	inRow := t.inputs.CurrentRow()
 	same := len(inputs) == len(t.inRows)
 	for i := 0; same && i < len(inputs); i++ {
@@ -300,7 +351,7 @@ func (t *playlistsTab) loaded(rows []core.PlaylistStatus, inputs []core.InputSta
 			t.inputs.SetCurrentRow(inRow)
 		}
 	}
-	if len(t.rows) == 0 && len(t.inRows) == 0 {
+	if len(t.all) == 0 && len(t.inRows) == 0 {
 		t.stack.SetCurrentIndex(0)
 	} else {
 		t.stack.SetCurrentIndex(1)

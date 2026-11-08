@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // What frontends use of Sort & merge. One job runs at a time: planning, applying or undoing. A
@@ -22,6 +23,8 @@ type SortView struct {
 	Doing       string // "plan", "apply" or "undo"
 	Stage       string
 	Done, Total int
+	Left        time.Duration // about how long this stage has to go; 0 when it can't be told
+	CanSkip     bool          // the online lookups are running, and SortSkipLookups ends them
 	Err         string
 	Plan        *SortPlanView // the plan being looked at
 	Result      *SortResult   // how the last apply or undo went
@@ -50,6 +53,11 @@ type sorter struct {
 	view   SortView
 	plan   *sortPlan
 	cancel context.CancelFunc
+	skip   context.CancelFunc // ends the online lookups
+
+	stage      string // what Left is worked out from
+	stageAt    time.Time
+	stageFirst int
 }
 
 func (m *Manager) sortDir() string { return filepath.Join(m.dataDir, "sort-plans") }
@@ -134,22 +142,49 @@ func (m *Manager) sortBegin(doing string) (context.Context, bool) {
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	s.cancel = cancel
-	s.view.Busy, s.view.Doing, s.view.Err, s.view.Stage, s.view.Done, s.view.Total = true, doing, "", "Starting", 0, 0
+	s.view.Busy, s.view.Doing, s.view.Err, s.view.Stage, s.view.Done, s.view.Total, s.view.Left = true, doing, "", "Starting", 0, 0, 0
+	s.stage = ""
 	return ctx, true
 }
 
 func (m *Manager) sortProgress(stage string, done, total int) {
 	s := &m.sort
 	s.mu.Lock()
-	s.view.Stage, s.view.Done, s.view.Total = stage, done, total
+	if s.stage != stage || done < s.stageFirst {
+		s.stage, s.stageAt, s.stageFirst = stage, time.Now(), done
+	}
+	s.view.Stage, s.view.Done, s.view.Total, s.view.Left = stage, done, total, 0
+	if el := time.Since(s.stageAt); total > done && done > s.stageFirst && el > 3*time.Second {
+		s.view.Left = time.Duration(float64(el) / float64(done-s.stageFirst) * float64(total-done))
+	}
 	s.mu.Unlock()
 	m.revs.sort.Add(1)
+}
+
+func (m *Manager) sortSkippable(skip context.CancelFunc) {
+	s := &m.sort
+	s.mu.Lock()
+	s.skip, s.view.CanSkip = skip, skip != nil
+	s.mu.Unlock()
+	m.revs.sort.Add(1)
+}
+
+// SortSkipLookups ends the online lookups of the plan being made: what's still missing is filed
+// from the tags and names alone. What was asked so far stays remembered.
+func (m *Manager) SortSkipLookups() {
+	s := &m.sort
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.skip != nil {
+		s.skip()
+		s.view.CanSkip = false
+	}
 }
 
 func (m *Manager) sortEnd(err error) {
 	s := &m.sort
 	s.mu.Lock()
-	s.view.Busy, s.view.Stage, s.cancel = false, "", nil
+	s.view.Busy, s.view.Stage, s.view.Left, s.view.CanSkip, s.cancel, s.skip = false, "", 0, false, nil, nil
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.view.Err = err.Error()
 	}
@@ -184,7 +219,7 @@ func (m *Manager) SortPlan(o SortOptions) error {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		p, err := sortMakePlan(ctx, o, m.dataDir, m.tools, m.deezer, m.sortProgress)
+		p, err := sortMakePlan(ctx, o, m.dataDir, m.tools, m.deezer, m.sortSkippable, m.sortProgress)
 		if err == nil {
 			dir := filepath.Join(m.sortDir(), p.ID)
 			if err = p.save(dir); err == nil {

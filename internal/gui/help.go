@@ -52,7 +52,8 @@ var helpTopics = map[string]helpTopic{
 <p>The app can work through whole playlists.</p>
 <p><b>From Spotify:</b> open <a href="https://exportify.net">exportify.net</a>, log in, press <i>Export all</i>, and add the file you get here. Spotify's own "download your data" file works too. A public playlist or album link also works, up to its first 100 tracks.</p>
 <p><b>From anywhere else:</b> CSV files from tools like TuneMyMusic, or a plain text file with one song, album or artist per line.</p>
-<p>Turn a playlist off and its songs leave the line without being forgotten. <b>Priority</b> decides which playlist goes first.</p>`},
+<p>Turn a playlist off and its songs leave the line without being forgotten. <b>Priority</b> decides which playlist goes first.</p>
+<p>Once every song of a playlist is downloaded, in your library, or couldn't be found, it moves to <b>Finished playlists</b>.</p>`},
 	"library": {"My library", `
 <p>Tell the app where your music already is, and it won't download what you already have.</p>
 <p>Your library folders are <b>only read</b> during normal use. New files always go to your downloads folder. The one exception is <b>Sort & merge</b>, and only when you press Apply there.</p>

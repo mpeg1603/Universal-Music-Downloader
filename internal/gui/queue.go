@@ -16,9 +16,9 @@ import (
 // a slice kept here and draws only what's visible, so even 70,000 tracks are instant.
 
 // The filters with a button of their own; the rest are under "More".
-var mainFilters = []string{"all", "active", "queued", "done", "library", "failed"}
+var mainFilters = []string{"all", "downloading", "queued", "done", "library", "failed"}
 
-var chipWords = map[string]string{"all": "All", "active": "Active", "queued": "Waiting", "done": "Done", "library": "In library", "failed": "Not found"}
+var chipWords = map[string]string{"all": "All", "downloading": "Downloading", "queued": "Waiting", "done": "Done", "library": "In library", "failed": "Not found"}
 
 type queueTab struct {
 	a    *app
@@ -126,7 +126,7 @@ func newQueueTab(a *app) *queueTab {
 	t.chips["all"].SetChecked(true)
 	t.more = qt.NewQComboBox2()
 	t.more.SetToolTip("More ways to narrow the list (F)")
-	compactCombo(t.more, 5)
+	compactCombo(t.more, 4)
 	t.more.AddItem("More…")
 	t.moreKeys = []string{""}
 	for _, f := range core.QueueFilters {

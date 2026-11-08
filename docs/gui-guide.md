@@ -71,7 +71,7 @@ browse what people share, keep a list of people, chat, and discover music throug
 interests.
 
 The app searches gently and asks for only a few files at a time, because the network bans
-clients that flood it. Closed "port"? **Check my connection** tells you, and
+clients that flood it. Closed "port"? **Connection → Check my connection** tells you, and
 [this guide](soulseek-port-forwarding.md) explains how to open it.
 
 ## Making it yours

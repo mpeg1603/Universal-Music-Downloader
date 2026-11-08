@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -801,8 +802,65 @@ func (p *sortPlan) duplicatesReport(problems map[string]string) string {
 	return b.String()
 }
 
+// sortEach runs do for 0..n-1 on a few workers, until ctx ends.
+func sortEach(ctx context.Context, n, workers int, do func(i int)) {
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				i := int(next.Add(1)) - 1
+				if i >= n {
+					return
+				}
+				do(i)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// sortLookups fills in from the web what's missing. What's been asked before is known at once;
+// the rest goes out one question at a time (MusicBrainz takes one a second), and can be skipped
+// with the function handed to skippable. It returns what to tell about it.
+func sortLookups(ctx context.Context, id *sortIdentifier, all []*sortResolving, skippable func(context.CancelFunc), progress func(string, int, int)) []string {
+	var ask []*sortResolving
+	for _, r := range all {
+		if !r.wantsWeb() {
+			continue
+		}
+		if id.answered(r.a, &r.m, r.nameQuery()) {
+			r.web(ctx, id)
+		} else {
+			ask = append(ask, r)
+		}
+	}
+	if len(ask) == 0 {
+		return nil
+	}
+	web, skip := context.WithCancel(ctx)
+	defer skip()
+	skippable(skip)
+	defer skippable(nil)
+	const stage = "Looking up files with incomplete tags"
+	progress(stage, 0, len(ask))
+	var done atomic.Int64
+	sortEach(web, len(ask), 4, func(i int) {
+		ask[i].web(web, id)
+		if web.Err() == nil {
+			progress(stage, int(done.Add(1)), len(ask))
+		}
+	})
+	if left := len(ask) - int(done.Load()); left > 0 && ctx.Err() == nil {
+		return []string{fmt.Sprintf("The online lookups were skipped: %d files were filed from their tags and names alone. Planning again carries on with them.", left)}
+	}
+	return nil
+}
+
 // sortMakePlan does the whole reading and deciding.
-func sortMakePlan(ctx context.Context, o SortOptions, cacheDir string, tools *Tools, dz *Deezer, progress func(string, int, int)) (*sortPlan, error) {
+func sortMakePlan(ctx context.Context, o SortOptions, cacheDir string, tools *Tools, dz *Deezer, skippable func(context.CancelFunc), progress func(string, int, int)) (*sortPlan, error) {
 	progress("Looking for audio files", 0, 0)
 	exclude := []string{}
 	if o.DuplicatesDir != "" {
@@ -819,53 +877,38 @@ func sortMakePlan(ctx context.Context, o SortOptions, cacheDir string, tools *To
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	var id *sortIdentifier
 	var notes []string
 	if o.Offline {
 		notes = append(notes, "The web wasn't used: files with incomplete tags weren't looked up.")
-	} else {
-		id = newSortIdentifier(filepath.Join(cacheDir, "sort-lookups.json"), dz)
-		defer id.save()
 	}
-	items := make([]*sortItem, len(files))
-	var mu sync.Mutex
-	done := 0
-	work := make(chan int)
-	var wg sync.WaitGroup
-	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range work {
-				items[i] = &sortItem{a: files[i], m: sortResolve(ctx, files[i], id)}
-				mu.Lock()
-				done++
-				if done%100 == 0 {
-					progress("Working out artist, album and title", done, len(files))
-				}
-				mu.Unlock()
-			}
-		}()
-	}
-feed:
-	for i := range files {
-		select {
-		case work <- i:
-		case <-ctx.Done():
-			break feed
+	progress("Working out artist, album and title", 0, len(files))
+	resolving := make([]*sortResolving, len(files))
+	var prepared atomic.Int64
+	sortEach(ctx, len(files), 4, func(i int) {
+		resolving[i] = sortPrepare(files[i])
+		if n := prepared.Add(1); n%1000 == 0 {
+			progress("Working out artist, album and title", int(n), len(files))
 		}
-	}
-	close(work)
-	wg.Wait()
+	})
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if id != nil {
+	if !o.Offline {
+		id := newSortIdentifier(filepath.Join(cacheDir, "sort-lookups.json"), dz)
+		defer id.save()
+		notes = append(notes, sortLookups(ctx, id, resolving, skippable, progress)...)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		id.mu.Lock()
 		for name := range id.disabled {
 			notes = append(notes, name+" kept failing and was skipped part-way; planning again later retries only what's missing.")
 		}
 		id.mu.Unlock()
+	}
+	items := make([]*sortItem, len(files))
+	for i, r := range resolving {
+		items[i] = &sortItem{a: files[i], m: r.finish()}
 	}
 	progress("Looking for duplicates", 0, 0)
 	dups := sortFindDuplicates(ctx, items, o.Tolerance, !o.NoContentCheck, progress)

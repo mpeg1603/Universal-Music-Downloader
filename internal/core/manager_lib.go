@@ -328,6 +328,12 @@ type PlaylistStatus struct {
 	Tracks, Done, InLib, Failed, Todo, Active int
 }
 
+// Finished says the app has nothing left to do for this playlist: every song was downloaded, is
+// in your library, or couldn't be found. One where nothing at all was found isn't finished.
+func (s PlaylistStatus) Finished() bool {
+	return s.Enabled && s.Done+s.InLib > 0 && s.Done+s.InLib+s.Failed == s.Tracks
+}
+
 func (m *Manager) Playlists() []PlaylistStatus {
 	cfg := m.Config()
 	m.libMu.RLock()

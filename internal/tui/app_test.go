@@ -570,3 +570,33 @@ func TestDashboardAndSortTabs(t *testing.T) {
 		t.Errorf("table shows %s", ui.st.rows.mode)
 	}
 }
+
+// Finished playlists sit under a heading, and rows still point at the right playlist.
+func TestFinishedPlaylistsHeading(t *testing.T) {
+	tools := core.NeedFFmpeg(t)
+	m := core.TestManager(t, tools, nil, core.TestLibrary(core.GetLucky()), nil)
+	ui := newTUI(m)
+	ui.playlists = []core.PlaylistStatus{{Name: "open"}, {Name: "done1"}, {Name: "done2"}}
+	ui.playlistsOpen = 1
+	want := []string{"", "open", "", "done1", "done2", ""}
+	for row, name := range want {
+		got := ""
+		if p := ui.playlistAt(row); p != nil {
+			got = p.Name
+		}
+		if got != name {
+			t.Errorf("row %d: %q, want %q", row, got, name)
+		}
+	}
+	ui.playlistsOpen = 3 // nothing finished: no heading
+	if p := ui.playlistAt(3); p == nil || p.Name != "done2" {
+		t.Errorf("no heading: %+v", p)
+	}
+	if ui.playlistAt(4) != nil {
+		t.Error("a row past the end")
+	}
+	ui.pickCache()
+	if !ui.hasModal("cache") {
+		t.Error("the list of temporary files didn't open")
+	}
+}

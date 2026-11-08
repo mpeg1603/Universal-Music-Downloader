@@ -61,16 +61,38 @@ func (id *sortIdentifier) save() {
 	id.dirty = 0
 }
 
+// sortAsker answers one question to one service.
+type sortAsker func(service, key string, do func() (*sortMatch, error)) *sortMatch
+
 func (id *sortIdentifier) lookup(ctx context.Context, a *sortAudio, m *sortMeta, nameQuery string) *sortMatch {
+	return id.consult(ctx, a, m, nameQuery, func(service, key string, do func() (*sortMatch, error)) *sortMatch {
+		return id.ask(ctx, service, key, do)
+	})
+}
+
+// answered says whether everything a lookup would ask has been asked before.
+func (id *sortIdentifier) answered(a *sortAudio, m *sortMeta, nameQuery string) bool {
+	all := true
+	id.consult(context.Background(), a, m, nameQuery, func(service, key string, _ func() (*sortMatch, error)) *sortMatch {
+		id.mu.Lock()
+		defer id.mu.Unlock()
+		match, found := id.cache[service+"|"+key]
+		all = all && found
+		return match
+	})
+	return all
+}
+
+func (id *sortIdentifier) consult(ctx context.Context, a *sortAudio, m *sortMeta, nameQuery string, ask sortAsker) *sortMatch {
 	bucket := int(math.Round(a.Duration / 4))
 	if m.artist != "" && m.title != "" {
 		key := fmt.Sprintf("%s|%s|%d", sortArtistKey(m.artist), sortTitleKey(m.title), bucket)
-		match := id.ask(ctx, "musicbrainz", key, func() (*sortMatch, error) { return id.musicbrainz(ctx, m.artist, m.title, a.Duration) })
+		match := ask("musicbrainz", key, func() (*sortMatch, error) { return id.musicbrainz(ctx, m.artist, m.title, a.Duration) })
 		if match != nil && (match.Album != "" || match.Single) {
 			return match
 		}
 		q := sortPrimaryArtist(m.artist) + " " + m.title
-		if d := id.ask(ctx, "deezer", key, func() (*sortMatch, error) { return id.deezerSearch(ctx, q, m.artist, m.title, a.Duration) }); d != nil {
+		if d := ask("deezer", key, func() (*sortMatch, error) { return id.deezerSearch(ctx, q, m.artist, m.title, a.Duration) }); d != nil {
 			return d
 		}
 		return match
@@ -87,7 +109,7 @@ func (id *sortIdentifier) lookup(ctx context.Context, a *sortAudio, m *sortMeta,
 		return nil
 	}
 	key := fmt.Sprintf("q:%s|%d", sortFold(q, false), bucket)
-	return id.ask(ctx, "deezer", key, func() (*sortMatch, error) { return id.deezerSearch(ctx, q, "", m.title, a.Duration) })
+	return ask("deezer", key, func() (*sortMatch, error) { return id.deezerSearch(ctx, q, "", m.title, a.Duration) })
 }
 
 func (id *sortIdentifier) ask(ctx context.Context, service, key string, ask func() (*sortMatch, error)) *sortMatch {

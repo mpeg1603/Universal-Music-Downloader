@@ -212,8 +212,17 @@ func (s *Soulseek) Name() string        { return "soulseek" }
 func (s *Soulseek) Label() string       { return "Soulseek" }
 func (s *Soulseek) MaxQuality() Quality { return Quality{Codec: "flac", Lossless: true} }
 
-// busy: searches are paced, so a long line of them means waiting.
-func (s *Soulseek) busy() time.Duration { return s.c.searchBacklog() }
+// busy: searches are paced, so a long line of them means waiting; unless what the track needs
+// was already found, or is on its way (its album's search, usually).
+func (s *Soulseek) busy(t *Track) time.Duration {
+	s.mu.Lock()
+	_, hit := s.hits[t.Key]
+	s.mu.Unlock()
+	if q := slskQueries(t); hit || len(q) > 0 && s.c.answers.known(slskQuery(q[0])) {
+		return 0
+	}
+	return s.c.searchBacklog()
+}
 
 func (s *Soulseek) remember(key string, cands []Candidate) {
 	s.mu.Lock()
@@ -229,10 +238,14 @@ func (s *Soulseek) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 	if ok && time.Since(hit.at) < 30*time.Minute {
 		return hit.cands, nil
 	}
+	limit := slskLineLimit
 	return searchUntilFound(ctx, t, slskQueries(t), func(q string) ([]Candidate, error) {
-		resps, err := s.c.Search(ctx, q)
+		resps, sent, err := s.c.searchWithin(ctx, q, limit)
 		if err != nil {
 			return nil, err
+		}
+		if sent { // it's been through the line: its next search doesn't go to the back of it
+			limit = 0
 		}
 		return s.candidates(t, resps), nil
 	})

@@ -83,8 +83,8 @@ func searchUntilFound(ctx context.Context, t *Track, queries []string, search fu
 			return nil, ctx.Err()
 		}
 		if err != nil {
-			if i == 0 || isBlocked(err) || len(out) == 0 {
-				return nil, err
+			if i == 0 || isBlocked(err) || isBusy(err) || len(out) == 0 {
+				return nil, err // busy: not an answer, so the track comes back for the rest
 			}
 			debugf("search %q failed (%v); going on with the %d results found before", q, err, len(out))
 			return out, nil

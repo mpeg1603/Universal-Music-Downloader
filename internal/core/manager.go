@@ -289,9 +289,10 @@ func (m *Manager) Start() error {
 		defer m.wg.Done()
 		m.setup()
 	}()
-	m.wg.Add(2)
+	m.wg.Add(3)
 	go func() { defer m.wg.Done(); m.dispatchLoop() }()
 	go func() { defer m.wg.Done(); m.governor() }()
+	go func() { defer m.wg.Done(); m.housekeeping() }()
 	return nil
 }
 
@@ -1033,6 +1034,14 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 		if ctx.Err() != nil {
 			return result{aborted: true}
 		}
+		if isBusy(err) { // no room in its line: on to the next sources, back later
+			j.addNote(name, label+": "+err.Error(), true)
+			skipped[label], transient = true, true
+			if at := time.Now().Add(time.Minute); retryAt.IsZero() || at.Before(retryAt) {
+				retryAt = at
+			}
+			continue
+		}
 		m.recordResult(src, err, true)
 		if err != nil {
 			note(label + ": " + err.Error())
@@ -1233,8 +1242,11 @@ func (m *Manager) nextSource(j *Job, needBetter bool, libQ Quality, transient *b
 			*transient = true
 			continue
 		}
-		if b, ok := src.(interface{ busy() time.Duration }); ok {
-			if wait := b.busy(); wait > busyLimit || wait > jumpWait && m.mayJump() {
+		if b, ok := src.(interface{ busy(*Track) time.Duration }); ok {
+			j.mu.Lock()
+			t := j.Track
+			j.mu.Unlock()
+			if wait := b.busy(t); wait > busyLimit || wait > jumpWait && m.mayJump() {
 				j.addNote(name, fmt.Sprintf("%s: busy (requests wait %s for their turn); tried again later", src.Label(), FmtWait(wait)), true)
 				later(time.Now().Add(wait))
 				continue

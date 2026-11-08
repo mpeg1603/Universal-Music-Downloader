@@ -43,6 +43,7 @@ type dataTable struct {
 	spans     []int
 	adjusting bool
 	userSized bool
+	selKey    string // the selected row's key, taken while its rows were the current ones
 
 	last, lastHead *qt.QVariant // what was just handed to Qt, which copies it
 }
@@ -84,6 +85,7 @@ func (a *app) newTable(name string, cols ...column) *dataTable {
 	})
 	v := t.view
 	v.SetModel(m.QAbstractItemModel)
+	v.SelectionModel().OnSelectionChanged(func(_, _ *qt.QItemSelection) { t.rememberSelection() })
 	v.SetSelectionBehavior(qt.QAbstractItemView__SelectRows)
 	v.SetSelectionMode(qt.QAbstractItemView__SingleSelection)
 	v.SetEditTriggers(qt.QAbstractItemView__NoEditTriggers)
@@ -291,13 +293,17 @@ func (t *dataTable) changed() {
 	t.view.Viewport().Update()
 }
 
-// reload redoes the table: for a new set of rows or a new order.
-func (t *dataTable) reload() {
-	sel := ""
-	row := t.current()
-	if row >= 0 && t.key != nil {
-		sel = t.key(row)
+func (t *dataTable) rememberSelection() {
+	t.selKey = ""
+	if row := t.current(); row >= 0 && t.key != nil && t.count != nil && row < t.count() {
+		t.selKey = t.key(row)
 	}
+}
+
+// reload redoes the table: for a new set of rows or a new order. By now the page's data may
+// already be the new rows, so the selected row's key can't be read here: it could be gone.
+func (t *dataTable) reload() {
+	sel := t.selKey
 	bar := t.view.VerticalScrollBar().Value()
 	t.model.BeginResetModel()
 	t.sortRows()
@@ -309,6 +315,7 @@ func (t *dataTable) reload() {
 	for _, r := range t.spans {
 		t.view.SetSpan(r, 0, 1, len(t.cols))
 	}
+	t.selKey = ""
 	if sel != "" {
 		for i := range t.rowsShown {
 			if t.key(t.rowAt(i)) == sel {

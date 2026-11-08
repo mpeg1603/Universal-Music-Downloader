@@ -1,6 +1,9 @@
 /universal-music-downloader
 /universal-music-downloader.exe
+/universal-music-downloader-gui
+/universal-music-downloader-gui.exe
 /dist/
 /testing/
 soulseek_credentials.txt
 rutracker_credentials.txt
+.claude/

@@ -37,8 +37,11 @@ type sortTab struct {
 	histNote *qt.QLabel
 
 	// working
-	stage *qt.QLabel
-	bar   *qt.QProgressBar
+	stage  *qt.QLabel
+	detail *qt.QLabel
+	why    *qt.QLabel
+	skip   *qt.QPushButton
+	bar    *qt.QProgressBar
 
 	// the plan
 	sumMain, sumDups, sumFrom *qt.QLabel
@@ -237,8 +240,19 @@ func (t *sortTab) buildBusy() *qt.QWidget {
 	t.bar = qt.NewQProgressBar2()
 	t.bar.SetTextVisible(false)
 	cb.AddWidget(t.bar.QWidget)
+	t.detail = text("", "muted")
+	t.detail.SetAlignment(qt.AlignCenter)
+	cb.AddWidget(t.detail.QWidget)
+	t.why = richText("These files' tags don't say which album they're on. MusicBrainz takes one question a second, so this part is slow the first time. Every answer is remembered, so stopping loses nothing. You can skip the rest: those files are then filed from their tags and names alone.", "hint")
+	t.why.SetAlignment(qt.AlignCenter)
+	t.why.Hide()
+	cb.AddWidget(t.why.QWidget)
 	row := hbox()
+	row.SetSpacing(8)
 	row.AddStretch()
+	t.skip = button("Skip the lookups", "", func() { t.a.m.SortSkipLookups(); t.refresh() })
+	t.skip.Hide()
+	row.AddWidget(t.skip.QWidget)
 	row.AddWidget(button("Stop", "", func() { t.a.m.SortCancel() }).QWidget)
 	row.AddStretch()
 	cb.AddLayout(row.QLayout)
@@ -482,6 +496,9 @@ func (t *sortTab) refresh() {
 		} else {
 			t.bar.SetRange(0, 0) // keeps moving: how long isn't known yet
 		}
+		t.detail.SetText(sortProgressText(v))
+		t.why.SetVisible(v.CanSkip)
+		t.skip.SetVisible(v.CanSkip)
 	case v.Result != nil:
 		t.showResult(v)
 	case v.Plan != nil:
@@ -499,6 +516,19 @@ func (t *sortTab) refresh() {
 			t.a.m.SortDiscard()
 		}
 	}
+}
+
+// sortProgressText says how far along a stage is: "312 of 1,204 · about 14m left".
+func sortProgressText(v core.SortView) string {
+	switch {
+	case v.Total > 0 && v.Left > 0:
+		return fmt.Sprintf("%s of %s · about %s left", fmtCount(v.Done), fmtCount(v.Total), core.FmtWait(v.Left))
+	case v.Total > 0:
+		return fmtCount(v.Done) + " of " + fmtCount(v.Total)
+	case v.Done > 0:
+		return fmtCount(v.Done) + " so far"
+	}
+	return ""
 }
 
 func (t *sortTab) showPlan(p *core.SortPlanView) {

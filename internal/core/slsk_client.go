@@ -1284,6 +1284,10 @@ func (s *slskSearch) snapshot() ([]slskResponse, time.Time) {
 // searchBacklog is how long a search started now would wait for its turn.
 func (c *slskClient) searchBacklog() time.Duration { return c.budget.backlog() }
 
+// slskLineLimit: a track that would wait longer than this for its turn to search goes on to
+// the next sources instead. With searches this scarce, a long line would only tie tracks up.
+const slskLineLimit = busyLimit
+
 // slskQuery makes search text the network handles well: plain words, no punctuation
 // (SoulseekQt answers nothing when some characters are in it), no words the server would
 // read as "exclude this".
@@ -1308,9 +1312,17 @@ func slskQuery(s string) string {
 // few seconds. Searches are budgeted (slskSearchBudget), at most two run at once, and the
 // same search within an hour gets the answers of the first (also while it's under way).
 func (c *slskClient) Search(ctx context.Context, text string) ([]slskResponse, error) {
+	resps, _, err := c.searchWithin(ctx, text, 0)
+	return resps, err
+}
+
+// searchWithin is Search for someone with other places to go: if the wait for its turn would
+// be longer than limit (0: however long), it gets a busy error instead of waiting. Answers kept
+// or under way never wait. sent says this call used up a search.
+func (c *slskClient) searchWithin(ctx context.Context, text string, limit time.Duration) (resps []slskResponse, sent bool, err error) {
 	text = slskQuery(text)
 	if len(text) < 3 {
-		return nil, nil
+		return nil, false, nil
 	}
 	for {
 		s, mine := c.answers.get(text)
@@ -1318,23 +1330,36 @@ func (c *slskClient) Search(ctx context.Context, text string) ([]slskResponse, e
 			select {
 			case <-s.done:
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, false, ctx.Err()
 			}
 			if s.err != nil { // that one was given up on: search again
 				continue
 			}
 			c.debugf("answers to %q kept from %s ago", text, FmtWait(time.Since(s.at)))
-			return s.resps, nil
+			return s.resps, false, nil
 		}
-		resps, err := c.search(ctx, text)
+		resps, err = c.search(ctx, text, limit)
 		c.answers.finish(s, resps, err)
-		return resps, err
+		return resps, err == nil, err
 	}
 }
 
-func (c *slskClient) search(ctx context.Context, text string) ([]slskResponse, error) {
+func (c *slskClient) search(ctx context.Context, text string, limit time.Duration) ([]slskResponse, error) {
 	if until := c.banEnd(); !until.IsZero() {
 		return nil, unavailablef("banned by the Soulseek server until %s", until.Format("15:04"))
+	}
+	wait, ok := c.budget.join(limit)
+	if !ok {
+		return nil, busyf("searches wait %s for their turn; tried again later", FmtWait(wait))
+	}
+	inLine := true
+	defer func() {
+		if inLine {
+			c.budget.leave()
+		}
+	}()
+	if wait > time.Second {
+		taskFrom(ctx).setStage("waiting for its turn to search Soulseek")
 	}
 	if !c.waitOnline(ctx, 45*time.Second) {
 		if ctx.Err() != nil {
@@ -1348,9 +1373,11 @@ func (c *slskClient) search(ctx context.Context, text string) ([]slskResponse, e
 		return nil, ctx.Err()
 	}
 	defer func() { <-c.searchSem }()
+	inLine = false // wait takes the place over
 	if err := c.budget.wait(ctx); err != nil {
 		return nil, err
 	}
+	taskFrom(ctx).setStage("searching Soulseek")
 	if !c.online() {
 		return nil, unavailablef("%s", c.offlineReason())
 	}

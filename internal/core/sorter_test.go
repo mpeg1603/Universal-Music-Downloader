@@ -181,7 +181,7 @@ func sortMakeTestPlan(t *testing.T, o SortOptions, cacheDir string) *sortPlan {
 	if err := o.check(); err != nil {
 		t.Fatal(err)
 	}
-	p, err := sortMakePlan(context.Background(), o, cacheDir, &Tools{FFmpeg: "ffmpeg", FFprobe: "ffprobe"}, nil, func(string, int, int) {})
+	p, err := sortMakePlan(context.Background(), o, cacheDir, &Tools{FFmpeg: "ffmpeg", FFprobe: "ffprobe"}, nil, func(context.CancelFunc) {}, func(string, int, int) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,5 +409,66 @@ func TestSortPlanSurvivesARestart(t *testing.T) {
 	var back sortPlan
 	if err := json.Unmarshal(data, &back); err != nil || len(back.Moves) != len(p.Moves) {
 		t.Fatalf("%v, %d moves", err, len(back.Moves))
+	}
+}
+
+// Files needing the web are asked about after everything else is known, the ones asked about
+// before cost nothing, and the lookups can be skipped.
+func TestSortLookupsSkipAndMemory(t *testing.T) {
+	id := &sortIdentifier{path: filepath.Join(t.TempDir(), "l.json"), cache: map[string]*sortMatch{}, failures: map[string]int{}, disabled: map[string]bool{}}
+	mk := func(artist, title string) *sortResolving {
+		return sortPrepare(&sortAudio{Path: "/m/x/" + title + ".mp3", Root: "/m", Duration: 100, Tags: sortTags{Artist: artist, Title: title}})
+	}
+	known, unknown := mk("Band", "Known"), mk("Band", "Unknown")
+	key := func(r *sortResolving) string {
+		return "|" + sortArtistKey(r.m.artist) + "|" + sortTitleKey(r.m.title) + "|25"
+	}
+	id.cache["musicbrainz"+key(known)] = &sortMatch{Source: "musicbrainz", Album: "An Album"}
+	if !id.answered(known.a, &known.m, "") || id.answered(unknown.a, &unknown.m, "") {
+		t.Fatal("answered is wrong")
+	}
+	var skip context.CancelFunc
+	var stages []string
+	notes := sortLookups(context.Background(), id, []*sortResolving{known, unknown}, func(f context.CancelFunc) {
+		if f != nil {
+			f() // skipped right away, before any question goes out
+			skip = f
+		}
+	}, func(s string, _, total int) { stages = append(stages, fmt.Sprintf("%s/%d", s, total)) })
+	if known.m.album != "An Album" {
+		t.Errorf("remembered answer not used: %+v", known.m)
+	}
+	if skip == nil || len(notes) != 1 || !strings.Contains(notes[0], "1 files") {
+		t.Errorf("notes %q, stages %q", notes, stages)
+	}
+	if id.requests != 0 {
+		t.Errorf("%d requests", id.requests)
+	}
+}
+
+// A song already filed in Artist/Singles isn't looked up again; one in an album-less folder is.
+func TestSortSinglesFolderIsSettled(t *testing.T) {
+	tags := sortTags{Artist: "Band", Title: "Song"}
+	if r := sortPrepare(&sortAudio{Path: "/m/Band/Singles/Song.mp3", Root: "/m", Tags: tags}); r.wantsWeb() {
+		t.Error("a file in Singles asks the web")
+	}
+	if r := sortPrepare(&sortAudio{Path: "/m/dump/Song.mp3", Root: "/m", Tags: tags}); !r.wantsWeb() {
+		t.Error("a file without an album doesn't ask the web")
+	}
+}
+
+// sortFind sees a file reachable from two roots, one through a link, once.
+func TestSortFindThroughLinkedRoot(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	os.MkdirAll(filepath.Join(real, "a"), 0o755)
+	os.WriteFile(filepath.Join(real, "a", "x.mp3"), []byte("x"), 0o644)
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip(err)
+	}
+	found, err := sortFind(context.Background(), []string{real, link}, nil, func(int) {})
+	if err != nil || len(found) != 1 {
+		t.Errorf("%d found, %v", len(found), err)
 	}
 }

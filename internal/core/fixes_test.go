@@ -366,3 +366,103 @@ func TestLibraryCheckAgreesWithEvaluate(t *testing.T) {
 		t.Error("nothing matched at all")
 	}
 }
+
+// The app's own files are kept in bounds: old ones go, then the oldest until the rest fit, and
+// nothing that may be in use.
+func TestPruneDir(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	put := func(name string, size int, age time.Duration) {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, make([]byte, size), 0o644)
+		os.Chtimes(p, now.Add(-age), now.Add(-age))
+	}
+	put("ancient", 10, 100*time.Hour)
+	put("old", 40, 5*time.Hour)
+	put("middle", 40, 3*time.Hour)
+	put("recent", 40, time.Hour)
+	put("in-use", 40, time.Minute)
+	files, freed := pruneDir(pruneRule{dir: dir, maxAge: 72 * time.Hour, maxBytes: 120}, now)
+	if files != 2 || freed != 50 {
+		t.Errorf("%d files, %d bytes", files, freed)
+	}
+	for name, want := range map[string]bool{"ancient": false, "old": false, "middle": true, "recent": true, "in-use": true} {
+		if _, err := os.Stat(filepath.Join(dir, name)); (err == nil) != want {
+			t.Errorf("%s: present %v, want %v", name, err == nil, want)
+		}
+	}
+	// Over the limit with only files in use: they all stay.
+	put("a", 500, time.Minute)
+	if files, _ := pruneDir(pruneRule{dir: dir, maxAge: 72 * time.Hour, maxBytes: 120}, now); files != 2 {
+		t.Errorf("%d removed, want the 2 not in use", files)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a")); err != nil {
+		t.Error("removed a file in use")
+	}
+	if n, _ := pruneDir(pruneRule{dir: filepath.Join(dir, "missing"), maxAge: time.Hour, maxBytes: 1}, now); n != 0 {
+		t.Error("a missing folder")
+	}
+}
+
+// Clearing by hand: a kind or everything, never what may be in use, nor Sort & merge's while it runs.
+func TestClearCache(t *testing.T) {
+	m := &Manager{dataDir: t.TempDir()}
+	old := time.Now().Add(-time.Hour)
+	put := func(rel string, age time.Time) {
+		p := filepath.Join(m.dataDir, rel)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte("12345"), 0o644)
+		os.Chtimes(p, age, age)
+	}
+	put("cache/bandcamp/a.zip", old)
+	put("cache/bandcamp/in-use.zip", time.Now())
+	put("cache/torrents/b.torrent", old)
+	put("logs/1.log", old)
+	put("logs/2.log", old.Add(time.Minute))
+	put("sort-tags.jsonl", old)
+	usage := map[string]CacheInfo{}
+	for _, c := range m.CacheUsage() {
+		usage[c.Name] = c
+	}
+	if c := usage["albums"]; c.Files != 2 || c.Bytes != 10 || c.Label == "" {
+		t.Errorf("albums: %+v", c)
+	}
+	if files, freed, err := m.ClearCache("albums"); err != nil || files != 1 || freed != 5 {
+		t.Errorf("albums cleared: %d, %d, %v", files, freed, err)
+	}
+	if !fileExists(filepath.Join(m.dataDir, "cache/bandcamp/in-use.zip")) || !fileExists(filepath.Join(m.dataDir, "cache/torrents/b.torrent")) {
+		t.Error("removed what wasn't asked for, or something in use")
+	}
+	if _, _, err := m.ClearCache("nonsense"); err == nil {
+		t.Error("an unknown kind was accepted")
+	}
+	m.sort.view.Busy = true
+	if _, _, err := m.ClearCache("sort-tags"); err == nil || !fileExists(filepath.Join(m.dataDir, "sort-tags.jsonl")) {
+		t.Errorf("cleared Sort & merge's files while it ran: %v", err)
+	}
+	m.sort.view.Busy = false
+	if files, _, err := m.ClearCache(""); err != nil || files != 3 { // torrent, older log, tags
+		t.Errorf("everything: %d, %v", files, err)
+	}
+	if !fileExists(filepath.Join(m.dataDir, "logs/2.log")) {
+		t.Error("removed the current log")
+	}
+}
+
+func TestPlaylistFinished(t *testing.T) {
+	for _, c := range []struct {
+		s    PlaylistStatus
+		want bool
+	}{
+		{PlaylistStatus{Enabled: true, Tracks: 5, Done: 3, InLib: 2}, true},
+		{PlaylistStatus{Enabled: true, Tracks: 5, Done: 3, Failed: 2}, true},
+		{PlaylistStatus{Enabled: true, Tracks: 5, Done: 3, Todo: 2}, false},
+		{PlaylistStatus{Enabled: true, Tracks: 5, Failed: 5}, false},
+		{PlaylistStatus{Enabled: false, Tracks: 5}, false}, // switched off: its songs have no jobs
+		{PlaylistStatus{Enabled: true}, false},
+	} {
+		if got := c.s.Finished(); got != c.want {
+			t.Errorf("%+v: %v", c.s, got)
+		}
+	}
+}

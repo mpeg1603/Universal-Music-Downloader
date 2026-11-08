@@ -114,6 +114,8 @@ func (ui *tui) buildSort() tview.Primitive {
 			ui.sortConfirmApply()
 		case 'x':
 			ui.m.SortCancel()
+		case 'l':
+			ui.m.SortSkipLookups()
 		case 'd':
 			ui.m.SortDiscard()
 			s.seen = ""
@@ -253,10 +255,18 @@ func (ui *tui) refreshSort() {
 		fmt.Fprintf(&b, "[yellow]%s…[-]", v.Stage)
 		if v.Total > 0 {
 			fmt.Fprintf(&b, "  %d of %d  [aqua]%s[-]", v.Done, v.Total, tviewBar(float64(v.Done)/float64(v.Total), 30))
+			if v.Left > 0 {
+				fmt.Fprintf(&b, "  about %s left", core.FmtWait(v.Left))
+			}
 		} else if v.Done > 0 {
 			fmt.Fprintf(&b, "  %d", v.Done)
 		}
-		b.WriteString("\n\n[::d]x stops[::-]")
+		if v.CanSkip {
+			b.WriteString("\n\nThese files' tags don't say which album they're on. MusicBrainz takes one question a second, so this is slow the first time; every answer is remembered.")
+			b.WriteString("\n\n[::d]l skips the rest of the lookups · x stops[::-]")
+		} else {
+			b.WriteString("\n\n[::d]x stops[::-]")
+		}
 	case v.Result != nil:
 		r := v.Result
 		word := "moved or copied"

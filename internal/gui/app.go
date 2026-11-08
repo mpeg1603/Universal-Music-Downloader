@@ -356,6 +356,7 @@ func (a *app) show(id pageID) {
 		a.soulseek.shown()
 	case pageSettings:
 		a.settings.load()
+		a.settings.readCaches()
 	case pageActivity:
 		a.log.refresh()
 	}

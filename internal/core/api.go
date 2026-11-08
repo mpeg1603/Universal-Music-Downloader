@@ -76,7 +76,10 @@ type Backend interface {
 	SortDuplicates() []SortDuplicate
 	SortApply(id string) error // "" is the current plan
 	SortUndo(id string) error
+	CacheUsage() []CacheInfo
+	ClearCache(name string) (files int, freed int64, err error)
 	SortCancel()
+	SortSkipLookups()
 	SortDiscard()
 	SortHistory() []SortPlanInfo
 

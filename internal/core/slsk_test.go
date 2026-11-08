@@ -1057,3 +1057,95 @@ func TestSlskQueries(t *testing.T) {
 		t.Errorf("single: %q", q)
 	}
 }
+
+// Searches form a short line: whoever would wait too long is told so and can go elsewhere.
+func TestSlskSearchLine(t *testing.T) {
+	b := newSlskSearchBudget(15*time.Second, 120)
+	if _, ok := b.join(20 * time.Second); !ok {
+		t.Fatal("the first search was turned away")
+	}
+	if w, ok := b.join(20 * time.Second); !ok || w != 15*time.Second {
+		t.Fatalf("the second search: %s, %v", w, ok)
+	}
+	if w, ok := b.join(20 * time.Second); ok || w != 30*time.Second {
+		t.Fatalf("the third search: %s, %v", w, ok)
+	}
+	if w, ok := b.join(0); !ok || w != 30*time.Second {
+		t.Fatalf("a search that has to go out: %s, %v", w, ok)
+	}
+	b.leave()
+	if w := b.backlog(); w != 30*time.Second {
+		t.Errorf("backlog %s", w)
+	}
+	// A slot given out still counts: the place in line turned into it.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b.next = time.Now().Add(time.Minute)
+	if err := b.wait(ctx); err == nil {
+		t.Error("wait ignored the cancel")
+	}
+	if b.line != 1 {
+		t.Errorf("%d in line after one left", b.line)
+	}
+}
+
+// A track whose album's answers are kept doesn't count as waiting, a busy line or not.
+func TestSoulseekBusySeesKeptAnswers(t *testing.T) {
+	c := &slskClient{budget: newSlskSearchBudget(15*time.Second, 120), answers: &slskSearchCache{}}
+	s := newSoulseekSource(c, "flac")
+	tr := MakeTrack("Song", []string{"Band"}, "An Album", 4)
+	c.budget.join(0)
+	c.budget.join(0)
+	if w := s.busy(tr); w != 30*time.Second {
+		t.Errorf("busy %s with two in line", w)
+	}
+	e, _ := c.answers.get(slskQuery(slskQueries(tr)[0]))
+	if s.busy(tr) != 0 {
+		t.Error("a search under way doesn't count as an answer")
+	}
+	c.answers.finish(e, nil, nil)
+	if s.busy(tr) != 0 {
+		t.Error("kept answers don't count")
+	}
+}
+
+// Many tracks reaching Soulseek at once: a few get their turn, the rest move straight on to the
+// next source instead of all waiting 12 seconds each for a search.
+func TestSoulseekLineLetsTracksMoveOn(t *testing.T) {
+	tools := NeedFFmpeg(t)
+	srv := newFakeSlskServer(t)
+	var sent atomic.Int32
+	srv.onSearch = func(uint32, string) { sent.Add(1) }
+	c := testSlskClient(t, srv, nil, nil)
+	if !c.online() {
+		t.Fatalf("not online: %+v", c.State())
+	}
+	c.budget = newSlskSearchBudget(12*time.Second, 1000)
+	slsk := newSoulseekSource(c, "flac")
+	results := map[string][]Candidate{}
+	var tracks []*Track
+	for i := range 20 {
+		title := fmt.Sprintf("Song Number %d", i)
+		tr := MakeTrack(title, []string{"Band"}, "", 4)
+		tr.Key = fmt.Sprintf("t%d", i)
+		tracks = append(tracks, tr)
+		results[tr.Key] = Found("youtube", title, "Band", 4)
+	}
+	next := &FakeSource{SrcName: "youtube", T: t, Results: results}
+	m := TestManager(t, tools, []Source{slsk, next}, TestLibrary(tracks...), func(cfg *Config) { cfg.SearchWorkers = 30 })
+	start := time.Now()
+	out := RunManager(t, m)
+	took := time.Since(start)
+	for k, v := range out {
+		if v.State != JobDone {
+			t.Errorf("%s: %v (%s)", k, v.State, v.Reason)
+		}
+	}
+	// With every track waiting for its turn this would be 20 x 12 s; a line of two is 12 s or so.
+	if took > 45*time.Second {
+		t.Errorf("took %s", took)
+	}
+	if n := sent.Load(); n > 4 {
+		t.Errorf("%d searches sent", n)
+	}
+}

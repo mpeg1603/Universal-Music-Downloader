@@ -60,6 +60,7 @@ type tui struct {
 	inputsTable, playlistsTable *tview.Table
 	inputs                      []core.InputStatus
 	playlists                   []core.PlaylistStatus
+	playlistsOpen               int // how many of them aren't finished yet (those come first)
 
 	// library
 	libInfo  *tview.TextView

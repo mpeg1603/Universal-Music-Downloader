@@ -159,7 +159,7 @@ type busySource struct {
 	wait time.Duration
 }
 
-func (b *busySource) busy() time.Duration { return b.wait }
+func (b *busySource) busy(*Track) time.Duration { return b.wait }
 
 func TestBusySourceIsSkippedForNow(t *testing.T) {
 	tools := NeedFFmpeg(t)
@@ -246,5 +246,28 @@ func TestQueueJumping(t *testing.T) {
 	// A download that would wait for a full slot jumps too.
 	if !isBusy(busyf("x")) || isUnavailable(busyf("x")) {
 		t.Error("busy errors")
+	}
+}
+
+// A source that says "no room in line" isn't a failure: the track goes on, and nothing is
+// marked as tried.
+func TestSearchBusyMovesOn(t *testing.T) {
+	tools := NeedFFmpeg(t)
+	tr := MakeTrack("Song", []string{"Band"}, "", 4)
+	tr.Key = "a"
+	line := &FakeSource{SrcName: "soulseek", T: t, searchErr: busyf("searches wait 1m for their turn")}
+	next := &FakeSource{SrcName: "youtube", T: t, Results: map[string][]Candidate{"a": Found("youtube", "Song", "Band", 4)}}
+	m := TestManager(t, tools, []Source{line, next}, TestLibrary(tr), nil)
+	if v := RunManager(t, m)["a"]; v.State != JobDone || v.Rec.Source != "youtube" {
+		t.Errorf("%v from %q (%s)", v.State, v.Rec.Source, v.Reason)
+	}
+	if line.searched.Load() != 1 {
+		t.Errorf("searched %d times", line.searched.Load())
+	}
+	m.srcMu.Lock()
+	h := *m.healthOf("soulseek")
+	m.srcMu.Unlock()
+	if h.fails != 0 || h.searches != 0 {
+		t.Errorf("being busy was recorded: %+v", h)
 	}
 }

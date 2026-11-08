@@ -93,7 +93,10 @@ once, a few torrents at once). While bandwidth is to spare, a track that would w
 busy source moves on to the next source in the order instead of holding a place in line; once
 the bandwidth is used up, tracks wait for the sources they'd get first again. A waiting
 torrent that hasn't received anything for 3 minutes lets its tracks move on the same way.
-Settings → *Skip busy sources while bandwidth is to spare* turns it off.
+Settings → *Skip busy sources while bandwidth is to spare* turns it off. Whatever that says, a
+source whose line would take more than 20 seconds (Soulseek's paced searches, say) never ties
+tracks up: at most the few that will get their turn soon wait for it, the others go on to the
+next sources and come back later if those don't have the song.
 
 The header shows the speeds: the app's own downloads, torrents, and Soulseek (down and up,
 with the number of transfers each way).
@@ -177,7 +180,8 @@ length), best first. `Enter` on one adds it to the queue, ahead of everything el
   version rather than the single's or a reissue's; compilations and other artists' songs on
   splits are left out). You're asked first.
 
-Each addition becomes a playlist of its own (`Search: Artist - Album`) in the Playlists list,
+Each addition becomes a playlist of its own (`Search: Artist - Album`) in the Playlists list
+(once every song is downloaded, in your library or not found, it moves to *Finished playlists*),
 so it can be turned off, given a priority, or removed again (`d`; files already downloaded
 stay).
 
@@ -238,6 +242,10 @@ It works in three steps, and only the last changes anything:
 
 1. **Make a plan.** It reads your files: their tags, then their file and folder names, then (for
    the few that need it, and if you allow it) MusicBrainz and Deezer. Nothing changes.
+   MusicBrainz takes one question a second, so with a big library the lookups are the slow part
+   the first time: the page says how many are left and about how long that takes, every answer
+   is remembered, and you can skip the rest (those files are then filed from their tags and
+   names alone). Songs already in an `Artist/Singles` folder aren't asked about again.
 2. **Look it over.** Every file's old and new place, every duplicate and why.
 3. **Apply it.** Files move, or are copied if you'd rather. Downloads pause meanwhile.
 
@@ -499,8 +507,10 @@ setup or scripts). `--config FILE` and `--data DIR` use another settings file an
 - `~/.local/share/universal-music-downloader/`: `state.jsonl` (per-track results), `library.json`
   (imported playlists and Deezer lookups), `library-index.json` (library scan),
   `bandcamp-emails.json` (releases Bandcamp was asked to email, and the links received),
-  `cache/` (torrent files, searches, the indexer definitions), `logs/` (one per run, last 20
-  kept).
+  `cache/` (Bandcamp album zips, torrent files, searches, the indexer definitions), `logs/` (one
+  per run). These are kept in bounds: every hour the app removes what's old or over the limit,
+  least recently used first (album zips: 5 GB, 3 days; logs: 100 MB, 2 weeks). To clear them by
+  hand: Settings → *Temporary files* (`Clear temporary files` in the terminal app's Settings).
 - Moving from the old name (*spotify-downloader*): on the first start the app moves
   `~/.config/spotify-downloader`, `~/.local/share/spotify-downloader` and
   `~/.cache/spotify-downloader` to the new names (leaving links behind), so settings, state and

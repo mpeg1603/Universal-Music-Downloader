@@ -24,6 +24,7 @@ type slskSearchBudget struct {
 	perHour int           // in any hour; a quarter of it in any 10 minutes
 	next    time.Time     // the earliest the next search may go
 	sent    []time.Time   // the last hour's searches (and slots already given out)
+	line    int           // searches in line that haven't been given a slot yet
 }
 
 func newSlskSearchBudget(gap time.Duration, perHour int) *slskSearchBudget {
@@ -67,16 +68,42 @@ func later(a, b time.Time) time.Time {
 	return a
 }
 
-// backlog is how long a search started now would wait for its turn.
+// lineWait is how long a search joining the line now would wait. Callers hold mu.
+func (b *slskSearchBudget) lineWait(now time.Time) time.Duration {
+	return max(0, b.slot(now).Sub(now)) + time.Duration(b.line)*b.gap
+}
+
+// backlog is how long a search started now would wait for its turn, the searches already in
+// line included.
 func (b *slskSearchBudget) backlog() time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return max(0, time.Until(b.slot(time.Now())))
+	return b.lineWait(time.Now())
 }
 
-// wait takes the next slot and waits for it.
+// join takes a place in the line, unless the wait would be longer than limit (0: however long
+// it is). wait or leave gives the place up.
+func (b *slskSearchBudget) join(limit time.Duration) (time.Duration, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w := b.lineWait(time.Now())
+	if limit > 0 && w > limit {
+		return w, false
+	}
+	b.line++
+	return w, true
+}
+
+func (b *slskSearchBudget) leave() {
+	b.mu.Lock()
+	b.line = max(0, b.line-1)
+	b.mu.Unlock()
+}
+
+// wait turns a place in the line into the next slot, and waits for it.
 func (b *slskSearchBudget) wait(ctx context.Context) error {
 	b.mu.Lock()
+	b.line = max(0, b.line-1)
 	t := b.slot(time.Now())
 	b.sent = append(b.sent, t)
 	b.next = t.Add(b.gap)
@@ -156,6 +183,22 @@ func (c *slskSearchCache) get(text string) (s *slskCachedSearch, mine bool) {
 	s = &slskCachedSearch{done: make(chan struct{})}
 	c.m[k] = s
 	return s, true
+}
+
+// known says whether text's answers are kept, or on their way.
+func (c *slskSearchCache) known(text string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.m[searchCacheKey(text)]
+	if s == nil {
+		return false
+	}
+	select {
+	case <-s.done:
+		return s.err == nil && time.Since(s.at) < slskSearchKeep
+	default:
+		return true
+	}
 }
 
 func (c *slskSearchCache) finish(s *slskCachedSearch, resps []slskResponse, err error) {

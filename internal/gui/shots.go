@@ -3,6 +3,7 @@
 package gui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -143,6 +144,10 @@ func runShots(a *app) {
 	a.win.Show()
 	pump(1500 * time.Millisecond)
 
+	if os.Getenv("UMD_SHOTS_SLSK") != "" {
+		s.soulseekSearches()
+		return
+	}
 	for _, mode := range []string{"dark", "light"} {
 		s.setTheme(mode)
 		for i := pageDashboard; i < pageCount; i++ {
@@ -268,6 +273,41 @@ func (s *shotter) playlists() {
 	a := s.a
 	a.show(pagePlaylists)
 	pump(150 * time.Millisecond)
+	// the finished ones are a category of their own
+	t := a.lists
+	real := t.all
+	t.all = []core.PlaylistStatus{
+		{Name: "Still going", Enabled: true, Tracks: 10, Done: 4, InLib: 2, Todo: 4, Active: 1},
+		{Name: "All done", Enabled: true, Tracks: 10, Done: 6, InLib: 4},
+		{Name: "Done, two not found", Enabled: true, Tracks: 10, Done: 8, Failed: 2},
+		{Name: "Nothing found", Enabled: true, Tracks: 10, Failed: 10},
+	}
+	t.showCategory()
+	pump(60 * time.Millisecond)
+	if len(t.rows) != 2 {
+		s.fail("%d playlists in progress, want 2", len(t.rows))
+	}
+	s.grab("flow-playlists-open", a.win.QWidget)
+	t.segs[1].Click()
+	pump(60 * time.Millisecond)
+	if len(t.rows) != 2 || t.rows[0].Name != "All done" || t.up.IsVisible() {
+		s.fail("finished playlists: %d, up visible %v", len(t.rows), t.up.IsVisible())
+	}
+	s.grab("flow-playlists-finished", a.win.QWidget)
+	t.all = nil
+	t.showCategory()
+	pump(40 * time.Millisecond)
+	t.all = []core.PlaylistStatus{{Name: "Still going", Enabled: true, Tracks: 10, Done: 4, Todo: 6}}
+	t.showCategory()
+	pump(40 * time.Millisecond)
+	if !t.note.IsVisible() {
+		s.fail("no note for an empty category")
+	}
+	t.segs[0].Click()
+	t.all = real
+	t.showCategory()
+	t.refresh()
+	pump(150 * time.Millisecond)
 	if len(a.lists.rows) > 0 {
 		a.lists.list.selectRow(0)
 		pump(60 * time.Millisecond)
@@ -314,8 +354,95 @@ func (s *shotter) sources() {
 	s.dialog("dialog-paste-links", t.pasteBandcampLinks)
 }
 
+// slskOffline answers Soulseek's calls without a network, so the page can be driven.
+type slskOffline struct {
+	core.Backend
+	answers [][]core.SlskResult
+}
+
+func (f *slskOffline) SoulseekSearch(context.Context, string) ([]core.SlskResult, error) {
+	if len(f.answers) == 0 {
+		return nil, nil
+	}
+	r := f.answers[0]
+	f.answers = f.answers[1:]
+	return r, nil
+}
+
+func (f *slskOffline) SoulseekStatus() core.SoulseekView {
+	v := f.Backend.SoulseekStatus()
+	v.On, v.Configured, v.Username, v.Online, v.User, v.Since = true, true, "someone", true, "someone", time.Now().Add(-time.Hour)
+	v.DlUsed, v.DlLimit, v.DlWaiting, v.UpActive, v.UpSlots, v.Port, v.SharedFiles, v.SharedFolders = 1, 2, 3, 1, 2, 2234, 81000, 9000
+	v.ShareScanned = time.Now()
+	return v
+}
+
+func slskRows(n int) []core.SlskResult {
+	var out []core.SlskResult
+	for i := range n {
+		out = append(out, core.SlskResult{User: fmt.Sprintf("someone%d", i), Path: fmt.Sprintf(`Music\\Band\\Album\\%02d - Song.flac`, i+1),
+			Size: int64(30_000_000 + i), BitDepth: 16, SampleRate: 44100, Duration: 200 + i, FreeSlot: i%2 == 0, Speed: 500_000})
+	}
+	return out
+}
+
+// soulseekSearches presses Search again and again, with fewer answers than rows selected.
+func (s *shotter) soulseekSearches() {
+	a, t := s.a, s.a.soulseek
+	real := a.m
+	defer func() { a.m = real }()
+	f := &slskOffline{Backend: real}
+	a.m = f
+	a.show(pageSoulseek)
+	t.showPage(slskPageSearch)
+	press := func(n int) {
+		f.answers = [][]core.SlskResult{slskRows(n)}
+		t.search.find.SetText("some band")
+		t.search.go_.Click()
+		for deadline := time.Now().Add(5 * time.Second); t.search.busy && time.Now().Before(deadline); {
+			pump(20 * time.Millisecond)
+		}
+		pump(60 * time.Millisecond)
+		if len(t.search.res) != n {
+			s.fail("search: %d results shown, want %d", len(t.search.res), n)
+		}
+	}
+	press(40)
+	t.search.table.view.SelectRow(30)
+	pump(40 * time.Millisecond)
+	press(3)
+	press(0)
+	press(12)
+	t.search.table.toggleSort(2)
+	t.search.table.view.SelectRow(9)
+	pump(40 * time.Millisecond)
+	press(2)
+	t.search.table.toggleSort(2)
+	t.search.table.toggleSort(2)
+	fmt.Fprintln(os.Stderr, "soulseek searches: no crash")
+	press(40)
+	t.refresh()
+	pump(100 * time.Millisecond)
+	s.grab("flow-soulseek-online", a.win.QWidget)
+	t.detailsB.Click()
+	pump(100 * time.Millisecond)
+	s.grab("flow-soulseek-details", a.win.QWidget)
+	if !t.share.IsVisible() {
+		s.fail("Details didn't open")
+	}
+	t.detailsB.Click()
+	t.showPage(slskPageChat)
+	pump(100 * time.Millisecond)
+	s.grab("flow-soulseek-chat", a.win.QWidget)
+	t.showPage(slskPageInterests)
+	pump(100 * time.Millisecond)
+	s.grab("flow-soulseek-interests", a.win.QWidget)
+	t.showPage(slskPageSearch)
+}
+
 func (s *shotter) soulseek() {
 	a, t := s.a, s.a.soulseek
+	s.soulseekSearches()
 	a.show(pageSoulseek)
 	pump(150 * time.Millisecond)
 	for i := range slskPageNames {
@@ -329,7 +456,11 @@ func (s *shotter) soulseek() {
 func (s *shotter) settings() {
 	a, t := s.a, s.a.settings
 	a.show(pageSettings)
-	pump(100 * time.Millisecond)
+	pump(400 * time.Millisecond)
+	s.grab("flow-settings-caches", t.cacheTotal.ParentWidget())
+	if t.cacheTotal.Text() == "" {
+		s.fail("temporary files weren't measured")
+	}
 	t.advancedB.Click()
 	pump(120 * time.Millisecond)
 	s.grab("flow-settings-advanced", a.win.QWidget)
@@ -407,6 +538,7 @@ func (s *shotter) timing() {
 	report("refresh, reset", func() { t.refresh(true); settle() })
 	report("refresh, same rows", func() { t.refresh(false); settle() })
 	report("tick", a.tick)
+	report("filter: downloading", func() { t.chips["downloading"].Click(); settle() })
 	report("filter: done", func() { t.chips["done"].Click(); settle() })
 	report("filter: all", func() { t.chips["all"].Click(); settle() })
 	report("find text", func() { t.find.SetText("the"); settle() })
@@ -752,14 +884,30 @@ func (s *shotter) waitSort(maxSeconds int) core.SortView {
 func (s *shotter) sortPlanOnly(root string) {
 	a := s.a
 	start := time.Now()
-	if err := a.m.SortPlan(core.SortOptions{Sources: []string{root}, Dest: root, DuplicatesDir: filepath.Join(filepath.Dir(root), "Duplicates"), Offline: true, Tolerance: 3,
+	if err := a.m.SortPlan(core.SortOptions{Sources: []string{root}, Dest: root, DuplicatesDir: filepath.Join(filepath.Dir(root), "Duplicates"), Offline: os.Getenv("UMD_SHOTS_SKIPWEB") == "", Tolerance: 3,
 		ArtistComps: os.Getenv("UMD_SHOTS_ARTISTCOMPS") != ""}); err != nil {
 		s.fail("%v", err)
 		return
 	}
 	last := time.Now()
+	skipAfter := os.Getenv("UMD_SHOTS_SKIPWEB") != ""
+	var webSeen time.Time
 	for a.m.SortStatus().Busy {
 		pump(50 * time.Millisecond)
+		if v := a.m.SortStatus(); skipAfter && v.CanSkip {
+			if webSeen.IsZero() {
+				webSeen = time.Now()
+				a.show(pageSort)
+				fmt.Fprintf(os.Stderr, "  web stage reached after %v: %d files to ask about\n", time.Since(start).Round(time.Second), v.Total)
+			}
+			if time.Since(webSeen) > 12*time.Second {
+				a.sorter.refresh()
+				pump(300 * time.Millisecond)
+				fmt.Fprintf(os.Stderr, "  skipping at %d/%d, about %v left\n", v.Done, v.Total, v.Left.Round(time.Second))
+				s.grab("sort-lookups", a.win.QWidget)
+				a.m.SortSkipLookups()
+			}
+		}
 		if time.Since(last) > 10*time.Second {
 			last = time.Now()
 			v := a.m.SortStatus()
