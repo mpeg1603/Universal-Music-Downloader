@@ -245,7 +245,8 @@ and for a proxy fill in its address, port and (if it needs one) its login.
 - **system**: your system's routing (with a VPN on, through the VPN);
 - **direct**: bound to your physical network interface (Wi-Fi/Ethernet), bypassing the VPN's
   tunnel. Detected automatically (the interface whose default route has a gateway), or set in
-  Settings. Done per connection inside the app (`SO_BINDTODEVICE` on Linux, no root needed);
+  Settings. Done per connection inside the app (`SO_BINDTODEVICE` on Linux, `IP_UNICAST_IF` on
+  Windows; no administrator rights needed);
   your system's routes, DNS and VPN settings aren't touched;
 - a **SOCKS5** or **HTTP proxy**: address (host name or IP), port, and optionally a user and
   password. (The settings file keeps it as `socks5://user:pass@host:port`.)

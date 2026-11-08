@@ -175,7 +175,8 @@ func directDialer(iface string) *net.Dialer {
 }
 
 var tunnelNames = []string{"tun", "tap", "wg", "utun", "ppp", "happ", "xray", "sing", "clash", "nekoray", "tailscale",
-	"zt", "nordlynx", "proton", "mullvad", "outline", "amnezia", "awg", "vpn", "docker", "veth", "br-", "virbr"}
+	"zt", "nordlynx", "proton", "mullvad", "outline", "amnezia", "awg", "vpn", "docker", "veth", "br-", "virbr",
+	"vethernet", "openvpn", "wireguard", "bluetooth"} // the last ones: Windows adapter names
 
 func looksLikeTunnel(name string) bool {
 	n := strings.ToLower(name)
