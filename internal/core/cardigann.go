@@ -598,13 +598,24 @@ func (c *cardigann) fetch(ctx context.Context, method, u string, body io.Reader)
 		if c.flare == nil {
 			return nil, blockedf("%s shows a browser check (Cloudflare); set FlareSolverr in Sources → Torrent to get past it", c.def.Name)
 		}
-		// The solver gets past the check (on the front page for anything but a page to
-		// read); its cookies then let the request through.
-		target := u
-		if method != "GET" {
-			target = c.site
+		// FlareSolverr makes the request in its browser (a login's POST too) and the page
+		// comes from there; its cookies (the site's session among them) go into the jar.
+		if f, ok := c.flare.(*flareSolverr); ok {
+			ans, err := f.request(ctx, method, u, bodyData)
+			if err != nil {
+				return nil, err
+			}
+			if su, err := url.Parse(c.site); err == nil {
+				c.http.Jar.SetCookies(su, ans.cookies)
+			}
+			if c.loginPath != "" && !inLogin {
+				if fu, err := url.Parse(ans.finalURL); err == nil && fu.Path == c.loginPath {
+					return nil, errCgLoggedOut
+				}
+			}
+			return ans.page, nil
 		}
-		if err := c.flare.clear(ctx, target); err != nil {
+		if err := c.flare.clear(ctx, u); err != nil {
 			return nil, err
 		}
 		return c.fetchAgain(ctx, method, u, bodyData)
@@ -931,34 +942,58 @@ func (f *flareSolverr) clear(ctx context.Context, u string) error {
 	if f.fresh(host) {
 		return blockedf("%s still shows a browser check after FlareSolverr passed it", host)
 	}
-	body, _ := json.Marshal(map[string]any{"cmd": "request.get", "url": u, "maxTimeout": 60000})
+	_, err := f.request(ctx, "GET", u, nil)
+	return err
+}
+
+// request has FlareSolverr's browser make the request (a page, or a form sent with POST, as
+// Jackett does for logins behind the check) and returns the page; its cookies, the site's
+// own among them, are kept for prepare and returned.
+func (f *flareSolverr) request(ctx context.Context, method, u string, form []byte) (*flareAnswer, error) {
+	cmd := map[string]any{"cmd": "request.get", "url": u, "maxTimeout": 60000}
+	if method == "POST" {
+		cmd["cmd"], cmd["postData"] = "request.post", string(form)
+	}
+	body, _ := json.Marshal(cmd)
 	req, err := http.NewRequestWithContext(ctx, "POST", f.url, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := f.http.Do(req)
 	if err != nil {
-		return unavailablef("FlareSolverr at %s: %s", f.url, describeNetErr(err))
+		return nil, unavailablef("FlareSolverr at %s: %s", f.url, describeNetErr(err))
 	}
 	defer resp.Body.Close()
 	var out struct {
 		Status   string
 		Message  string
 		Solution struct {
+			URL       string `json:"url"`
+			Response  string `json:"response"`
 			UserAgent string `json:"userAgent"`
 			Cookies   []struct {
-				Name, Value string
+				Name, Value, Domain, Path string
 			}
 		}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Status != "ok" {
-		return unavailablef("FlareSolverr couldn't get past the check: %s", FirstNonEmpty(out.Message, fmt.Sprint(err)))
+		return nil, unavailablef("FlareSolverr couldn't get past the check: %s", FirstNonEmpty(out.Message, fmt.Sprint(err)))
 	}
-	var jar []*http.Cookie
+	host := ""
+	if pu, err := url.Parse(u); err == nil {
+		host = pu.Hostname()
+	}
+	ans := &flareAnswer{page: []byte(out.Solution.Response), finalURL: out.Solution.URL}
 	for _, ck := range out.Solution.Cookies {
-		jar = append(jar, &http.Cookie{Name: ck.Name, Value: ck.Value})
+		ans.cookies = append(ans.cookies, &http.Cookie{Name: ck.Name, Value: ck.Value, Path: ck.Path})
 	}
-	f.set(host, out.Solution.UserAgent, jar)
-	return nil
+	f.set(host, out.Solution.UserAgent, ans.cookies)
+	return ans, nil
+}
+
+type flareAnswer struct {
+	page     []byte // as the browser read it (already decoded)
+	finalURL string
+	cookies  []*http.Cookie
 }

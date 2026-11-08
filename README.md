@@ -484,3 +484,9 @@ The code is in three parts:
   plain views they return.
 - `internal/tui`: the terminal app, one file per tab.
 - `cmd/universal-music-downloader`: the program: options, the headless mode, and starting the app.
+
+## License
+
+Universal Music Downloader is free software under the **GNU General Public License v3.0**
+([LICENSE](LICENSE)): anyone may use, study, share and change it; whoever distributes it, or a
+changed version, must do so under the same license, with the source code.

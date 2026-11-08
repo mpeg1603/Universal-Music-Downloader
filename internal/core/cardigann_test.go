@@ -391,3 +391,48 @@ func TestRuTrackerLogin(t *testing.T) {
 		t.Errorf("captcha: %v", err)
 	}
 }
+
+// TestRuTrackerLive logs in to the real RuTracker.org once, searches once and fetches the top
+// result's torrent file: RUTRACKER_CREDS=file (username, password on two lines),
+// FLARESOLVERR=url optional. Skipped otherwise.
+func TestRuTrackerLive(t *testing.T) {
+	path := os.Getenv("RUTRACKER_CREDS")
+	if path == "" {
+		t.Skip("RUTRACKER_CREDS not set")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 2 {
+		t.Fatal("the file needs the username and the password on two lines")
+	}
+	def, _ := ownIndexers.ReadFile("indexers/rutracker.yml")
+	c, err := newCardigannWith(def, newFlareSolverr(os.Getenv("FLARESOLVERR")), "",
+		map[string]string{"username": strings.TrimSpace(lines[0]), "password": strings.TrimSpace(lines[1])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	q := FirstNonEmpty(os.Getenv("CARDIGANN_QUERY"), "Кино Группа крови")
+	res, err := c.search(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d results for %q", len(res), q)
+	for i, r := range res[:min(len(res), 6)] {
+		t.Logf("%d. %s · %d seeders · %s · %v", i+1, r.Title, r.Seeders, FmtBytes(r.Size), r.Categories)
+	}
+	if len(res) == 0 {
+		t.Fatal("nothing found")
+	}
+	file, err := c.fetchFile(ctx, res[0].Link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(file), "d") {
+		t.Fatalf("not a torrent file: %q", file[:min(len(file), 80)])
+	}
+	t.Logf("torrent file of the top result: %d bytes", len(file))
+}

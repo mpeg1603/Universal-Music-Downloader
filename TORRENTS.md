@@ -85,7 +85,8 @@ The app logs in once and keeps the session; it logs in again only when RuTracker
 back to its login page. A failed login isn't tried again for 30 minutes (RuTracker asks for a
 captcha after a few failures): log in once in your browser then, check the password, and save
 again. RuTracker sits behind Cloudflare's check for some addresses (VPNs especially): then it
-needs FlareSolverr (below). Torrent files are downloaded with your login.
+needs FlareSolverr (below): the login then goes through FlareSolverr's browser, as Jackett does it.
+Torrent files are downloaded with your login.
 
 (RuTracker.RU, a different, public site, needs no account and is on by default.)
 
