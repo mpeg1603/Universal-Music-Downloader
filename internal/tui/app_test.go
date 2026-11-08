@@ -507,3 +507,35 @@ func TestQueueClickOutsideCells(t *testing.T) {
 		}
 	}
 }
+
+// Every setup step shows, and finishing saves what was set.
+func TestSetupWizard(t *testing.T) {
+	tools := core.NeedFFmpeg(t)
+	a := core.GetLucky()
+	a.Key = "a"
+	m := core.TestManager(t, tools, nil, core.TestLibrary(a), nil)
+	d := startUI(t, m)
+	if !m.NeedsSetup() {
+		t.Fatal("a new config needs the setup")
+	}
+	var w *setupWizard
+	for i := range core.SetupSteps {
+		d.onUI("showing a step", func() {
+			if w == nil {
+				w = &setupWizard{ui: d.ui, draft: m.Config()}
+			}
+			w.step = i
+			w.show()
+		})
+		if text := d.text(); !strings.Contains(text, core.SetupSteps[i].Title) {
+			t.Errorf("step %d:\n%s", i, text)
+		}
+	}
+	d.onUI("finishing", func() {
+		w.draft.Soulseek.Username = "someone"
+		w.finish()
+	})
+	if c := m.Config(); !c.SetupDone || c.Soulseek.Username != "someone" || m.NeedsSetup() {
+		t.Errorf("not saved: %+v", c.Soulseek)
+	}
+}

@@ -75,6 +75,7 @@ func (b BandcampCfg) fetcher() (mailFetcher, string) {
 }
 
 type Config struct {
+	SetupDone bool                   `json:"setup_done,omitempty"` // the first-run setup was gone through
 	Inputs    []InputCfg             `json:"inputs"`
 	Playlists map[string]PlaylistCfg `json:"playlists,omitempty"`
 

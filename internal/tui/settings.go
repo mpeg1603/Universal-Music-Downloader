@@ -101,6 +101,7 @@ func (ui *tui) fillSettings() {
 		ui.message("Settings", "Saved and applied.")
 	})
 	f.AddButton("Undo changes", func() { ui.fillSettings() })
+	f.AddButton("Run the setup again", ui.runSetup)
 }
 
 func fmtDurationShort(d time.Duration) string {

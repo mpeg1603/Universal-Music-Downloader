@@ -100,6 +100,12 @@ func Run(m core.Backend) error {
 		}
 	}()
 	ui.refresh()
+	if m.NeedsSetup() {
+		go func() {
+			time.Sleep(200 * time.Millisecond) // after the first drawing, which sizes the window
+			ui.app.QueueUpdateDraw(ui.runSetup)
+		}()
+	}
 	return ui.app.SetRoot(ui.root, true).EnableMouse(true).EnablePaste(true).Run()
 }
 

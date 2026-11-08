@@ -17,6 +17,8 @@ type Backend interface {
 	// Settings (saved and applied right away; UpdateConfig refuses invalid ones).
 	Config() Config
 	UpdateConfig(change func(*Config)) error
+	NeedsSetup() bool // the first-run setup (SetupSteps) hasn't been through yet
+	FinishSetup(change func(*Config)) error
 
 	// The queue.
 	Overview() Overview
