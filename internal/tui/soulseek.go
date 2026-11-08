@@ -17,20 +17,58 @@ import (
 // files or whole folders by hand, transfers both ways, and chat.
 
 type slskUI struct {
-	info      *tview.TextView
+	info  *tview.TextView
+	tabs  *tview.TextView // the sub-tab bar
+	pages *tview.Pages
+	page  int
+
+	// search
 	find      *tview.InputField
 	results   *tview.Table
 	res       []core.SlskResult
 	searching bool
-	transfers *tview.Table
-	xfers     []core.SlskTransferView
-	convs     *tview.Table
-	chatView  *tview.TextView
-	input     *tview.InputField
-	convKeys  []string
-	current   string // the conversation shown
-	chatSeq   int64
-	portNote  string
+
+	// transfers
+	downs, ups *tview.Table
+	xDown, xUp []core.SlskTransferView
+
+	// browse
+	browseUser  *tview.InputField
+	folders     *tview.Table
+	files       *tview.Table
+	browsed     []core.SlskResult
+	browsedUser string
+	folderList  []string
+	folderFiles []core.SlskResult
+	browsing    bool
+	selFolder   string
+
+	// users
+	people     *tview.Table
+	peopleRows []slskPerson
+	userInfo   *tview.TextView
+
+	// chat
+	convs    *tview.Table
+	chatView *tview.TextView
+	input    *tview.InputField
+	convKeys []string
+	current  string // the conversation shown
+	chatSeq  int64
+
+	// interests
+	likes, recs, similar *tview.Table
+	likeRows             []slskLike
+	recRows              []core.SlskRecommendation
+	simRows              []core.SlskUserScore
+	recsFor              string // "" yours, "*" everyone's, or an item
+	globalRecs           bool
+
+	portNote string
+}
+
+var slskPages = []struct{ name, title string }{
+	{"search", "Search"}, {"transfers", "Transfers"}, {"browse", "Browse"}, {"users", "Users"}, {"chat", "Chat"}, {"interests", "Interests"},
 }
 
 func (ui *tui) buildSoulseek() tview.Primitive {
@@ -38,93 +76,164 @@ func (ui *tui) buildSoulseek() tview.Primitive {
 	ui.sk = s
 	s.info = tview.NewTextView().SetDynamicColors(true).SetWrap(true)
 	s.info.SetBorder(true).SetTitle(" Soulseek ")
-	s.find = tview.NewInputField().SetLabel(" Search Soulseek: ").SetFieldWidth(0).SetPlaceholder("words in file and folder names, Enter searches")
-	s.results = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
-	s.results.SetBorder(true).SetTitle(" Results (Enter downloads the file · d the whole folder · m message the user) ")
-	s.transfers = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
-	s.transfers.SetBorder(true).SetTitle(" Transfers ")
-	s.convs = tview.NewTable().SetSelectable(true, false)
-	s.convs.SetBorder(true).SetTitle(" Chats ")
-	s.chatView = tview.NewTextView().SetDynamicColors(true).SetWrap(true).SetScrollable(true)
-	s.chatView.SetBorder(true)
-	s.input = tview.NewInputField().SetLabel(" Say: ").SetFieldWidth(0)
-
-	order := []tview.Primitive{s.find, s.results, s.transfers, s.convs, s.input}
-	cycle := func(from tview.Primitive, step int) {
-		for i, p := range order {
-			if p == from {
-				ui.app.SetFocus(order[(i+step+len(order))%len(order)])
-				return
+	s.tabs = tview.NewTextView().SetDynamicColors(true).SetRegions(true).SetWrap(false)
+	s.tabs.SetHighlightedFunc(func(added, removed, remaining []string) {
+		if len(added) > 0 {
+			for i, p := range slskPages {
+				if p.name == added[0] {
+					ui.slskShow(i)
+				}
 			}
 		}
+	})
+	s.pages = tview.NewPages()
+	s.pages.AddPage("search", ui.buildSlskSearch(), true, true)
+	s.pages.AddPage("transfers", ui.buildSlskTransfers(), true, false)
+	s.pages.AddPage("browse", ui.buildSlskBrowse(), true, false)
+	s.pages.AddPage("users", ui.buildSlskUsers(), true, false)
+	s.pages.AddPage("chat", ui.buildSlskChat(), true, false)
+	s.pages.AddPage("interests", ui.buildSlskInterests(), true, false)
+	ui.slskTabBar()
+	return tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(s.info, 7, 0, false).
+		AddItem(s.tabs, 1, 0, false).
+		AddItem(s.pages, 0, 1, true)
+}
+
+func (ui *tui) slskTabBar() {
+	var b strings.Builder
+	b.WriteString(" ")
+	for i, p := range slskPages {
+		title := p.title
+		if p.name == "chat" {
+			if n := ui.m.SoulseekUnread(); n > 0 {
+				title += fmt.Sprintf(" [yellow](%d)[-]", n)
+			}
+		}
+		if i == ui.sk.page {
+			fmt.Fprintf(&b, `["%s"][::r] %s [::-][""] `, p.name, title)
+		} else {
+			fmt.Fprintf(&b, `["%s"] %s [""] `, p.name, title)
+		}
 	}
+	b.WriteString("  [::d]< > switch[::-]")
+	ui.sk.tabs.SetText(b.String())
+}
+
+// slskShow shows a sub-page of the Soulseek tab.
+func (ui *tui) slskShow(i int) {
+	s := ui.sk
+	s.page = (i + len(slskPages)) % len(slskPages)
+	s.pages.SwitchToPage(slskPages[s.page].name)
+	ui.slskTabBar()
+	ui.focusSoulseek()
+	if slskPages[s.page].name == "interests" {
+		ui.fillLikes()
+		if s.recRows == nil {
+			ui.loadRecs("")
+		}
+	}
+	ui.refreshSoulseek()
+}
+
+// slskKeys are the keys every Soulseek list takes; from is the list.
+func (ui *tui) slskKeys(ev *tcell.EventKey, user string) *tcell.EventKey {
+	if ev.Key() != tcell.KeyRune {
+		return ev
+	}
+	switch ev.Rune() {
+	case '<', '>':
+		step := 1
+		if ev.Rune() == '<' {
+			step = -1
+		}
+		ui.slskShow(ui.sk.page + step)
+	case 'R':
+		ui.m.SoulseekReconnect()
+	case 'o':
+		ui.slskPortCheck()
+	case 'A':
+		away := !ui.m.SoulseekStatus().Away
+		ui.m.SoulseekSetAway(away)
+	case 'n':
+		ui.askText("Message a Soulseek user", "Their username", "", func(v string) { ui.slskMessage(v) })
+	case 'j':
+		ui.slskJoinRoom()
+	case 'u':
+		if user != "" {
+			ui.slskUserMenu(user)
+		}
+	case 'm':
+		if user != "" {
+			ui.slskMessage(user)
+		}
+	case 'b':
+		if user != "" {
+			ui.slskBrowse(user)
+		}
+	case 'i':
+		if user != "" {
+			ui.slskUserInfo(user)
+		}
+	default:
+		return ev
+	}
+	return nil
+}
+
+func (ui *tui) slskMessage(user string) {
+	if user = strings.TrimSpace(user); user == "" {
+		return
+	}
+	ui.m.SoulseekOpenChat(user)
+	ui.sk.current, ui.sk.chatSeq = core.ChatKey(user, false), -1
+	ui.slskShow(4)
+	ui.app.SetFocus(ui.sk.input)
+}
+
+// slskUserMenu offers what can be done with a user.
+func (ui *tui) slskUserMenu(user string) {
+	cfg := ui.m.Config().Soulseek
+	list := tview.NewList().ShowSecondaryText(false)
+	do := func(f func()) func() { return func() { ui.closeModal("usermenu"); f() } }
+	list.AddItem("Message", "", 'm', do(func() { ui.slskMessage(user) }))
+	list.AddItem("Browse their files", "", 'b', do(func() { ui.slskBrowse(user) }))
+	list.AddItem("User info", "", 'i', do(func() { ui.slskUserInfo(user) }))
+	list.AddItem("Their interests", "", 'n', do(func() { ui.slskTheirInterests(user) }))
+	toggle := func(listName, on, off string, have bool, key rune) {
+		label := on
+		if have {
+			label = off
+		}
+		list.AddItem(label, "", key, do(func() {
+			if err := ui.m.SoulseekSetUser(listName, user, !have); err != nil {
+				ui.message("Soulseek", err.Error())
+			}
+		}))
+	}
+	toggle("buddies", "Add to buddies", "Remove from buddies", core.ContainsFold(cfg.Buddies, user), 'f')
+	toggle("ignored", "Ignore (hide their messages)", "Stop ignoring", core.ContainsFold(cfg.Ignored, user), 'g')
+	toggle("banned", "Ban (no downloads from you, no file list)", "Unban", core.ContainsFold(cfg.Banned, user), 'B')
+	list.SetDoneFunc(func() { ui.closeModal("usermenu") })
+	list.SetBorder(true).SetTitle(" " + user + " ")
+	ui.openModal("usermenu", list, 54, list.GetItemCount()+2)
+}
+
+// --- search -------------------------------------------------------------------------------------
+
+func (ui *tui) buildSlskSearch() tview.Primitive {
+	s := ui.sk
+	s.find = tview.NewInputField().SetLabel(" Search Soulseek: ").SetFieldWidth(0).SetPlaceholder("words in file and folder names, Enter searches")
+	s.results = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
+	s.results.SetBorder(true).SetTitle(" Results (Enter downloads the file · d the whole folder · u user menu) ")
 	s.find.SetDoneFunc(func(k tcell.Key) {
 		switch k {
 		case tcell.KeyEnter:
 			ui.slskSearch(s.find.GetText())
 		case tcell.KeyTab, tcell.KeyEscape, tcell.KeyDown:
-			cycle(s.find, 1)
-		case tcell.KeyBacktab:
-			cycle(s.find, -1)
+			ui.app.SetFocus(s.results)
 		}
 	})
-	s.input.SetDoneFunc(func(key tcell.Key) {
-		switch key {
-		case tcell.KeyEnter:
-			ui.slskSend()
-		case tcell.KeyEscape:
-			ui.app.SetFocus(s.convs)
-		case tcell.KeyTab:
-			cycle(s.input, 1)
-		case tcell.KeyBacktab:
-			cycle(s.input, -1)
-		}
-	})
-	s.convs.SetSelectionChangedFunc(func(row, col int) {
-		if row >= 0 && row < len(s.convKeys) {
-			s.current = s.convKeys[row]
-			ui.refreshChat()
-		}
-	})
-	s.convs.SetSelectedFunc(func(row, col int) { ui.app.SetFocus(s.input) })
-	message := func(user string) {
-		ui.m.SoulseekOpenChat(user)
-		s.current, s.chatSeq = core.ChatKey(user, false), -1
-		ui.refreshSoulseek()
-		ui.app.SetFocus(s.input)
-	}
-	// keys common to the lists
-	keys := func(from tview.Primitive, ev *tcell.EventKey) *tcell.EventKey {
-		switch {
-		case ev.Key() == tcell.KeyTab:
-			cycle(from, 1)
-			return nil
-		case ev.Key() == tcell.KeyBacktab:
-			cycle(from, -1)
-			return nil
-		case ev.Key() != tcell.KeyRune:
-			return ev
-		}
-		switch ev.Rune() {
-		case '/':
-			ui.app.SetFocus(s.find)
-		case 'R':
-			ui.m.SoulseekReconnect()
-		case 'o':
-			ui.slskPortCheck()
-		case 'n':
-			ui.askText("Message a Soulseek user", "Their username", "", func(v string) {
-				if v != "" {
-					message(v)
-				}
-			})
-		case 'j':
-			ui.slskJoinRoom()
-		default:
-			return ev
-		}
-		return nil
-	}
 	s.results.SetSelectedFunc(func(row, col int) {
 		if row >= 1 && row-1 < len(s.res) {
 			r := s.res[row-1]
@@ -139,79 +248,132 @@ func (ui *tui) buildSoulseek() tview.Primitive {
 			r = &s.res[row-1]
 		}
 		switch {
+		case ev.Key() == tcell.KeyTab || ev.Rune() == '/':
+			ui.app.SetFocus(s.find)
+			return nil
 		case ev.Rune() == 'd' && r != nil:
-			folder, user := r.Folder(), r.User
-			ui.confirm(fmt.Sprintf("Download all of %s's folder %s?", user, baseName(folder)), "Download", func() {
-				if err := ui.m.SoulseekDownloadFolder(user, folder); err != nil {
-					ui.message("Soulseek", err.Error())
-					return
+			ui.slskDownloadFolder(r.User, r.Folder())
+			return nil
+		case ev.Key() == tcell.KeyUp && row <= 1:
+			ui.app.SetFocus(s.find)
+			return nil
+		}
+		user := ""
+		if r != nil {
+			user = r.User
+		}
+		return ui.slskKeys(ev, user)
+	})
+	return tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(s.find, 1, 0, false).
+		AddItem(s.results, 0, 1, true)
+}
+
+func (ui *tui) slskDownloadFolder(user, folder string) {
+	ui.confirm(fmt.Sprintf("Download all of %s's folder %s?", user, baseName(folder)), "Download", func() {
+		if err := ui.m.SoulseekDownloadFolder(user, folder); err != nil {
+			ui.message("Soulseek", err.Error())
+			return
+		}
+		core.Logf("Soulseek: asked %s for the folder %s", user, folder)
+	})
+}
+
+// --- transfers ----------------------------------------------------------------------------------
+
+func (ui *tui) buildSlskTransfers() tview.Primitive {
+	s := ui.sk
+	s.downs = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
+	s.downs.SetBorder(true).SetTitle(" Downloads (C clears finished) ")
+	s.ups = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
+	s.ups.SetBorder(true).SetTitle(" Uploads: what you send (x stops one · C clears finished) ")
+	keys := func(t *tview.Table, rows *[]core.SlskTransferView, up bool) {
+		t.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+			row, _ := t.GetSelection()
+			var x *core.SlskTransferView
+			if row >= 1 && row-1 < len(*rows) {
+				x = &(*rows)[row-1]
+			}
+			switch {
+			case ev.Key() == tcell.KeyTab:
+				if up {
+					ui.app.SetFocus(s.downs)
+				} else {
+					ui.app.SetFocus(s.ups)
 				}
-				s.results.SetTitle(" [green]asked " + tview.Escape(user) + " for the folder " + tview.Escape(baseName(folder)) + "[-] ")
-			})
-			return nil
-		case ev.Rune() == 'm' && r != nil:
-			message(r.User)
-			return nil
-		case ev.Key() == tcell.KeyUp:
-			if row <= 1 {
-				ui.app.SetFocus(s.find)
+				return nil
+			case ev.Rune() == 'C':
+				ui.m.SoulseekClearFinished()
+				ui.refreshSoulseek()
+				return nil
+			case ev.Rune() == 'x' && x != nil && up:
+				ui.m.SoulseekAbortUpload(x.User, x.File)
+				return nil
+			case ev.Rune() == 'x' && x != nil:
+				ui.message("Soulseek", "A download stops when its track is cancelled (Queue tab, c), or when you quit.")
 				return nil
 			}
+			user := ""
+			if x != nil {
+				user = x.User
+			}
+			return ui.slskKeys(ev, user)
+		})
+	}
+	keys(s.downs, &s.xDown, false)
+	keys(s.ups, &s.xUp, true)
+	return tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(s.downs, 0, 1, true).
+		AddItem(s.ups, 0, 1, false)
+}
+
+// --- chat ---------------------------------------------------------------------------------------
+
+func (ui *tui) buildSlskChat() tview.Primitive {
+	s := ui.sk
+	s.convs = tview.NewTable().SetSelectable(true, false)
+	s.convs.SetBorder(true).SetTitle(" Chats ")
+	s.chatView = tview.NewTextView().SetDynamicColors(true).SetWrap(true).SetScrollable(true)
+	s.chatView.SetBorder(true)
+	s.input = tview.NewInputField().SetLabel(" Say: ").SetFieldWidth(0)
+	s.input.SetDoneFunc(func(key tcell.Key) {
+		switch key {
+		case tcell.KeyEnter:
+			ui.slskSend()
+		case tcell.KeyEscape, tcell.KeyTab, tcell.KeyBacktab:
+			ui.app.SetFocus(s.convs)
 		}
-		return keys(s.results, ev)
 	})
-	s.transfers.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
-		row, _ := s.transfers.GetSelection()
-		var x *core.SlskTransferView
-		if row >= 1 && row-1 < len(s.xfers) {
-			x = &s.xfers[row-1]
+	s.convs.SetSelectionChangedFunc(func(row, col int) {
+		if row >= 0 && row < len(s.convKeys) {
+			s.current = s.convKeys[row]
+			ui.refreshChat()
 		}
-		switch {
-		case ev.Rune() == 'x' && x != nil && x.Up:
-			ui.m.SoulseekAbortUpload(x.User, x.File)
-			return nil
-		case ev.Rune() == 'x' && x != nil:
-			ui.message("Soulseek", "A download stops when its track is cancelled (Queue tab, c), or when you quit.")
-			return nil
-		case ev.Rune() == 'm' && x != nil:
-			message(x.User)
-			return nil
-		case ev.Rune() == 'B' && x != nil:
-			user := x.User
-			ui.confirm("Ban "+user+"? They can't download from you or see your files any more.", "Ban", func() {
-				if err := ui.m.SoulseekBan(user); err != nil {
-					ui.message("Can't ban", err.Error())
-				}
-			})
-			return nil
-		}
-		return keys(s.transfers, ev)
 	})
+	s.convs.SetSelectedFunc(func(row, col int) { ui.app.SetFocus(s.input) })
 	s.convs.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
-		if ev.Rune() == 'l' && s.current != "" {
+		switch {
+		case ev.Key() == tcell.KeyTab:
+			ui.app.SetFocus(s.input)
+			return nil
+		case ev.Rune() == 'l' && s.current != "":
 			ui.m.SoulseekCloseChat(s.current)
 			s.current, s.chatSeq = "", -1
 			ui.refreshSoulseek()
 			return nil
 		}
-		return keys(s.convs, ev)
+		user := ""
+		if strings.HasPrefix(s.current, "@") {
+			user = s.current[1:]
+		}
+		return ui.slskKeys(ev, user)
 	})
-	search := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(s.find, 1, 0, false).
-		AddItem(s.results, 0, 1, true)
-	middle := tview.NewFlex().
-		AddItem(search, 0, 3, true).
-		AddItem(s.transfers, 0, 2, false)
 	chat := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(s.chatView, 0, 1, false).
 		AddItem(s.input, 1, 0, false)
-	bottom := tview.NewFlex().
-		AddItem(s.convs, 26, 0, false).
+	return tview.NewFlex().
+		AddItem(s.convs, 28, 0, true).
 		AddItem(chat, 0, 1, false)
-	return tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(s.info, 7, 0, false).
-		AddItem(middle, 0, 3, true).
-		AddItem(bottom, 0, 2, false)
 }
 
 func baseName(p string) string { return path.Base(strings.ReplaceAll(p, `\`, "/")) }
@@ -303,8 +465,8 @@ func (ui *tui) refreshSoulseek() {
 			b.WriteString("[yellow]Soulseek is off.[-] Turn the Soulseek source on in the Sources tab (space) to log in as " + tview.Escape(v.Username) + ".")
 		}
 		s.info.SetText(b.String())
-		s.transfers.Clear()
-		s.xfers = nil
+		ui.slskTabBar()
+		ui.fillTransfers()
 		ui.refreshChats()
 		return
 	}
@@ -314,6 +476,9 @@ func (ui *tui) refreshSoulseek() {
 			v.Since.Format("15:04"), v.PublicIP)
 		if v.Privileges > 0 {
 			fmt.Fprintf(&b, " · [yellow]privileged[-] for %s", core.FmtWait(v.Privileges.Round(time.Hour)))
+		}
+		if v.Away {
+			b.WriteString(" · [yellow]away[-] (A)")
 		}
 	case v.Connecting:
 		b.WriteString("[yellow]◌ connecting to " + tview.Escape(v.Server) + "…[-]")
@@ -383,61 +548,72 @@ func (ui *tui) refreshSoulseek() {
 		b.WriteString("\n[::d]" + tview.Escape(core.FitWidth(strings.ReplaceAll(v.MOTD, "\n", " "), 300)) + "[::-]")
 	}
 	s.info.SetText(b.String())
-	ui.fillTransfers()
+	ui.slskTabBar()
+	switch slskPages[s.page].name {
+	case "transfers":
+		ui.fillTransfers()
+	case "users":
+		ui.fillPeople()
+	}
 	ui.refreshChats()
 }
 
 func (ui *tui) fillTransfers() {
 	s := ui.sk
-	s.xfers = ui.m.SoulseekTransfers()
-	t := s.transfers
-	t.Clear()
-	headerRow(t, "", "User", "File", "State", "Progress", "Speed")
-	for i, x := range s.xfers {
-		dir, color := "↓", tcell.ColorAqua
+	s.xDown, s.xUp = s.xDown[:0], s.xUp[:0]
+	for _, x := range ui.m.SoulseekTransfers() {
 		if x.Up {
-			dir, color = "↑", tcell.ColorGreen
-		}
-		user := x.User
-		if x.Privileged {
-			user = "★ " + user
-		}
-		file := baseName(path.Dir(strings.ReplaceAll(x.File, `\`, "/"))) + "/" + baseName(x.File)
-		prog := ""
-		if x.Total > 0 && x.Done > 0 {
-			frac := float64(x.Done) / float64(x.Total)
-			prog = fmt.Sprintf("%s %3.0f%%", tviewBar(frac, 8), frac*100)
-		} else if x.Total > 0 {
-			prog = core.FmtBytes(x.Total)
-		}
-		spd := ""
-		if x.Speed > 0 && (x.State == "sending" || x.State == "downloading") {
-			spd = core.FmtRate(x.Speed)
-		}
-		scolor := tcell.ColorDefault
-		switch {
-		case x.State == "done", strings.HasPrefix(x.State, "done:"):
-			scolor = tcell.ColorGreen
-		case strings.HasPrefix(x.State, "failed"), x.State == "cancelled", x.State == "stopped":
-			scolor = tcell.ColorGray
-		case x.State == "sending", x.State == "downloading":
-			scolor = tcell.ColorYellow
-		}
-		cells := []*tview.TableCell{
-			tview.NewTableCell(dir).SetTextColor(color),
-			tview.NewTableCell(tview.Escape(user)).SetMaxWidth(18),
-			tview.NewTableCell(tview.Escape(file)).SetExpansion(1).SetMaxWidth(60),
-			tview.NewTableCell(tview.Escape(x.State)).SetTextColor(scolor).SetMaxWidth(30),
-			tview.NewTableCell(prog),
-			tview.NewTableCell(spd).SetAlign(tview.AlignRight),
-		}
-		for c, cell := range cells {
-			t.SetCell(i+1, c, cell)
+			s.xUp = append(s.xUp, x)
+		} else {
+			s.xDown = append(s.xDown, x)
 		}
 	}
-	if len(s.xfers) == 0 {
-		t.SetCell(1, 2, tview.NewTableCell("[::d]nothing yet[::-]").SetSelectable(false))
+	fill := func(t *tview.Table, rows []core.SlskTransferView, empty string) {
+		t.Clear()
+		headerRow(t, "User", "File", "State", "Progress", "Speed")
+		for i, x := range rows {
+			user := x.User
+			if x.Privileged {
+				user = "★ " + user
+			}
+			file := baseName(path.Dir(strings.ReplaceAll(x.File, `\`, "/"))) + "/" + baseName(x.File)
+			prog := ""
+			if x.Total > 0 && x.Done > 0 {
+				frac := float64(x.Done) / float64(x.Total)
+				prog = fmt.Sprintf("%s %3.0f%%", tviewBar(frac, 10), frac*100)
+			} else if x.Total > 0 {
+				prog = core.FmtBytes(x.Total)
+			}
+			spd := ""
+			if x.Speed > 0 && (x.State == "sending" || x.State == "downloading") {
+				spd = core.FmtRate(x.Speed)
+			}
+			scolor := tcell.ColorDefault
+			switch {
+			case x.State == "done", strings.HasPrefix(x.State, "done:"):
+				scolor = tcell.ColorGreen
+			case strings.HasPrefix(x.State, "failed"), x.State == "cancelled", x.State == "stopped":
+				scolor = tcell.ColorGray
+			case x.State == "sending", x.State == "downloading":
+				scolor = tcell.ColorYellow
+			}
+			cells := []*tview.TableCell{
+				tview.NewTableCell(tview.Escape(user)).SetMaxWidth(22),
+				tview.NewTableCell(tview.Escape(file)).SetExpansion(1).SetMaxWidth(90),
+				tview.NewTableCell(tview.Escape(x.State)).SetTextColor(scolor).SetMaxWidth(50),
+				tview.NewTableCell(prog),
+				tview.NewTableCell(spd).SetAlign(tview.AlignRight),
+			}
+			for c, cell := range cells {
+				t.SetCell(i+1, c, cell)
+			}
+		}
+		if len(rows) == 0 {
+			t.SetCell(1, 1, tview.NewTableCell("[::d]"+empty+"[::-]").SetSelectable(false))
+		}
 	}
+	fill(s.downs, s.xDown, "nothing yet: tracks coming from Soulseek, and what you download in Search or Browse")
+	fill(s.ups, s.xUp, "nothing yet: what people download from your shared folders shows here")
 }
 
 func (ui *tui) refreshChats() {
@@ -596,7 +772,21 @@ func (ui *tui) slskPortCheck() {
 	}()
 }
 
-// focusSoulseek starts on the results, so number keys still switch tabs (/ goes to the search).
+// focusSoulseek focuses the sub-page's list, so number keys still switch tabs.
 func (ui *tui) focusSoulseek() {
-	ui.app.SetFocus(ui.sk.results)
+	s := ui.sk
+	switch slskPages[s.page].name {
+	case "search":
+		ui.app.SetFocus(s.results)
+	case "transfers":
+		ui.app.SetFocus(s.downs)
+	case "browse":
+		ui.app.SetFocus(s.folders)
+	case "users":
+		ui.app.SetFocus(s.people)
+	case "chat":
+		ui.app.SetFocus(s.convs)
+	case "interests":
+		ui.app.SetFocus(s.recs)
+	}
 }

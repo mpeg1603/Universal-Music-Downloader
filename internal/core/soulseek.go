@@ -37,6 +37,10 @@ type SoulseekConfig struct {
 	QueueMB     int      `json:"queue_mb_per_user,omitempty"`    // 0: 10000
 
 	Banned      []string `json:"banned_users,omitempty"`
+	Ignored     []string `json:"ignored_users,omitempty"` // their messages aren't shown
+	Buddies     []string `json:"buddies,omitempty"`       // users you follow (online status)
+	Likes       []string `json:"likes,omitempty"`         // interests, for recommendations
+	Hates       []string `json:"hates,omitempty"`
 	Rooms       []string `json:"rooms,omitempty"` // chat rooms to join when logged in
 	Description string   `json:"description,omitempty"`
 }

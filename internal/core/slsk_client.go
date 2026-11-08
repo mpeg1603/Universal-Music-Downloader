@@ -187,6 +187,7 @@ type SlskState struct {
 	Privileges time.Duration
 	Supporter  bool
 	MOTD       string
+	Away       bool
 }
 
 type slskClient struct {
@@ -218,7 +219,10 @@ type slskClient struct {
 	searches   map[uint32]*slskSearch
 	folderWait map[uint32]chan []slskFile // FolderContents waiting for answers
 	browseWait map[string]chan []slskFile // Browse waiting for users' file lists
-	speeds     map[string]float64         // the last download speed from each user (bytes/s)
+	infoWait   map[string]chan *slskRead  // UserInfo waiting for users' answers
+	serverWait map[string][]chan *slskRead
+	users      map[string]*SlskUser
+	speeds     map[string]float64 // the last download speed from each user (bytes/s)
 	downloads  map[string]*slskDownload
 	userLocks  map[string]chan struct{}
 	ups        *slskUploads
@@ -317,6 +321,30 @@ func (c *slskClient) apply(cfg SoulseekConfig) {
 	if old.NoShare != cfg.NoShare {
 		c.sendShareCounts()
 	}
+	diff := func(a, b []string) []string { // in b, not in a
+		var out []string
+		for _, x := range b {
+			if !ContainsString(a, x) {
+				out = append(out, x)
+			}
+		}
+		return out
+	}
+	for _, x := range diff(old.Likes, cfg.Likes) {
+		c.Interest(x, false, false)
+	}
+	for _, x := range diff(cfg.Likes, old.Likes) {
+		c.Interest(x, false, true)
+	}
+	for _, x := range diff(old.Hates, cfg.Hates) {
+		c.Interest(x, true, false)
+	}
+	for _, x := range diff(cfg.Hates, old.Hates) {
+		c.Interest(x, true, true)
+	}
+	for _, b := range diff(old.Buddies, cfg.Buddies) {
+		c.Watch(b)
+	}
 	c.ups.wake()
 }
 
@@ -353,6 +381,11 @@ func (c *slskClient) isPrivileged(user string) bool {
 
 func (c *slskClient) isBanned(user string) bool {
 	return ContainsFold(c.config().Banned, user)
+}
+
+// isIgnored: their private and room messages aren't shown (they may still download from you).
+func (c *slskClient) isIgnored(user string) bool {
+	return ContainsFold(c.config().Ignored, user)
 }
 
 func ContainsFold(list []string, s string) bool {
@@ -645,6 +678,10 @@ func (c *slskClient) session() (err error, permanent bool) {
 	for _, room := range cfg.Rooms {
 		c.JoinRoom(room)
 	}
+	c.sendInterests()
+	for _, b := range cfg.Buddies {
+		c.Watch(b)
+	}
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -738,7 +775,7 @@ func (c *slskClient) onServer(code uint32, r *slskRead) bool {
 		}
 		c.mu.Unlock()
 	case ssGetUserStatus:
-		user, _, privileged := r.str(), r.u32(), r.boolean()
+		user, status, privileged := r.str(), r.u32(), r.boolean()
 		if r.err == nil {
 			c.mu.Lock()
 			if privileged {
@@ -747,7 +784,17 @@ func (c *slskClient) onServer(code uint32, r *slskRead) bool {
 				delete(c.privileged, user)
 			}
 			c.mu.Unlock()
+			c.userStatus(user, int(status), privileged)
 		}
+	case ssWatchUser:
+		c.onWatchUser(r)
+	case ssGetUserStats:
+		c.onUserStats(r)
+	case ssRecommendations, ssGlobalRecommends, ssSimilarUsers:
+		c.deliver(code, "", r.b)
+	case ssItemRecommends, ssItemSimilarUsers, ssUserInterests:
+		key := (&slskRead{b: r.b}).str()
+		c.deliver(code, key, r.b)
 	case ssPrivilegedUsers:
 		n := int(r.u32())
 		list := map[string]bool{}
@@ -811,14 +858,14 @@ func (c *slskClient) onServer(code uint32, r *slskRead) bool {
 		id, ts, user, text := r.u32(), r.u32(), r.str(), r.str()
 		if r.err == nil {
 			c.sendServer(ssMessageAcked, (&slskMsg{}).u32(id))
-			if !c.isBanned(user) {
+			if !c.isBanned(user) && !c.isIgnored(user) {
 				c.chat.private(user, text, time.Unix(int64(ts), 0), false)
 				c.logf("message from %s: %s", user, FitWidth(text, 120))
 			}
 		}
 	case ssSayChatroom:
 		room, user, text := r.str(), r.str(), r.str()
-		if r.err == nil && !c.isBanned(user) {
+		if r.err == nil && !c.isBanned(user) && !c.isIgnored(user) {
 			c.mu.Lock()
 			own := user == c.user
 			c.mu.Unlock()

@@ -102,7 +102,7 @@ func TestTUIPages(t *testing.T) {
 		'2': {"Find:", "Playlist files", "/tmp/playlists.csv", "Liked Songs"},
 		'3': {"Good enough quality", "No library folders yet"},
 		'4': {"Sources, tried top to bottom", "Bandcamp", "Yandex Music", "direct"},
-		'5': {"Soulseek is off", "Sources tab → Soulseek", "Search Soulseek", "Transfers", "Chats"},
+		'5': {"Soulseek is off", "Sources tab → Soulseek", "Search Soulseek", "Transfers", "Browse", "Interests"},
 		'6': {"Downloads folder", "Bandwidth target", "Save"},
 		'7': {"Log"},
 	}

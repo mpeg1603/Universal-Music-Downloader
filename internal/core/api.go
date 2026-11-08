@@ -60,7 +60,6 @@ type Backend interface {
 	SoulseekDownload(user, file string, size int64)
 	SoulseekDownloadFolder(user, folder string) error
 	SoulseekAbortUpload(user, path string)
-	SoulseekBan(user string) error
 	SoulseekReconnect()
 	CheckSoulseekPort(ctx context.Context) (open bool, port int, err error)
 	SoulseekChats() ([]SlskConversation, int64)
@@ -72,6 +71,17 @@ type Backend interface {
 	SoulseekJoinRoom(room string) error
 	SoulseekCloseChat(key string)
 	SoulseekRefreshRooms()
+	SoulseekBrowse(ctx context.Context, user string) ([]SlskResult, error)
+	SoulseekUserInfo(ctx context.Context, user string) (SlskUser, error)
+	SoulseekBuddies() []SlskUser
+	SoulseekSetUser(list, user string, on bool) error // list: buddies, banned, ignored
+	SoulseekSetAway(away bool)
+	SoulseekSetInterest(item string, hate, remove bool) error
+	SoulseekRecommendations(ctx context.Context, global bool) ([]SlskRecommendation, error)
+	SoulseekItemRecommendations(ctx context.Context, item string) ([]SlskRecommendation, error)
+	SoulseekSimilarUsers(ctx context.Context, item string) ([]SlskUserScore, error)
+	SoulseekUserInterests(ctx context.Context, user string) (likes, hates []string, err error)
+	SoulseekClearFinished()
 
 	// The log; OnLog and OnFinish are for frontends that print as things happen (set them
 	// before Start).

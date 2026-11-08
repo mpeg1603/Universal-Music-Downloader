@@ -31,6 +31,14 @@ func (c *slskClient) onPeer(sc *slskConn, code uint32, r *slskRead) {
 		if s != nil && !c.isBanned(user) {
 			s.add(resp)
 		}
+	case pmUserInfoResponse:
+		c.mu.Lock()
+		ch := c.infoWait[user]
+		delete(c.infoWait, user)
+		c.mu.Unlock()
+		if ch != nil {
+			ch <- r
+		}
 	case pmFolderContentsResponse:
 		data, err := slskDecompress(r.b, 32<<20)
 		if err != nil {

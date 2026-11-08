@@ -212,19 +212,6 @@ func (m *Manager) SoulseekAbortUpload(user, path string) {
 	}
 }
 
-// SoulseekBan keeps a user from downloading from you or seeing your files.
-func (m *Manager) SoulseekBan(user string) error {
-	err := m.UpdateConfig(func(cfg *Config) {
-		if !ContainsFold(cfg.Soulseek.Banned, user) {
-			cfg.Soulseek.Banned = append(cfg.Soulseek.Banned, user)
-		}
-	})
-	if c := m.slskClient(); c != nil && err == nil {
-		c.ups.dropUser(user)
-	}
-	return err
-}
-
 func (m *Manager) SoulseekReconnect() {
 	if c := m.slskClient(); c != nil {
 		c.Reconnect()
@@ -389,4 +376,165 @@ func fileExists(p string) bool {
 type manualDownloads struct {
 	manualMu sync.Mutex
 	manual   []*SlskTransferView
+}
+
+// --- users, buddies, interests ------------------------------------------------------------
+
+// SoulseekBrowse lists every file a user shares.
+func (m *Manager) SoulseekBrowse(ctx context.Context, user string) ([]SlskResult, error) {
+	c, err := m.soulseekOn()
+	if err != nil {
+		return nil, err
+	}
+	files, err := c.Browse(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SlskResult, 0, len(files))
+	for _, f := range files {
+		out = append(out, SlskResult{User: user, Path: f.Name, Size: f.Size, Bitrate: f.attr(slskAttrBitrate),
+			Duration: f.attr(slskAttrDuration), SampleRate: f.attr(slskAttrSampleRate), BitDepth: f.attr(slskAttrBitDepth)})
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Path) < strings.ToLower(out[j].Path) })
+	return out, nil
+}
+
+// SoulseekUserInfo asks a user for their details, and the server for their status and stats.
+func (m *Manager) SoulseekUserInfo(ctx context.Context, user string) (SlskUser, error) {
+	c, err := m.soulseekOn()
+	if err != nil {
+		return SlskUser{Name: user, Status: -1}, err
+	}
+	return c.UserInfo(ctx, user)
+}
+
+// SoulseekBuddies are the users you follow, with what's known about them.
+func (m *Manager) SoulseekBuddies() []SlskUser {
+	names := m.Config().Soulseek.Buddies
+	if c := m.slskClient(); c != nil {
+		return c.Users(names)
+	}
+	out := make([]SlskUser, 0, len(names))
+	for _, n := range names {
+		out = append(out, SlskUser{Name: n, Status: -1})
+	}
+	return out
+}
+
+// SoulseekSetUser adds a user to (on) or takes them off (off) a list: "buddies", "banned" or
+// "ignored".
+func (m *Manager) SoulseekSetUser(list, user string, on bool) error {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return nil
+	}
+	err := m.UpdateConfig(func(cfg *Config) {
+		var l *[]string
+		switch list {
+		case "buddies":
+			l = &cfg.Soulseek.Buddies
+		case "banned":
+			l = &cfg.Soulseek.Banned
+		case "ignored":
+			l = &cfg.Soulseek.Ignored
+		default:
+			return
+		}
+		var keep []string
+		for _, x := range *l {
+			if !strings.EqualFold(x, user) {
+				keep = append(keep, x)
+			}
+		}
+		if on {
+			keep = append(keep, user)
+		}
+		*l = keep
+	})
+	if c := m.slskClient(); c != nil && err == nil && list == "banned" && on {
+		c.ups.dropUser(user)
+	}
+	return err
+}
+
+func (m *Manager) SoulseekSetAway(away bool) {
+	if c := m.slskClient(); c != nil {
+		c.SetAway(away)
+	}
+}
+
+// SoulseekSetInterest adds (or with remove, takes away) something you like (or with hate,
+// dislike); the server works out recommendations and similar users from these.
+func (m *Manager) SoulseekSetInterest(item string, hate, remove bool) error {
+	item = strings.TrimSpace(item)
+	if item == "" {
+		return nil
+	}
+	return m.UpdateConfig(func(cfg *Config) {
+		l := &cfg.Soulseek.Likes
+		if hate {
+			l = &cfg.Soulseek.Hates
+		}
+		var keep []string
+		for _, x := range *l {
+			if !strings.EqualFold(x, item) {
+				keep = append(keep, x)
+			}
+		}
+		if !remove {
+			keep = append(keep, item)
+		}
+		*l = keep
+	})
+}
+
+func (m *Manager) SoulseekRecommendations(ctx context.Context, global bool) ([]SlskRecommendation, error) {
+	c, err := m.soulseekOn()
+	if err != nil {
+		return nil, err
+	}
+	return c.Recommendations(ctx, global)
+}
+
+func (m *Manager) SoulseekItemRecommendations(ctx context.Context, item string) ([]SlskRecommendation, error) {
+	c, err := m.soulseekOn()
+	if err != nil {
+		return nil, err
+	}
+	return c.ItemRecommendations(ctx, item)
+}
+
+// SoulseekSimilarUsers lists users with interests like yours (or who like item).
+func (m *Manager) SoulseekSimilarUsers(ctx context.Context, item string) ([]SlskUserScore, error) {
+	c, err := m.soulseekOn()
+	if err != nil {
+		return nil, err
+	}
+	return c.SimilarUsers(ctx, item)
+}
+
+func (m *Manager) SoulseekUserInterests(ctx context.Context, user string) ([]string, []string, error) {
+	c, err := m.soulseekOn()
+	if err != nil {
+		return nil, nil, err
+	}
+	return c.UserInterests(ctx, user)
+}
+
+// SoulseekClearFinished takes finished, failed and cancelled transfers off the lists.
+func (m *Manager) SoulseekClearFinished() {
+	m.manualMu.Lock()
+	var keep []*SlskTransferView
+	for _, x := range m.manual {
+		if x.State == "waiting" {
+			keep = append(keep, x)
+		}
+	}
+	m.manual = keep
+	m.manualMu.Unlock()
+	if c := m.slskClient(); c != nil {
+		c.ups.mu.Lock()
+		c.ups.recent = nil
+		c.ups.mu.Unlock()
+	}
 }

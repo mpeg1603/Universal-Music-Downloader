@@ -95,6 +95,16 @@ func (s *fakeSlskServer) serve(sc *slskConn) {
 			m := (&slskMsg{}).str(who)
 			putIP(m, firstIP(a.ip))
 			sc.send(ssGetPeerAddress, m.u32(uint32(a.port)).u32(0).u32(0))
+		case ssRecommendations:
+			sc.send(ssRecommendations, (&slskMsg{}).u32(2).str("post-rock").i32(12).str("shoegaze").i32(30).u32(1).str("pop").i32(-3))
+		case ssSimilarUsers:
+			sc.send(ssSimilarUsers, (&slskMsg{}).u32(1).str("remote").u32(7))
+		case ssUserInterests:
+			who := r.str()
+			sc.send(ssUserInterests, (&slskMsg{}).str(who).u32(1).str("deftones").u32(0))
+		case ssWatchUser:
+			who := r.str()
+			sc.send(ssWatchUser, (&slskMsg{}).str(who).boolean(true).u32(2).u32(123456).u32(0).u32(0).u32(42).u32(3).str("NL"))
 		case ssFileSearch:
 			token, text := r.u32(), r.str()
 			if s.onSearch != nil {
@@ -300,6 +310,8 @@ func (p *fakeSlskPeer) readP(sc *slskConn) {
 				writeSlskFile(m, slskFile{Name: path[len(folder)+1:], Size: int64(len(p.files[path]))})
 			}
 			sc.write(slskFrame(pmFolderContentsResponse, 4, slskCompress(m.b)))
+		case pmUserInfoRequest:
+			sc.send(pmUserInfoResponse, (&slskMsg{}).str("hello from remote").boolean(false).u32(4).u32(1).boolean(true).u32(0))
 		case pmPlaceInQueueRequest:
 			sc.send(pmPlaceInQueueResponse, (&slskMsg{}).str(r.str()).u32(1))
 		}
@@ -866,4 +878,45 @@ func TestSoulseekSeederAffinity(t *testing.T) {
 		t.Errorf("b came from %s", v.Rec.SourceURL)
 	}
 	peer.waitFor(pmSharedFileListRequest, 1)
+}
+
+func TestSoulseekSocial(t *testing.T) {
+	srv := newFakeSlskServer(t)
+	peer := newFakeSlskPeer(t, "remote")
+	peer.files[`Music\Deftones\White Pony\01 - Feiticeira.flac`] = []byte("x")
+	c := testSlskClient(t, srv, nil, func(c *SoulseekConfig) { c.Likes, c.Hates, c.Ignored = []string{"shoegaze"}, []string{"pop"}, []string{"pest"} })
+	srv.mu.Lock()
+	srv.addrs["remote"] = slskAddr{ip: net.IPv4(127, 0, 0, 1), port: peer.port()}
+	srv.mu.Unlock()
+	if r := (&slskRead{b: srv.waitFor(ssAddThingILike, 1)}); r.str() != "shoegaze" {
+		t.Error("likes aren't sent at login")
+	}
+	srv.waitFor(ssAddThingIHate, 1)
+	ctx := context.Background()
+	recs, err := c.Recommendations(ctx, false)
+	if err != nil || len(recs) != 3 || recs[0].Item != "shoegaze" || recs[2].Score != -3 {
+		t.Errorf("%+v %v", recs, err)
+	}
+	users, err := c.SimilarUsers(ctx, "")
+	if err != nil || len(users) != 1 || users[0].Name != "remote" || users[0].Score != 7 {
+		t.Errorf("%+v %v", users, err)
+	}
+	likes, _, err := c.UserInterests(ctx, "remote")
+	if err != nil || len(likes) != 1 || likes[0] != "deftones" {
+		t.Errorf("%v %v", likes, err)
+	}
+	u, err := c.UserInfo(ctx, "remote")
+	if err != nil || u.Description != "hello from remote" || u.Slots != 4 || !u.FreeSlot || u.Status != 2 || u.Files != 42 || u.Country != "NL" {
+		t.Errorf("%+v %v", u, err)
+	}
+	files, err := c.Browse(ctx, "remote")
+	if err != nil || len(files) != 1 || files[0].Name != `Music\Deftones\White Pony\01 - Feiticeira.flac` {
+		t.Errorf("%+v %v", files, err)
+	}
+	// Messages from ignored users aren't shown (but acknowledged).
+	srv.send("me", ssMessageUser, (&slskMsg{}).u32(9).u32(0).str("pest").str("buy my stuff").boolean(true))
+	srv.waitFor(ssMessageAcked, 1)
+	if c.chat.Unread() != 0 {
+		t.Error("an ignored user's message shows")
+	}
 }
