@@ -105,6 +105,12 @@ next sources and come back later if those don't have the song.
 The header shows the speeds: the app's own downloads, torrents, and Soulseek (down and up,
 with the number of transfers each way).
 
+## Install
+
+Downloads for Windows, Linux and macOS are on the [releases page](../../releases).
+**[docs/INSTALL.md](docs/INSTALL.md)** says which one to get, and how to install, update and
+remove it on each system.
+
 ## Requirements
 
 - **ffmpeg**: the installed one is used; without one, the app downloads ffmpeg and ffprobe once
@@ -129,8 +135,8 @@ Light, dark, or following your desktop (Settings → Appearance). [docs/gui-guid
 walks through it.
 
 The downloads on the [releases page](../../releases)
-include everything it needs, Qt included: an AppImage or tar.gz on Linux, an installer or a
-portable zip on Windows. The window and the terminal app share settings and state, but can't
+include everything it needs, Qt included: an AppImage, tar.gz or Arch package on Linux, an
+installer or a portable zip on Windows, an app on macOS. The window and the terminal app share settings and state, but can't
 run at the same time.
 
 ## Getting started
@@ -538,7 +544,7 @@ setup or scripts). `--config FILE` and `--data DIR` use another settings file an
 
 ## Building and tests
 
-You need Go 1.24 or newer.
+You need Go 1.25 or newer. [docs/INSTALL.md](docs/INSTALL.md#from-source) has the short version.
 
 ```sh
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o universal-music-downloader ./cmd/universal-music-downloader
@@ -555,7 +561,10 @@ go build -o universal-music-downloader-gui ./cmd/universal-music-downloader-gui
 ```
 
 `packaging/` has what releases are built from (`.github/workflows/release.yml`): the AppImage
-and tar.gz script and the Windows installer.
+and tar.gz script, the Windows installer, the macOS app script and the Arch `PKGBUILD`.
+
+**Making a release:** set `pkgver` in `packaging/arch/PKGBUILD` to the new version, commit, and
+push a tag like `v1.2.3`. That builds everything and makes a draft release, to check and publish.
 
 To see the window without a screen, build with `-tags guishots` and run it with
 `QT_QPA_PLATFORM=offscreen UMD_SHOTS=<folder>`: it walks through every page and dialog in both

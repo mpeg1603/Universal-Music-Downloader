@@ -1,0 +1,52 @@
+# Builds and installs a release as a normal pacman package, without the AUR:
+#   cd packaging/arch && makepkg -si --nocheck
+# It adds both apps to /usr/bin and the window app to your app launcher.
+# See docs/INSTALL.md for updating and removing it.
+
+pkgname=universal-music-downloader
+pkgver=1.1.0
+pkgrel=1
+pkgdesc='Finds and downloads your music from many sources: a desktop app and a terminal app'
+arch=('x86_64')
+url='https://github.com/mpeg1603/Universal-Music-Downloader'
+license=('GPL-3.0-only')
+depends=('ffmpeg' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'qt6-base')
+makedepends=('git' 'go' 'pkgconf')
+optdepends=('yt-dlp: use the system copy instead of the one the app fetches'
+            'nodejs: solving YouTube challenges with yt-dlp')
+options=('!lto' '!debug')
+source=("$pkgname::git+$url.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname"
+  export GOPATH="$srcdir/gopath"
+  go mod download -modcacherw
+}
+
+_goenv() {
+  export GOPATH="$srcdir/gopath"
+  export CGO_CPPFLAGS="$CPPFLAGS" CGO_CFLAGS="$CFLAGS" CGO_CXXFLAGS="$CXXFLAGS" CGO_LDFLAGS="$LDFLAGS"
+  export GOFLAGS='-buildmode=pie -trimpath -mod=readonly -modcacherw'
+}
+
+build() {
+  cd "$pkgname"
+  _goenv
+  go build -ldflags "-linkmode=external -X main.version=v$pkgver" -o build/ \
+    ./cmd/universal-music-downloader ./cmd/universal-music-downloader-gui
+}
+
+check() {
+  cd "$pkgname"
+  _goenv
+  go test ./internal/core ./internal/tui
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 -t "$pkgdir/usr/bin" build/universal-music-downloader build/universal-music-downloader-gui
+  install -Dm644 packaging/universal-music-downloader.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 packaging/icon.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/universal-music-downloader.png"
+  install -Dm644 README.md TORRENTS.md -t "$pkgdir/usr/share/doc/$pkgname"
+}

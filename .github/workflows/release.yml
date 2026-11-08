@@ -1,8 +1,9 @@
 name: Release
 
-# A tag like v1.2.3 builds the terminal app for Linux and Windows and the window app for Linux
-# (AppImage, tar.gz) and Windows (installer, portable zip), and publishes them with SHA-256
-# checksums as a GitHub release (a draft, to be checked and published by hand).
+# A tag like v1.2.3 builds the terminal app for Linux, Windows and macOS, the window app for
+# Linux (AppImage, tar.gz, Arch package), Windows (installer, portable zip) and macOS, and
+# publishes them with SHA-256 checksums as a GitHub release (a draft, to be checked and published
+# by hand).
 
 on:
   push:
@@ -26,7 +27,7 @@ jobs:
           set -e
           version=${GITHUB_REF_NAME}
           mkdir -p dist
-          for target in linux/amd64 linux/arm64 windows/amd64; do
+          for target in linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/}
             ext=""; [ "$GOOS" = windows ] && ext=.exe
             name=universal-music-downloader-$version-$GOOS-$GOARCH
@@ -62,6 +63,49 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: window-linux
+          path: dist/*
+
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Tools
+        run: pacman -Syu --noconfirm git go pkgconf qt6-base ffmpeg hicolor-icon-theme
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build the package from this tag
+        run: |
+          set -e
+          useradd -m builder
+          chown -R builder .
+          git config --system --add safe.directory '*'
+          sed -i "s/^pkgver=.*/pkgver=${GITHUB_REF_NAME#v}/; s|^source=.*|source=(\"universal-music-downloader::git+file://$GITHUB_WORKSPACE#tag=$GITHUB_REF_NAME\")|" packaging/arch/PKGBUILD
+          su builder -c "cd packaging/arch && makepkg --nocheck --noconfirm"
+          mkdir -p dist
+          cp packaging/arch/*.pkg.tar.zst dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: dist/*
+
+  window-macos:
+    runs-on: macos-latest
+    continue-on-error: true # the other platforms' releases don't wait on this one
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Qt
+        run: brew install qt pkgconf
+      - name: Build
+        run: go build -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o build/universal-music-downloader-gui ./cmd/universal-music-downloader-gui
+      - name: Package
+        run: packaging/build-macos.sh build/universal-music-downloader-gui "$GITHUB_REF_NAME" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: window-macos
           path: dist/*
 
   window-windows:
@@ -113,7 +157,7 @@ jobs:
           path: dist/*
 
   release:
-    needs: [terminal, window-linux, window-windows]
+    needs: [terminal, window-linux, window-windows, window-macos, arch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
