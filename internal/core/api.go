@@ -57,6 +57,8 @@ type Backend interface {
 	// Sources.
 	SourceStatus() []SourceStatus
 	PauseSource(name string, paused bool)
+	SetSourceEnabled(name string, on bool) error
+	MoveSource(name string, delta int) error // -1 up, +1 down
 	TorrentFeeds() []FeedStatus
 	Indexers() []IndexerStatus // the built-in torrent indexers
 	SetIndexer(id string, on bool) error

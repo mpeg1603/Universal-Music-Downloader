@@ -102,20 +102,6 @@ func (ui *tui) refreshSources() {
 	ui.refreshSourceDetail()
 }
 
-var sourceHelp = map[string]string{
-	"bandcamp": "Free and name-your-price downloads (lossless when offered). For name-your-price releases whose artist asks for an email address, enter your email in the settings: you paste the link Bandcamp sends (b), or it's read from Gmail or an IMAP mailbox.",
-	"archive":  "Internet Archive items published under a license (Creative Commons, public domain); live concert tapes are left out.",
-	"yandex": "Yandex Music with your account (Plus needed for full tracks; FLAC where available). Get a token: open " + core.YandexTokenURL +
-		" in a browser, log in, and copy the access_token=… part of the address you end up on. Route \"direct\" keeps it off your VPN.",
-	"vk":            "VK music with your account's token (MP3 up to 320 kbps). Log in from its settings (Enter) to get a token, or paste one. Route \"direct\" keeps it off your VPN.",
-	"youtube_music": "Official \"song\" uploads, found by ISRC and by artist + title (Opus ~130 kbps). If YouTube asks to sign in (bot check), set \"Cookies from browser\" in its settings.",
-	"soundcloud":    "Public SoundCloud tracks; 30-second previews are detected and rejected.",
-	"youtube":       "Regular YouTube uploads (Opus ~130 kbps). Shares the bot-check pause and cookies with YouTube Music.",
-	"torrent":       "Torrents, searched on built-in indexers (Jackett's public site definitions; Enter chooses which) and, if you like, your own Jackett or Prowlarr, and downloaded by the built-in client (only the file needed; no seeding afterwards). Indexers that keep failing are left out for a while instead of slowing every search. Sites behind Cloudflare's browser check need FlareSolverr.",
-	"audius":        "Audius, an open platform where artists upload their own music (much independent electronic music). Full tracks as MP3 320; no account needed. Tracks for paying fans only are left out.",
-	"soulseek":      "Soulseek, a file-sharing network where people share their music folders, often in FLAC. The client is built in: Enter sets your account (a new name and password make a new account; or import it from Nicotine+), sharing and limits. Searches are paced and only a few files are requested at once, as the network asks. The Soulseek tab searches the network by hand, shows transfers and chat; tracks no source had go on its wishlist.",
-}
-
 func (ui *tui) refreshSourceDetail() {
 	row, _ := ui.srcTable.GetSelection()
 	if row < 1 || row-1 >= len(ui.srcs) {
@@ -123,7 +109,7 @@ func (ui *tui) refreshSourceDetail() {
 	}
 	s := ui.srcs[row-1]
 	var b strings.Builder
-	fmt.Fprintf(&b, "[::b]%s[::-] · route: %s\n%s\n", s.Label, tview.Escape(core.DescribeRoute(s.Route)), tview.Escape(sourceHelp[s.Name]))
+	fmt.Fprintf(&b, "[::b]%s[::-] · route: %s\n%s\n", s.Label, tview.Escape(core.DescribeRoute(s.Route)), tview.Escape(core.SourceHelp[s.Name]))
 	if s.Problem != "" {
 		fmt.Fprintf(&b, "\n[red]%s[-]\n", tview.Escape(s.Problem))
 	}

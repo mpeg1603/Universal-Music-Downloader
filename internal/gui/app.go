@@ -25,6 +25,7 @@ type app struct {
 	queue    *queueTab
 	search   *searchTab
 	library  *libraryTab
+	sources  *sourcesTab
 	settings *settingsTab
 	log      *logTab
 }
@@ -82,9 +83,9 @@ func (a *app) build() {
 	a.tabs.AddTab(a.search.w, "&2 Search")
 	a.library = newLibraryTab(a)
 	a.tabs.AddTab(a.library.w, "&3 Library")
-	for _, name := range []string{"&4 Sources", "&5 Soulseek"} {
-		a.tabs.AddTab(placeholder(strings.TrimPrefix(name[3:], " ")), name)
-	}
+	a.sources = newSourcesTab(a)
+	a.tabs.AddTab(a.sources.w, "&4 Sources")
+	a.tabs.AddTab(placeholder("Soulseek"), "&5 Soulseek")
 	a.settings = newSettingsTab(a)
 	a.tabs.AddTab(a.settings.w, "&6 Settings")
 	a.log = newLogTab(a)
@@ -93,10 +94,15 @@ func (a *app) build() {
 		switch i {
 		case 0:
 			a.queue.refresh(false)
+			a.queue.table.SetFocus()
 		case 1:
 			a.search.refresh()
+			a.search.find.SetFocus()
 		case 2:
 			a.library.refresh()
+		case 3:
+			a.sources.refresh()
+			a.sources.table.SetFocus()
 		}
 	})
 	box.AddWidget2(a.tabs.QWidget, 1)
@@ -129,6 +135,10 @@ func (a *app) changed(k core.EventKind) {
 			a.search.refresh()
 		case 2:
 			a.library.refresh()
+		}
+	case core.EventSources:
+		if a.tabs.CurrentIndex() == 3 {
+			a.sources.refresh()
 		}
 	case core.EventLog:
 		a.log.refresh()
