@@ -157,16 +157,21 @@ func (a *artistEntry) addLink(label, u string) {
 	a.Links = append(a.Links, link{label, u})
 }
 
-func mdEscape(s string) string {
-	return strings.NewReplacer(`\`, `\\`, "|", `\|`, "\n", " ").Replace(s)
-}
+// Made once: a Replacer builds a table the first time it's used, which came to gigabytes of
+// garbage a run for a big queue when each cell of the reports made its own.
+var (
+	mdEscaper      = strings.NewReplacer(`\`, `\\`, "|", `\|`, "\n", " ")
+	mdLabelEscaper = strings.NewReplacer("[", `\[`, "]", `\]`)
+	mdURLEscaper   = strings.NewReplacer(" ", "%20", ")", "%29")
+)
+
+func mdEscape(s string) string { return mdEscaper.Replace(s) }
 
 func mdLink(label, u string) string {
 	if u == "" {
 		return mdEscape(label)
 	}
-	label = strings.NewReplacer("[", `\[`, "]", `\]`).Replace(mdEscape(label))
-	return "[" + label + "](" + strings.NewReplacer(" ", "%20", ")", "%29").Replace(u) + ")"
+	return "[" + mdLabelEscaper.Replace(mdEscape(label)) + "](" + mdURLEscaper.Replace(u) + ")"
 }
 
 func writeCSV(path string, header []string, rows [][]string) error {

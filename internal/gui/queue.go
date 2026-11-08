@@ -16,9 +16,15 @@ import (
 // a slice kept here and draws only what's visible, so even 70,000 tracks are instant.
 
 // The filters with a button of their own; the rest are under "More".
-var mainFilters = []string{"all", "downloading", "queued", "done", "library", "failed"}
+var mainFilters = []string{"all", "active", "downloading", "searching", "waiting", "queued", "done", "library", "failed"}
 
-var chipWords = map[string]string{"all": "All", "downloading": "Downloading", "queued": "Waiting", "done": "Done", "library": "In library", "failed": "Not found"}
+var chipWords = map[string]string{"all": "All", "active": "In progress", "downloading": "Downloading", "searching": "Searching",
+	"waiting": "Waiting", "queued": "Queued", "done": "Done", "library": "In library", "failed": "Not found"}
+
+var chipTips = map[string]string{"all": "Every song", "active": "Everything being worked on: searching, waiting and downloading together",
+	"downloading": "Data is coming in for these right now", "searching": "Being looked for right now",
+	"waiting": "Found, and waiting for a free slot, a place in someone's queue, peers, or a retry", "queued": "Their turn hasn't come yet",
+	"done": "Downloaded to your downloads folder", "library": "Already in your library", "failed": "No source had them"}
 
 type queueTab struct {
 	a    *app
@@ -110,8 +116,9 @@ func newQueueTab(a *app) *queueTab {
 	p.box.AddWidget(t.notice.QWidget)
 
 	// the filters, and everything else that narrows or orders the list
-	bar := hbox()
+	bar, done := hbox(), hbox() // what's under way, and what's over with
 	bar.SetSpacing(6)
+	done.SetSpacing(6)
 	group := qt.NewQButtonGroup2(t.w.QObject)
 	group.SetExclusive(true)
 	for _, name := range mainFilters {
@@ -121,7 +128,11 @@ func newQueueTab(a *app) *queueTab {
 		b.SetSizePolicy2(qt.QSizePolicy__Fixed, qt.QSizePolicy__Fixed)
 		group.AddButton(b.QAbstractButton)
 		t.chips[name] = b
-		bar.AddWidget(b.QWidget)
+		if name == "done" || name == "library" || name == "failed" {
+			done.AddWidget(b.QWidget)
+		} else {
+			bar.AddWidget(b.QWidget)
+		}
 	}
 	t.chips["all"].SetChecked(true)
 	t.more = qt.NewQComboBox2()
@@ -154,9 +165,11 @@ func newQueueTab(a *app) *queueTab {
 		group.SetExclusive(true)
 		t.refresh(true)
 	})
-	bar.AddWidget(t.more.QWidget)
+	done.AddWidget(t.more.QWidget)
+	done.AddStretch()
 	bar.AddStretch()
 	p.box.AddLayout(bar.QLayout)
+	p.box.AddLayout(done.QLayout)
 
 	t.views = map[int]core.JobView{}
 	t.reread = newThrottle(t.w.QObject, 1000, func() { t.refresh(false) })
@@ -312,6 +325,9 @@ func (t *queueTab) draw(c *rowCtx) {
 
 // stateVisual is a track's state as an icon and colors.
 func stateVisual(v core.JobView) (icon, color, soft string) {
+	if v.State == core.JobDownloading && v.Task.Waiting {
+		return "clock", th.Warn, th.WarnSoft
+	}
 	switch v.State {
 	case core.JobDownloading:
 		return "download", th.Accent, th.AccentSoft
@@ -335,6 +351,9 @@ func stateVisual(v core.JobView) (icon, color, soft string) {
 }
 
 func statusColor(v core.JobView) string {
+	if v.State == core.JobDownloading && v.Task.Waiting {
+		return th.Warn
+	}
 	switch v.State {
 	case core.JobDownloading:
 		return th.Accent
@@ -388,11 +407,11 @@ func statusLines(v core.JobView) (string, string) {
 	case core.JobQueued:
 		switch {
 		case v.NeedBetter && v.Lib != nil:
-			return "Waiting", "only if better than your " + v.Lib.Q.String()
+			return "Queued", "only if better than your " + v.Lib.Q.String()
 		case v.Bumped:
 			return "Up next", ""
 		}
-		return "Waiting", ""
+		return "Queued", ""
 	}
 	return capitalized(v.State.String()), ""
 }
@@ -449,8 +468,13 @@ func (t *queueTab) clearFilters() {
 	t.setFilter("all")
 }
 
-// changed reads the list again when the queue changed, at most once a second.
-func (t *queueTab) changed() { t.reread.poke() }
+// changed reads the list again when the queue changed, at most once a second, and only if the
+// page is on screen: with a big queue that's work, and showing the page reads it anyway.
+func (t *queueTab) changed() {
+	if t.a.current() == pageDownloads && t.a.win.IsVisible() {
+		t.reread.poke()
+	}
+}
 
 // refresh reads the list again, away from the window's thread so it never stutters; reset: the
 // filter or order changed (the list goes back to the top).
@@ -494,7 +518,7 @@ func (t *queueTab) loaded(keys []string, counts map[string]int) {
 	}
 	for name, b := range t.chips {
 		b.SetText(chipWords[name] + " " + compactCount(counts[name]))
-		b.SetToolTip(fmtCount(counts[name]) + " songs")
+		b.SetToolTip(chipTips[name] + ": " + fmtCount(counts[name]) + " songs")
 	}
 	t.updateMore(counts)
 	t.retry.SetVisible(counts["failed"] > 0)
@@ -572,8 +596,8 @@ func (t *queueTab) tick(o core.Overview) {
 		if c[core.JobFailed] > 0 {
 			parts = append(parts, fmt.Sprintf("%d not found", c[core.JobFailed]))
 		}
-		if o.DlUsed > 0 {
-			parts = append(parts, fmt.Sprintf("%d downloading", o.DlUsed))
+		if o.Transferring > 0 {
+			parts = append(parts, fmt.Sprintf("%d downloading", o.Transferring))
 		}
 		if o.SrUsed > 0 {
 			parts = append(parts, fmt.Sprintf("%d being searched for", o.SrUsed))
@@ -713,6 +737,9 @@ func (t *queueTab) fillPane() {
 	t.dArtist.SetText(sub)
 	main, _ := statusLines(v)
 	kind := map[core.JobState]string{core.JobDone: "ok", core.JobFailed: "bad", core.JobWaiting: "warn", core.JobDownloading: "accent", core.JobSearching: "info", core.JobReady: "info", core.JobInLibrary: "info"}[v.State]
+	if v.State == core.JobDownloading && v.Task.Waiting {
+		kind = "warn"
+	}
 	if kind == "" {
 		kind = "off"
 	}

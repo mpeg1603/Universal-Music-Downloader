@@ -862,11 +862,11 @@ func sortLookups(ctx context.Context, id *sortIdentifier, all []*sortResolving, 
 // sortMakePlan does the whole reading and deciding.
 func sortMakePlan(ctx context.Context, o SortOptions, cacheDir string, tools *Tools, dz *Deezer, skippable func(context.CancelFunc), progress func(string, int, int)) (*sortPlan, error) {
 	progress("Looking for audio files", 0, 0)
-	exclude := []string{}
+	exclude := []string{cacheDir} // the app's own working folders: downloads in progress are there
 	if o.DuplicatesDir != "" {
 		exclude = append(exclude, o.DuplicatesDir)
 	}
-	files, err := sortFind(ctx, o.Sources, exclude, func(n int) { progress("Looking for audio files", n, 0) })
+	files, partial, err := sortFind(ctx, o.Sources, exclude, func(n int) { progress("Looking for audio files", n, 0) })
 	if err != nil {
 		return nil, err
 	}
@@ -877,7 +877,19 @@ func sortMakePlan(ctx context.Context, o SortOptions, cacheDir string, tools *To
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	settled := files[:0]
+	for _, a := range files {
+		if a.Unfinished {
+			partial++
+		} else {
+			settled = append(settled, a)
+		}
+	}
+	files = settled
 	var notes []string
+	if partial > 0 {
+		notes = append(notes, fmt.Sprintf("%d unfinished files were left alone: they're still being written, or marked as partial downloads. Plan again later to include them.", partial))
+	}
 	if o.Offline {
 		notes = append(notes, "The web wasn't used: files with incomplete tags weren't looked up.")
 	}

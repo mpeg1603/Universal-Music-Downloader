@@ -301,7 +301,7 @@ func (ui *tui) refreshSort() {
 		fmt.Fprintf(&b, "Plan and full lists: %s\n[::b]Nothing has changed yet.[::-] a applies · d drops it · D switches moves/duplicates", tview.Escape(v.Plan.Dir))
 	default:
 		b.WriteString("Tidies your library and downloads into Artist/Album folders and moves duplicate songs aside, with a report of which file replaced which.\n\n")
-		b.WriteString("[::b]s[::-] makes a plan: that only reads your files. You look it over, and only applying it moves anything. Nothing is ever deleted or re-encoded, and an applied plan can be undone.")
+		b.WriteString("[::b]s[::-] makes a plan: that only reads your files. You look it over, and only applying it moves anything. Nothing is ever deleted or re-encoded, unfinished downloads are left where they are, and an applied plan can be undone.")
 		if v.Err != "" {
 			b.WriteString("\n\n[red]" + tview.Escape(v.Err) + "[-]")
 		}

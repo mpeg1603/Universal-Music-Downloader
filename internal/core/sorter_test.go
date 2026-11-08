@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSortParseFilename(t *testing.T) {
@@ -467,8 +469,74 @@ func TestSortFindThroughLinkedRoot(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Skip(err)
 	}
-	found, err := sortFind(context.Background(), []string{real, link}, nil, func(int) {})
+	found, _, err := sortFind(context.Background(), []string{real, link}, nil, func(int) {})
 	if err != nil || len(found) != 1 {
 		t.Errorf("%d found, %v", len(found), err)
+	}
+}
+
+func init() { sortSettle = 0 } // the tests' files were all written a moment ago
+
+func TestSortLeavesUnfinishedDownloadsAlone(t *testing.T) {
+	root := t.TempDir()
+	write := func(name string) string {
+		p := filepath.Join(root, name)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	whole := write("Whole Song.flac")
+	write("Incomplete.flac") // only a song's name, and a whole file
+	for _, name := range []string{"song.flac.part", "song2.flac", "song2.flac.aria2", "song3.temp.m4a",
+		"INCOMPLETEabc123def456song4.flac", ".hidden.flac", "song5.flac", "song5.flac.!qB"} {
+		write(name)
+	}
+	found, partial, err := sortFind(context.Background(), []string{root}, nil, func(int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, a := range found {
+		names = append(names, filepath.Base(a.Path))
+	}
+	sort.Strings(names)
+	if got := strings.Join(names, ", "); got != "Incomplete.flac, Whole Song.flac" {
+		t.Fatalf("found %s", got)
+	}
+	if partial != 5 { // not the .part itself: that one's no audio file to begin with
+		t.Errorf("partial = %d", partial)
+	}
+
+	var check sortPartialCheck
+	if check.unfinished(whole) {
+		t.Error("a whole file counted as unfinished")
+	}
+	// A download that started after the plan was made.
+	write("Whole Song.flac.crdownload")
+	check = sortPartialCheck{}
+	if !check.unfinished(whole) {
+		t.Error("a file with a partial-download marker beside it wasn't noticed")
+	}
+}
+
+func TestSortSkipsFilesStillBeingWritten(t *testing.T) {
+	old := sortSettle
+	sortSettle = time.Hour
+	defer func() { sortSettle = old }()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "growing.flac")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(p)
+	if !sortStillWritten(st) {
+		t.Error("a file written just now counted as settled")
+	}
+	long := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(p, long, long)
+	st, _ = os.Stat(p)
+	if sortStillWritten(st) {
+		t.Error("an old file counted as still being written")
 	}
 }

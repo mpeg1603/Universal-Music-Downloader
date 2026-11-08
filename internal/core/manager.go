@@ -193,14 +193,15 @@ type Manager struct {
 	pathMu  sync.Mutex
 	claimed map[string]string
 
-	paused   atomic.Bool
-	ready    atomic.Bool // library scanned and playlists imported: downloading may start
-	wakeCh   chan struct{}
-	bumpSeq  atomic.Int64
-	dirty    atomic.Bool
-	scanMu   sync.Mutex
-	scanStop context.CancelFunc
-	wg       sync.WaitGroup
+	paused     atomic.Bool
+	ready      atomic.Bool // library scanned and playlists imported: downloading may start
+	wakeCh     chan struct{}
+	bumpSeq    atomic.Int64
+	dirty      atomic.Bool
+	libChanged atomic.Bool // the library file has something new to save
+	scanMu     sync.Mutex
+	scanStop   context.CancelFunc
+	wg         sync.WaitGroup
 
 	checkMu               sync.Mutex // one library check at a time
 	checkDone, checkTotal atomic.Int64
@@ -803,9 +804,14 @@ func (m *Manager) recordResult(src Source, err error, search bool) {
 
 // --- scheduling ------------------------------------------------------------------------------
 
+// dispatchGap: wakes come tens of times a second while tracks finish, and each dispatch looks
+// through the whole queue; it starts everything there's room for, so once in this long is enough.
+const dispatchGap = 100 * time.Millisecond
+
 func (m *Manager) dispatchLoop() {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	var last time.Time
 	for {
 		select {
 		case <-m.ctx.Done():
@@ -814,6 +820,14 @@ func (m *Manager) dispatchLoop() {
 		case <-tick.C:
 			m.requeueWaiting()
 		}
+		if wait := dispatchGap - time.Since(last); wait > 0 {
+			select {
+			case <-m.ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+		last = time.Now()
 		m.dispatch()
 	}
 }
@@ -858,9 +872,7 @@ func (m *Manager) queuePicture(want int) (searching, ready int, next []*Job) {
 		return a.bump > b.bump || (a.bump == b.bump && (a.prio > b.prio || (a.prio == b.prio && a.idx < b.idx)))
 	}
 	picks := make([]pick, 0, want+1)
-	m.jobsMu.Lock()
-	defer m.jobsMu.Unlock()
-	for _, j := range m.order {
+	for _, j := range m.jobList() {
 		j.mu.Lock()
 		state := j.state
 		p := pick{j, j.bump, j.prio, j.idx}
@@ -901,7 +913,7 @@ func (m *Manager) start(j *Job) {
 	j.gen++
 	gen := j.gen
 	j.state, j.cancel, j.cancelWhy, j.started = JobSearching, cancel, "", time.Now()
-	j.task = &Task{Track: j.Track, started: time.Now()}
+	j.task = &Task{Track: j.Track, started: time.Now(), onWaiting: func() { m.revs.queue.Add(1) }}
 	if j.tried == nil {
 		j.tried = map[string]bool{}
 	}
@@ -992,6 +1004,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			}
 			m.libMu.Unlock()
 			m.dirty.Store(true)
+			m.libChanged.Store(true)
 			m.revs.queue.Add(1)
 		}
 	}
@@ -1342,8 +1355,7 @@ func (m *Manager) fetchAlong(ts *TorrentSource, self *Job, c Candidate) {
 		libQ       Quality
 	}
 	var sibs []sibling
-	m.jobsMu.Lock()
-	for _, j := range m.order {
+	for _, j := range m.jobList() {
 		if j == self {
 			continue
 		}
@@ -1358,7 +1370,6 @@ func (m *Manager) fetchAlong(ts *TorrentSource, self *Job, c Candidate) {
 		}
 		j.mu.Unlock()
 	}
-	m.jobsMu.Unlock()
 	var tracks []*Track
 	for _, s := range sibs {
 		if !ts.hinted(s.t.Key) {
@@ -1457,9 +1468,7 @@ func (m *Manager) AddBandcampLinks(text string) (found, added int, errs []string
 
 func (m *Manager) requeueWaiting() {
 	now := time.Now()
-	m.jobsMu.Lock()
-	defer m.jobsMu.Unlock()
-	for _, j := range m.order {
+	for _, j := range m.jobList() {
 		j.mu.Lock()
 		if j.state == JobWaiting && !j.retryAt.IsZero() && now.After(j.retryAt) {
 			j.state, j.retryAt = JobQueued, time.Time{}
@@ -1497,7 +1506,9 @@ func (m *Manager) governor() {
 		if m.dirty.Load() && time.Since(lastReport) > 2*time.Minute {
 			lastReport = time.Now()
 			m.dirty.Store(false)
-			m.saveLibrary()
+			if m.libChanged.Swap(false) { // tracks finishing don't change it, and it's a big file
+				m.saveLibrary()
+			}
 			m.writeReports()
 		}
 	}
@@ -1653,26 +1664,54 @@ func moveNoReplace(src, dst string) error {
 	} else if errors.Is(err, os.ErrExist) {
 		return err
 	}
+	return copyNoReplace(src, dst)
+}
+
+// copyNoReplace is the move across disks, or to a disk without hard links. The file is written
+// beside its destination under a ".part" name and takes its real name only when it's whole, so
+// nothing that looks at the folder (Sort & merge, a library scan, Soulseek) sees half a song.
+func copyNoReplace(src, dst string) error {
+	if _, err := os.Lstat(dst); err == nil {
+		return os.ErrExist
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	part := dst + partialSuffix
+	out, err := os.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
+	defer os.Remove(part) // left behind only if it couldn't take its name
 	if _, err := out.ReadFrom(in); err != nil {
 		out.Close()
-		os.Remove(dst)
 		return err
 	}
 	if err := out.Close(); err != nil {
-		os.Remove(dst)
 		return err
+	}
+	if err := os.Link(part, dst); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return err
+		}
+		// No hard links here (exFAT, some network disks). place holds pathMu, so nothing of
+		// ours takes the name between this check and the rename.
+		if _, serr := os.Lstat(dst); serr == nil {
+			return os.ErrExist
+		}
+		if err := os.Rename(part, dst); err != nil {
+			return err
+		}
 	}
 	return os.Remove(src)
 }
+
+// partialSuffix marks a file on its way into a folder.
+const partialSuffix = ".part"
 
 var (
 	coversMu sync.Mutex
@@ -1689,6 +1728,14 @@ func coverCache(dir string) *CoverCache {
 }
 
 // --- controls (from the UI) -------------------------------------------------------------------
+
+// jobList is the queue. The list is replaced whole when it changes and never altered in place,
+// so whoever walks all of it doesn't hold everyone else up (the window's thread included).
+func (m *Manager) jobList() []*Job {
+	m.jobsMu.Lock()
+	defer m.jobsMu.Unlock()
+	return m.order
+}
 
 func (m *Manager) job(key string) *Job {
 	m.jobsMu.Lock()
@@ -1769,6 +1816,9 @@ func (m *Manager) RetryFailed(includeCancelled bool) int {
 	m.jobsMu.Unlock()
 	for _, k := range keys {
 		j := m.job(k)
+		if j == nil { // the playlists changed meanwhile
+			continue
+		}
 		j.mu.Lock()
 		j.state, j.tried, j.notes, j.reasons, j.rounds, j.retryAt = JobQueued, map[string]bool{}, nil, nil, 0, time.Time{}
 		j.mu.Unlock()
@@ -1901,6 +1951,7 @@ func (m *Manager) TorrentFeeds() []FeedStatus {
 type Overview struct {
 	Counts           map[JobState]int
 	Total            int
+	Transferring     int // tracks with data coming in: JobDownloading, minus those only waiting
 	Own, Torrent     float64
 	Cap              float64
 	DlUsed, DlLimit  int
@@ -1918,14 +1969,16 @@ type Overview struct {
 
 func (m *Manager) Overview() Overview {
 	o := Overview{Counts: map[JobState]int{}}
-	m.jobsMu.Lock()
-	for _, j := range m.order {
+	list := m.jobList()
+	for _, j := range list {
 		j.mu.Lock()
 		o.Counts[j.state]++
+		if j.state == JobDownloading && !j.task.isWaiting() {
+			o.Transferring++
+		}
 		j.mu.Unlock()
 	}
-	o.Total = len(m.order)
-	m.jobsMu.Unlock()
+	o.Total = len(list)
 	o.Own, o.Torrent, o.Cap = bw.Speeds()
 	if c := m.slskClient(); c != nil {
 		o.SlskOn = true

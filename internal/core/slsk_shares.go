@@ -110,8 +110,8 @@ func (s *slskShares) scan(ctx context.Context, roots []slskShareRoot, meta func(
 				}
 				return nil
 			}
-			if d.IsDir() || !d.Type().IsRegular() {
-				return nil
+			if d.IsDir() || !d.Type().IsRegular() || sortPartialMarks[strings.ToLower(filepath.Ext(name))] {
+				return nil // an unfinished download isn't anything to share yet
 			}
 			info, err := d.Info()
 			if err != nil {

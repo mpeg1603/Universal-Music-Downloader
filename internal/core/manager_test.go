@@ -7,10 +7,12 @@ import (
 	"crypto/sha1"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -514,5 +516,72 @@ func TestBandcampZipExtractionAndStat(t *testing.T) {
 	}
 	if s := parseStatResponse([]byte(`cb({"result":"ok","download_url":"https://p4.bcbits.com/x"})`)); s.DownloadURL != "https://p4.bcbits.com/x" {
 		t.Errorf("stat: %+v", s)
+	}
+}
+
+// What each list on the Downloads page holds: only tracks with data coming in are "downloading".
+func TestQueueListsKeepTheirTracksApart(t *testing.T) {
+	mk := func(s JobState, waiting bool) jobBrief {
+		b := jobBrief{state: s}
+		b.moving = s == JobDownloading && !waiting
+		return b
+	}
+	cases := []struct {
+		name string
+		b    jobBrief
+		in   []string
+	}{
+		{"transferring", mk(JobDownloading, false), []string{"active", "downloading", "todo"}},
+		{"in someone's queue", mk(JobDownloading, true), []string{"active", "waiting", "todo"}},
+		{"found, no slot yet", mk(JobReady, false), []string{"active", "waiting", "todo"}},
+		{"searching", mk(JobSearching, false), []string{"active", "searching", "todo"}},
+		{"will retry", mk(JobWaiting, false), []string{"active", "waiting", "retry", "todo"}},
+		{"not started", mk(JobQueued, false), []string{"queued", "todo"}},
+	}
+	for _, c := range cases {
+		for _, f := range []string{"active", "downloading", "searching", "waiting", "retry", "queued", "todo"} {
+			if got, want := c.b.matches(f), slices.Contains(c.in, f); got != want {
+				t.Errorf("%s under %s: %v", c.name, f, got)
+			}
+		}
+	}
+}
+
+func TestStageSaysWhetherDataIsMoving(t *testing.T) {
+	changes := 0
+	task := &Task{onWaiting: func() { changes++ }}
+	task.setWaitStage("looking for peers")
+	if !task.view().Waiting || changes != 1 {
+		t.Errorf("waiting %v, %d changes", task.view().Waiting, changes)
+	}
+	task.setStage("downloading")
+	if task.view().Waiting || changes != 2 {
+		t.Errorf("waiting %v, %d changes", task.view().Waiting, changes)
+	}
+}
+
+// A file on its way across disks must not be visible under its real name until it's whole.
+func TestCopyNoReplace(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dst.flac")
+	os.WriteFile(src, []byte("audio"), 0o644)
+	if err := copyNoReplace(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "audio" {
+		t.Errorf("destination holds %q", b)
+	}
+	if _, err := os.Stat(src); err == nil {
+		t.Error("the source is still there")
+	}
+	if _, err := os.Stat(dst + partialSuffix); err == nil {
+		t.Error("the partial file was left behind")
+	}
+	os.WriteFile(src, []byte("other"), 0o644)
+	if err := copyNoReplace(src, dst); !errors.Is(err, os.ErrExist) {
+		t.Errorf("replacing a file: %v", err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "audio" {
+		t.Errorf("the existing file was changed: %q", b)
 	}
 }

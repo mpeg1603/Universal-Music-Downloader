@@ -16,6 +16,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
+	"github.com/anacrolix/torrent/types/infohash"
 )
 
 // bencode is a tiny encoder for building test torrents.
@@ -862,5 +866,83 @@ func TestCheckTorrents(t *testing.T) {
 	}
 	if CheckTorrents(ctx, cfg(TorrentConfig{}), dir, "x") {
 		t.Error("no configuration should fail")
+	}
+}
+
+// The crash of 2026-11-09: a piece finishing just as its torrent ended asked for the pieces of
+// its file after the record was closed, got nothing, and the library panicked.
+func TestPieceRecordAnswersAfterClose(t *testing.T) {
+	var ih infohash.T
+	raw := storage.NewMapPieceCompletion()
+	pc := btCompletion{raw}
+	if err := pc.Set(metainfo.PieceKey{InfoHash: ih, Index: 0}, true); err != nil {
+		t.Fatal(err)
+	}
+	pc.Close()
+	n := 0
+	for range storage.GetPieceCompletionRange(pc, ih, 0, 3) {
+		n++
+	}
+	if n != 3 {
+		t.Fatalf("%d answers for 3 pieces after closing", n)
+	}
+	n = 0
+	raw.Close()
+	for range storage.GetPieceCompletionRange(raw, ih, 0, 3) {
+		n++
+	}
+	if n != 0 {
+		t.Fatalf("the library's own record behaves differently now (%d answers); is the wrapper still needed?", n)
+	}
+	if p, ok := any(pc).(storage.PieceCompletionPersistenter); !ok || p.Persistent() {
+		t.Error("the record has to say it isn't persistent, or every piece is flushed to disk")
+	}
+}
+
+// Two sites offering the same torrent (same contents, other trackers) make one download.
+func TestSameTorrentFromTwoSitesIsOneJob(t *testing.T) {
+	dir := t.TempDir()
+	info := map[string]any{"name": "album", "piece length": 16384, "pieces": strings.Repeat("x", 20), "length": 100}
+	one, two := filepath.Join(dir, "1.torrent"), filepath.Join(dir, "2.torrent")
+	os.WriteFile(one, []byte(bencode(map[string]any{"announce": "http://a.example/announce", "info": info})), 0o644)
+	os.WriteFile(two, []byte(bencode(map[string]any{"announce": "http://b.example/announce", "info": info})), 0o644)
+	m := newTorrentManager(newBTEngine(), t.TempDir(), time.Minute)
+	a, err := m.job(one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := m.job(two)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b || len(m.jobs) != 1 {
+		t.Errorf("%d jobs for one torrent", len(m.jobs))
+	}
+}
+
+// Tracks asking for a magnet's details at the same time share it: one giving up must not
+// end the wait of the other (it used to fail with "torrents are shut down").
+func TestMagnetDetailsAreShared(t *testing.T) {
+	e := newBTEngine()
+	defer e.close()
+	magnet := "magnet:?xt=urn:btih:" + strings.Repeat("ab", 20)
+	short, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	long, cancel2 := context.WithTimeout(context.Background(), 900*time.Millisecond)
+	defer cancel2()
+	errs := make(chan error, 2)
+	for _, ctx := range []context.Context{short, long} {
+		go func() {
+			_, err := e.metadata(ctx, magnet)
+			errs <- err
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err == nil || !strings.Contains(err.Error(), "no peer sent") {
+			t.Errorf("got %v", err)
+		}
+	}
+	if n := len(e.metaUsers); n != 0 {
+		t.Errorf("%d magnets still counted as in use", n)
 	}
 }

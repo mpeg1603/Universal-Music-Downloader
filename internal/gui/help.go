@@ -30,10 +30,11 @@ var helpTopics = map[string]helpTopic{
 	"downloads": {"Downloads", `
 <p>Every song the app is working on or has finished.</p>
 <ul>
-<li><b>Waiting</b>: its turn hasn't come yet.</li>
+<li><b>Queued</b>: its turn hasn't come yet.</li>
 <li><b>Searching</b>: the app is asking your sources for it.</li>
-<li><b>Downloading</b>: on its way, with speed and progress.</li>
-<li><b>Will retry</b>: a source was busy or having trouble; the app tries again by itself.</li>
+<li><b>Waiting</b>: found, and waiting for a free slot, a place in someone's queue, peers on a torrent, or to try a busy source again.</li>
+<li><b>Downloading</b>: data is coming in, with speed and progress.</li>
+<li><b>In progress</b> shows the searching, waiting and downloading songs together.</li>
 <li><b>Downloaded</b>: the file is in your downloads folder.</li>
 <li><b>In your library</b>: you already have it, so nothing was downloaded.</li>
 <li><b>Not found</b>: no source had it. Click the song to see what each source said; <b>Try not-found again</b> gives them all another go later.</li>
@@ -231,7 +232,7 @@ var formatWords = []string{"Keep original (recommended)", "FLAC (lossless)", "MP
 // filterWords are the Downloads page's filters, by core's names.
 var filterWords = map[string]string{
 	"all": "All", "todo": "Still to do", "active": "In progress", "downloading": "Downloading now", "searching": "Searching now",
-	"queued": "Waiting", "prioritized": "Moved to the front", "waiting": "Will retry later", "done": "Downloaded",
+	"queued": "Queued", "prioritized": "Moved to the front", "waiting": "Waiting", "retry": "Will retry later", "done": "Downloaded",
 	"lossless": "Downloaded in lossless", "lossy": "Downloaded in lossy quality", "upgrades": "Better than my library copy",
 	"library": "In my library", "below": "In my library, below my quality", "failed": "Not found", "cancelled": "Cancelled",
 	"search": "Added from Find music", "upgrading": "Library upgrades",

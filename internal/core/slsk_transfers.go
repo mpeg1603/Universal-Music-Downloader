@@ -172,7 +172,7 @@ func (c *slskClient) busyUsers() map[string]bool {
 // Soulseek download slots, then in the user's queue for at most the configured time.
 func (c *slskClient) Download(ctx context.Context, user, path string, size int64, dest string, task *Task) error {
 	task.park() // waiting here needs none of the app's download slots
-	task.setStage("waiting for a Soulseek download slot")
+	task.setWaitStage("waiting for a Soulseek download slot")
 	// One file at a time from a user: wait for that before taking one of the few slots.
 	unlock, err := c.lockUser(ctx, user)
 	if err != nil {
@@ -205,7 +205,7 @@ func (c *slskClient) Download(ctx context.Context, user, path string, size int64
 		c.mu.Unlock()
 	}()
 	name := path[strings.LastIndexAny(path, `\/`)+1:]
-	task.setStage("asking " + user + " for the file")
+	task.setWaitStage("asking " + user + " for the file")
 	if err := c.sendPeer(ctx, user, pmQueueUpload, (&slskMsg{}).str(path)); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -233,12 +233,12 @@ func (c *slskClient) Download(ctx context.Context, user, path string, size int64
 		connWait = nil
 		giveUp.Reset(wait)
 		d.set("queued again")
-		task.setStage("asking " + user + " again")
+		task.setWaitStage("asking " + user + " again")
 		c.debugf("%s; asking %s again", why, user)
 		return c.sendPeer(ctx, user, pmQueueUpload, (&slskMsg{}).str(path))
 	}
 	d.set("queued")
-	task.setStage("waiting in " + user + "'s Soulseek queue")
+	task.setWaitStage("waiting in " + user + "'s Soulseek queue")
 	for {
 		select {
 		case <-ctx.Done():
@@ -262,7 +262,7 @@ func (c *slskClient) Download(ctx context.Context, user, path string, size int64
 			switch ev.kind {
 			case "offered":
 				d.set("connecting")
-				task.setStage("connecting to " + user)
+				task.setWaitStage("connecting to " + user)
 				connWait = time.After(90 * time.Second)
 			case "place":
 				task.setNote(fmt.Sprintf("number %d in %s's queue", ev.place, user))
