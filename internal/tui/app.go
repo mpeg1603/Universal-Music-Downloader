@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"spotify-downloader/internal/core"
+	"universal-music-downloader/internal/core"
 
 	"fmt"
 	"os"
@@ -567,7 +567,7 @@ func (ui *tui) refresh() {
 		speed += fmt.Sprintf(", soulseek ⇣%s ⇡%s", core.FmtRate(o.SlskDown), core.FmtRate(o.SlskUp))
 	}
 	todo := o.Counts[core.JobQueued] + o.Counts[core.JobSearching] + o.Counts[core.JobReady] + o.Counts[core.JobDownloading]
-	line1 := fmt.Sprintf(" [::b]spotify-downloader[::-]  %s   ⇣ %s   downloads %d/%d", state, speed, o.DlUsed, o.DlLimit)
+	line1 := fmt.Sprintf(" [::b]Universal Music Downloader[::-]  %s   ⇣ %s   downloads %d/%d", state, speed, o.DlUsed, o.DlLimit)
 	if o.DlWaiting > 0 {
 		line1 += fmt.Sprintf(" (+%d ready)", o.DlWaiting)
 	}

@@ -1,12 +1,16 @@
-# spotify-downloader
+# Universal Music Downloader
 
-A terminal app that downloads the songs of your Spotify playlists from other sources, and
-**skips the ones your music library already has in good enough quality**. It never downloads
-from Spotify, and never writes to your library: new files go to their own downloads folder.
+A terminal app that downloads the songs of your playlists, and the tracks, albums and
+discographies you search for, from many sources (Bandcamp, Soulseek, torrents, YouTube…), and
+**skips what your music library already has in good enough quality**. It never downloads from
+Spotify, and never writes to your library: new files go to their own downloads folder.
+
+It's self-contained: the Soulseek client, the BitTorrent client and the torrent site search
+(Jackett's public site definitions) are built in; only ffmpeg is needed next to it.
 
 Everything is set up and controlled inside the app: playlists, library folders, quality
 threshold, sources and their order, bandwidth, and every track (cancel, restart, do next).
-Changes apply right away, while it runs.
+Changes apply right away, while it runs. The first start walks you through it (below).
 
 ## Sources
 
@@ -23,7 +27,7 @@ Tried top to bottom for each track; the order is yours to change (Sources tab).
 | **YouTube Music** | Official "song" uploads, found by ISRC and by artist + title. | Opus ~130 |
 | **SoundCloud** | Public tracks; 30-second previews are rejected. | MP3 128 / AAC |
 | **YouTube** | Regular uploads. | Opus ~130 |
-| **Torrent** *(optional)* | Your Jackett or Prowlarr, downloaded with aria2c (only the file needed). See **[TORRENTS.md](TORRENTS.md)**. | often FLAC |
+| **Torrent** *(optional)* | Public torrent sites, searched with Jackett's site definitions (built in; your own Jackett or Prowlarr can be added), downloaded by the built-in BitTorrent client (only the files needed, no seeding afterwards). See **[TORRENTS.md](TORRENTS.md)**. | often FLAC |
 
 Each source is searched with a few queries, the next one only when the ones before found
 nothing that fits: artist + title (with the version, e.g. "… The Midnight Remix", when the title
@@ -61,6 +65,14 @@ The threshold (Library tab, `t`) is one of: `lossless` (default: FLAC, ALAC, WAV
 `256`, `192`, `128`, `any`. Lossy files are compared by MP3-equivalent bitrate (Opus 160 ≈ MP3
 256, AAC 256 ≈ MP3 320). `r` on an "in library" track downloads it anyway.
 
+**Upgrading your library** (Library tab, `u`): pick a quality (e.g. *below lossless*, *below
+320*); every library file below it, playlist or not, is queued to be **downloaded again in
+better quality** (never just converted: a source must have a clearly better copy, and the
+downloaded file is measured again). The new files go to the downloads folder, your copies stay
+where they are, and `downloaded.md` says which library file each one improves on. The upgrade
+is a playlist of its own (`Upgrade: below lossless`), so the Search tab can turn it off or
+remove it, and the Queue's filter *library upgrades* shows its tracks.
+
 ## Bandwidth
 
 Set a bandwidth in **Settings** (or press `[` / `]` anywhere): it's both the **target** and the
@@ -69,19 +81,43 @@ while the total stays below it (up to "Most downloads at once") and never goes a
 no bandwidth set, it runs "Most downloads at once" downloads in parallel. Searching runs
 separately ("Searches at once"), ahead of the downloads, so they never sit idle.
 
+**Queue jumping.** Soulseek and torrents have limits of their own (a few Soulseek downloads at
+once, a few torrents at once). While bandwidth is to spare, a track that would wait for such a
+busy source moves on to the next source in the order instead of holding a place in line; once
+the bandwidth is used up, tracks wait for the sources they'd get first again. A waiting
+torrent that hasn't received anything for 3 minutes lets its tracks move on the same way.
+Settings → *Skip busy sources while bandwidth is to spare* turns it off.
+
+The header shows the speeds: the app's own downloads, torrents, and Soulseek (down and up,
+with the number of transfers each way).
+
 ## Requirements
 
 - **ffmpeg** (`sudo pacman -S ffmpeg` / `sudo apt install ffmpeg`).
 - **yt-dlp** is downloaded automatically (official build, checksum-verified, refreshed weekly)
-  into `~/.cache/spotify-downloader/`. For YouTube it needs `node` or `deno`.
-- **For torrents only:** the **aria2** package and Jackett or Prowlarr ([TORRENTS.md](TORRENTS.md)).
+  into `~/.cache/universal-music-downloader/`. For YouTube it needs `node` or `deno`.
+- Nothing else: Soulseek, BitTorrent and the torrent site search are built in. Optional:
+  [FlareSolverr](TORRENTS.md#flaresolverr-sites-behind-cloudflare) for torrent sites behind
+  Cloudflare, your own Jackett or Prowlarr.
 
 ## Getting started
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader ./cmd/spotify-downloader
-./spotify-downloader
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o universal-music-downloader ./cmd/universal-music-downloader
+./universal-music-downloader
 ```
+
+The first start opens the **setup**: a window per step, each of which can be skipped, and all of
+it can be changed later (Settings and Sources; Settings → *Run the setup again*):
+
+- where downloads go and their format; your library folders and what quality is good enough;
+  playlists to start with; the bandwidth and how many downloads run at once;
+- every download method, one by one, set up or left off: Bandcamp (and its email address),
+  Internet Archive, Audius, YouTube / YouTube Music / SoundCloud (and your browser's login),
+  Soulseek (account, sharing, port; or import from Nicotine+), torrents (built-in indexers,
+  FlareSolverr, Jackett/Prowlarr), VK, Yandex Music.
+
+After that:
 
 1. **Search** tab (`2`): type what you want in **Find** (`/`), or `a` adds a playlist file. Files
    can be:
@@ -92,16 +128,22 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader ./cmd/sp
    - a plain-text list of tracks, albums and artists (see *Finding music* below);
    - a public Spotify playlist or album link (only its first 100 tracks).
 2. **Library** tab (`3`): `a` adds your music folders; `t` sets the quality threshold.
-3. **Settings** tab (`6`): the downloads folder (default `~/Music/SpotifyDownloads`), format,
-   bandwidth. **Save** applies them.
+3. **Settings** tab (`6`): the downloads folder (default `~/Music/Universal Music Downloader`),
+   format, bandwidth. **Save** applies them.
 4. Watch the **Queue** tab (`1`).
 
 ## Finding music: by name, and plain-text lists
 
 In the Search tab, **Find** takes what you'd say: `Artist - Title`, `Title - Artist`,
-`Artist - Album`, or just `Artist`. It's looked up in Deezer's catalog (free, no account) and
-the results are listed best first: tracks, albums and artists. `Enter` on one adds it to the
-queue, ahead of everything else:
+`Artist - Album`, or just `Artist`. Tags narrow it down: `artist:Deftones album:White Pony`,
+`track:change year:2000`, `year:1995-1999` (a tag's value runs to the next tag). Below Find are
+**Artist**, **Album**, **Track** and **Year** fields that do the same (`Tab` moves between
+them); fill in any of them. Matching is fuzzy: small typos, missing words, *the*, accents and
+punctuation don't stop a match, and exact matches come first.
+
+It's looked up in Deezer's catalog (free, no account). The results come in three sections,
+**Artists**, **Albums** (with year and track count) and **Tracks** (with album, year and
+length), best first. `Enter` on one adds it to the queue, ahead of everything else:
 
 - a **track**: that song;
 - an **album**: all its tracks;
@@ -111,10 +153,11 @@ queue, ahead of everything else:
 
 Each addition becomes a playlist of its own (`Search: Artist - Album`) in the Playlists list,
 so it can be turned off, given a priority, or removed again (`d`; files already downloaded
-stay). To be sure which is meant, start with `track:`, `album:` or `artist:`.
+stay).
 
 **Plain-text lists** (`.txt`, added with `a`) take one of those per line: `Artist - Title`,
-`Title - Artist`, `album: Artist - Album`, `Artist` (the discography); `#` starts a comment.
+`Title - Artist`, `album: Artist - Album`, `Artist` (the discography), or tags
+(`artist:… album:… year:…`); `#` starts a comment.
 Each line is looked up the same way (the answers are kept for a month, so a list isn't looked
 up again on every start); a line nothing fits is read as `Artist - Title`. Without a
 connection to Deezer the lines are read as `Artist - Title`.
@@ -125,9 +168,9 @@ connection to Deezer the lines are read as `Artist - Title`.
 |---|---|---|
 | `1` Queue | every track: state, progress, speed, quality | `Enter` details (every source tried and why it didn't work), `c` cancel, `r` restart (search again from the first source; for a downloaded or in-library track, download again), `p` do next, `R` retry everything not found, `f` filter, `o` sort, `O` reverse the order, `/` find in the queue, `Esc` show everything |
 | `2` Search | find music by name; your playlist files, and the playlists in them | `/` find, `Enter` add a result (or show a playlist's tracks), `Tab` next list, `a` add a file, `d` remove, `space` on/off, `+` `-` priority (higher goes first), `R` read the files again |
-| `3` Library | library folders, scan status, threshold | `a` add folder (suggestions show as you type: `↑` `↓` pick, `Tab` completes, `Enter` accepts, `Esc` closes), `d` remove, `s` rescan, `t` threshold |
-| `4` Sources | the sources in order, their route, state and counts; torrent indexers | `space` on/off, `K` `J` move up/down, `Enter` settings (route, tokens, cookies, email, Jackett, the Soulseek account), `e` route, `p` pause/resume, `b` paste Bandcamp download links |
-| `5` Soulseek | the connection and what you share; searching Soulseek by hand; transfers both ways; chat (private and rooms) | `/` search, `Enter` download the file, `d` download its whole folder, `Tab` next pane, `n` message someone, `j` join a room, `l` leave a room / close a chat, `m` message a user, `x` stop an upload, `B` ban a user, `o` check your port, `R` reconnect |
+| `3` Library | library folders, scan status, threshold | `a` add folder (suggestions show as you type: `↑` `↓` pick, `Tab` completes, `Enter` accepts, `Esc` closes), `d` remove, `s` rescan, `t` threshold, `u` upgrade the library |
+| `4` Sources | the sources in order, their route, state and counts; torrent indexers | `space` on/off, `K` `J` move up/down, `Enter` settings (route, tokens, cookies, email, indexers, the Soulseek account), `e` route, `p` pause/resume, `b` paste Bandcamp download links |
+| `5` Soulseek | a full Soulseek client in six pages: Search, Transfers, Browse, Users, Chat, Interests (see *Soulseek*) | `<` `>` switch pages, `/` search, `u` the user menu, `m` message, `b` browse their files, `i` user info, `n` message someone, `j` join a room, `A` away/online, `o` check your port, `R` reconnect |
 | `6` Settings | downloads folder, format, layout, threshold, bandwidth, parallel downloads and searches | `Tab`/arrows move, `Esc` leaves a field, **Save** applies |
 | `7` Log | what happened | `v` detailed log, `End` follow |
 
@@ -138,13 +181,13 @@ Anywhere: `1`–`7` (or `Alt+1`–`7`, `F1`–`F7`) switch tabs, `[` `]` lower/r
 everything, to do, in progress, queued, moved to the front, to be retried, downloaded,
 downloaded lossless or lossy, downloaded to replace a worse library copy, in your library,
 in your library below the threshold, not found, cancelled, added from the Search tab, and
-downloaded from each source. `o` sorts by playlist order, state, artist, title, album, length,
+downloaded from each source, library upgrades. `o` sorts by playlist order, state, artist, title, album, length,
 quality, source, progress, priority or when it finished; `O` reverses the order. `/` narrows
 it to tracks whose artist, title or album contains what you type; `Esc` shows everything again.
 
 **Pause** (`P`) stops everything right away: searches and downloads in progress are stopped and
 go back to the front of the queue (they continue from the source they were at), torrents are
-paused in aria2c and keep what they have, and nothing new starts. Tracks being converted
+paused and keep what they have, and nothing new starts. Tracks being converted
 finish. `P` again resumes.
 
 Quitting (`q`, closing the terminal, or `kill`) stops the tracks in progress; they continue
@@ -212,7 +255,7 @@ FLAC). The client is built into the app; nothing else needs to be installed. It 
 Soulseek account: Sources (`4`) → Soulseek → `Enter` → **Username** and **Password** (a name
 nobody uses yet makes a new account on first login; there's no way to reset a forgotten
 password, so keep it). The same window holds the route, port, limits, sharing and chat
-rooms. If you use Nicotine+, **Import from Nicotine+** copies its account,
+rooms (the setup at first start asks for all of it too). If you use Nicotine+, **Import from Nicotine+** copies its account,
 port, shared folders and upload limits (Nicotine+'s files are only read). Then turn the
 Soulseek source on in the Sources tab (`space`). Don't run another Soulseek client with the
 same account at the same time: each logs the other out (the app then stays offline until you
@@ -238,12 +281,36 @@ speed limit (KB/s), a queue limit per user (files and MB), banned users. The sha
 are read again after each library scan; new downloads are shared as they arrive. Turn
 **Share files** off to share nothing.
 
-**Getting through.** Others reach you on the listening port (2234; the next free one if
-it's taken). With **UPnP** on (the default, as in Nicotine+), the app asks your router to
-forward it while it runs. Through a VPN the port usually can't be reached from outside; the
-app then reaches users whose ports are open (most), connecting to them. `o` in the Soulseek tab
-asks the Soulseek site's port checker whether others can reach you. The Soulseek source's route
-(Sources → `e`) applies to all its connections.
+**Getting through: port forwarding.** Others reach you on the listening port (TCP 2234; the
+next free one if it's taken). With it closed, Soulseek still works, but users whose own port is
+closed can't exchange files or search results with you. With **UPnP** on (the default, as in
+Nicotine+), the app asks your router to forward it while it runs; otherwise forward it by hand.
+With a VPN, set Soulseek's route to **direct** (Sources → Soulseek → `Enter` → Route), so the
+server and other users see your home address, where the port is forwarded; the app then also
+binds its listening socket to your network card, so answers to incoming connections leave
+through your router rather than the VPN. `o` in the Soulseek tab asks the Soulseek site's port
+checker whether others can reach you.
+
+On a **MikroTik** router (RouterOS 7), in its Terminal, with your computer's address in place
+of `192.168.1.50`:
+
+```
+/ip dhcp-server lease make-static [find address=192.168.1.50]
+/ip firewall nat add chain=dstnat in-interface-list=WAN protocol=tcp dst-port=2234 \
+    action=dst-nat to-addresses=192.168.1.50 to-ports=2234 comment="Soulseek"
+```
+
+The first line keeps the computer's address from changing, the second forwards the port. The
+default firewall lets forwarded connections in. WinBox/WebFig steps, UPnP on MikroTik, other
+routers, your computer's firewall and what to check when it stays closed (carrier-grade NAT,
+for one): **[docs/soulseek-port-forwarding.md](docs/soulseek-port-forwarding.md)**.
+
+**Fast seeders get more.** When a user sends a track quickly (from 250 KB/s) and in good
+quality (lossless, or 256 kbps and up), the app browses their shares once and checks them
+against the rest of the queue: every other track of yours they have (the same album, or
+anything else they share) is downloaded from them while they're there, ahead of other users.
+Nothing more is asked of them than of anyone: their queue, the per-user limit and the 2-at-once
+cap still apply.
 
 **Wishlist and chat.** Tracks that no source had, Soulseek included, go on the Soulseek
 wishlist: the server lets each client search for one wishlist item every 12 minutes (2 for
@@ -251,11 +318,27 @@ privileged users), and the app does, in turn; when something fits, the track is 
 Soulseek again. The Soulseek tab shows private messages (the tab title counts unread ones) and
 chat rooms; rooms you join are joined again next time.
 
-**Searching by hand.** The Soulseek tab's search (`/`) lists the files others share, users who
-can send right away first, with size, quality and length. `Enter` downloads a file, `d` the
-whole folder it's in (its subfolders too). These go to the downloads folder under `Soulseek/`
-as they are (not renamed or tagged), wait their turn with the other Soulseek downloads, and
-show in the Transfers list.
+**The Soulseek tab** works as a full client, in six pages (`<` `>` switch between them):
+
+- **Search**: the files others share, users who can send right away first, with size, quality
+  and length. `Enter` downloads a file, `d` the whole folder it's in (its subfolders too). These
+  go to the downloads folder under `Soulseek/<folder>/` as they are (not renamed or tagged),
+  wait their turn with the other Soulseek downloads, and show in Transfers.
+- **Transfers**: your downloads, and your **uploads** (what others download from you, with
+  speed and progress). `x` stops an upload, `C` clears finished ones.
+- **Browse**: a user's shared folders and files (`b` on any user): `Enter` downloads a file, `d`
+  a folder.
+- **Users**: your buddies, ignored and banned users (`a` adds a buddy, `x` takes one off), and
+  user info (`i`: their description, country, shared files and folders, upload slots, queue and
+  speed, whether they're online).
+- **Chat**: private messages (the tab title counts unread ones) and chat rooms (`j` joins one,
+  from the server's list or by name; `l` leaves). Rooms you join are joined again next time.
+- **Interests**: the things you like and dislike (`a`, `h`, `x`), the recommendations the server
+  makes from them, users with similar interests, and what other users like.
+
+On any user, `u` opens the user menu: message, browse, user info, their interests, add to
+buddies, ignore (hide their messages), ban (no downloads from you, no file list). `A` sets you
+away (and back).
 
 The client speaks the protocol as documented by Nicotine+ (doc/SLSKPROTOCOL.md) and logs in
 as an experimental client (major version 177), as new clients are asked to.
@@ -324,9 +407,9 @@ ends the sign-in after 7 days (the Sources tab then says to sign in again); on *
 ## Without the app
 
 ```sh
-./spotify-downloader --headless   # work through the queue with the saved settings, print progress, exit
-./spotify-downloader --check-torrents
-./spotify-downloader --add ~/playlists --library ~/Music --out ~/Music/SpotifyDownloads --bandwidth 5
+./universal-music-downloader --headless   # work through the queue with the saved settings, print progress, exit
+./universal-music-downloader --check-torrents   # search the torrent indexers once, look into the top result
+./universal-music-downloader --add ~/playlists --library ~/Music --out ~/Music/Downloads --bandwidth 5
 ```
 
 `--add`, `--library`, `--out` and `--bandwidth` change the saved settings (handy for a first
@@ -334,16 +417,21 @@ setup or scripts). `--config FILE` and `--data DIR` use another settings file an
 
 ## Files
 
-- `~/.config/spotify-downloader/config.json`: settings (private: holds tokens and passwords).
-- `~/.local/share/spotify-downloader/`: `state.jsonl` (per-track results), `library.json`
+- `~/.config/universal-music-downloader/config.json`: settings (private: holds tokens and passwords).
+- `~/.local/share/universal-music-downloader/`: `state.jsonl` (per-track results), `library.json`
   (imported playlists and Deezer lookups), `library-index.json` (library scan),
   `bandcamp-emails.json` (releases Bandcamp was asked to email, and the links received),
-  `cache/` (torrent files and searches), `logs/` (one per run, last 20 kept).
+  `cache/` (torrent files, searches, the indexer definitions), `logs/` (one per run, last 20
+  kept).
+- Moving from the old name (*spotify-downloader*): on the first start the app moves
+  `~/.config/spotify-downloader`, `~/.local/share/spotify-downloader` and
+  `~/.cache/spotify-downloader` to the new names (leaving links behind), so settings, state and
+  caches carry over.
 
 ## Troubleshooting
 
 - **A source shows a problem in the Sources tab** (needs a token, yt-dlp missing, Jackett
-  unreachable): fix it in its settings (`Enter`); it's set up again when you save.
+  unreachable, no indexers chosen): fix it in its settings (`Enter`); it's set up again when you save.
 - **"paused until 18:05 (…bot check…)"**: see *Bot checks* above.
 - **"Bandcamp is showing its bot check page to this connection"**: Bandcamp currently serves a
   browser challenge to this network; the source pauses and tries again later. Try another route
@@ -353,15 +441,17 @@ setup or scripts). `--config FILE` and `--data DIR` use another settings file an
 - **A track in your library isn't recognized**: the match needs the artist and title tags (or,
   without tags, an `Artist/Album/NN - Title` or `Artist - Title` file name) and a similar
   length. `Enter` shows what was found.
+- **Soulseek: few results or downloads never start**: your port is probably closed and the
+  other user's too; see *Getting through* (`o` checks it).
 
 ## Building and tests
 
-You need Go 1.22 or newer.
+You need Go 1.24 or newer.
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o spotify-downloader ./cmd/spotify-downloader
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o spotify-downloader.exe ./cmd/spotify-downloader
-go test ./...      # needs ffmpeg; the torrent tests also use aria2c if installed
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o universal-music-downloader ./cmd/universal-music-downloader
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o universal-music-downloader.exe ./cmd/universal-music-downloader
+go test ./...      # needs ffmpeg; no network needed
 ```
 
 The code is in three parts:
@@ -370,4 +460,4 @@ The code is in three parts:
   Frontends use it only through `core.Backend` (`internal/core/api.go`): methods and the
   plain views they return.
 - `internal/tui`: the terminal app, one file per tab.
-- `cmd/spotify-downloader`: the program: options, the headless mode, and starting the app.
+- `cmd/universal-music-downloader`: the program: options, the headless mode, and starting the app.

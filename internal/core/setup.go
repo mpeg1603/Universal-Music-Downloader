@@ -34,7 +34,8 @@ var SetupSteps = []SetupStep{
 	{ID: "soulseek", Source: true, Title: "Soulseek", Help: "A file-sharing network where people share their music folders, " +
 		"often in FLAC. Needs a Soulseek account (a new name and password make one), or import it from Nicotine+. " +
 		"You share your library in return (many users don't send files to people who share nothing). Opening the " +
-		"listening port in your router helps: see the README (\"Soulseek port forwarding\")."},
+		"listening port in your router helps (UPnP below does it for you where the router allows; with a VPN, set " +
+		"Soulseek's route to direct): docs/soulseek-port-forwarding.md has the steps, MikroTik included."},
 	{ID: "torrent", Source: true, Title: "Torrents", Help: "Albums and discographies from public torrent sites (built-in, " +
 		"from Jackett's site definitions), downloaded by the built-in client; only the files needed. Sites behind " +
 		"Cloudflare's browser check need FlareSolverr. Your own Jackett or Prowlarr can be added too."},

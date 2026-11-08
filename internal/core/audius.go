@@ -12,7 +12,7 @@ import (
 // independent electronic music), with a free public API and full streams as MP3 320. Tracks
 // the artist restricted to paying fans are left out.
 
-const audiusApp = "spotify-downloader"
+const audiusApp = "universal-music-downloader"
 
 var audiusQuality = Quality{Codec: "mp3", Kbps: 320}
 

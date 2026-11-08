@@ -420,8 +420,19 @@ func (c *slskClient) listen() {
 	base := cfg.ListenPort()
 	var ln net.Listener
 	var err error
+	// With the "direct" route, connections from peers come in through your router, not your
+	// VPN: the listening socket is bound to the physical interface so the answers go back the
+	// same way (otherwise they'd leave through the VPN's tunnel and never arrive).
+	var lc net.ListenConfig
+	if NormalizeRoute(c.route) == RouteDirect {
+		if iface, err := router.DirectInterface(); err == nil {
+			d := &net.Dialer{}
+			bindToInterface(d, iface)
+			lc.Control = d.Control
+		}
+	}
 	for p := base; p < base+10 && p < 65536 && (p == base || base > 0); p++ {
-		if ln, err = net.Listen("tcp4", fmt.Sprintf(":%d", p)); err == nil {
+		if ln, err = lc.Listen(c.ctx, "tcp4", fmt.Sprintf(":%d", p)); err == nil {
 			break
 		}
 	}
@@ -452,7 +463,7 @@ func (c *slskClient) listenPort() int {
 
 func (c *slskClient) mapPort(port int) {
 	for c.ctx.Err() == nil {
-		m, err := upnpMap(c.ctx, port, "Soulseek (spotify-downloader)", 2*time.Hour)
+		m, err := upnpMap(c.ctx, port, "Soulseek (universal-music-downloader)", 2*time.Hour)
 		c.mu.Lock()
 		if err != nil {
 			c.state.PortNote = "router port mapping (UPnP) failed: " + err.Error()

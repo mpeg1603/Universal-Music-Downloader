@@ -633,7 +633,7 @@ func (m *Manager) setupTorrentIfNeeded(cfg Config) {
 	m.torKey = key
 	delete(m.srcErr, "torrent")
 	m.srcMu.Unlock()
-	feeds, err := m.torrentFeeds(cfg)
+	feeds, err := torrentFeeds(m.ctx, cfg, m.indexerDefs)
 	if err != nil {
 		m.setSrcErr("torrent", err.Error())
 		Logf("Torrent: %v", err)
@@ -652,15 +652,15 @@ func (m *Manager) setupTorrentIfNeeded(cfg Config) {
 
 // torrentFeeds makes the indexers torrents are searched on: the built-in ones you chose and
 // your Jackett or Prowlarr, if set.
-func (m *Manager) torrentFeeds(cfg Config) ([]*Torznab, error) {
+func torrentFeeds(parent context.Context, cfg Config, defs *indexerDefs) ([]*Torznab, error) {
 	route := NormalizeRoute(cfg.Source("torrent").Route)
 	ids := cfg.Indexers.enabled()
-	if len(ids) > 0 && (m.indexerDefs.count() == 0 || m.indexerDefs.stale()) {
-		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Minute)
-		n, err := m.indexerDefs.refresh(ctx, route)
+	if len(ids) > 0 && (defs.count() == 0 || defs.stale()) {
+		ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
+		n, err := defs.refresh(ctx, route)
 		cancel()
 		switch {
-		case err != nil && m.indexerDefs.count() == 0:
+		case err != nil && defs.count() == 0:
 			return nil, fmt.Errorf("couldn't fetch the indexer definitions from GitHub (%v); Jackett or Prowlarr can be set instead", err)
 		case err != nil:
 			Logf("Torrent: checking the indexer definitions for changes: %v", err)
@@ -671,7 +671,7 @@ func (m *Manager) torrentFeeds(cfg Config) ([]*Torznab, error) {
 	flare := newFlareSolverr(cfg.Indexers.FlareSolverr)
 	var feeds []*Torznab
 	for _, id := range ids {
-		data := m.indexerDefs.get(id)
+		data := defs.get(id)
 		if data == nil {
 			continue
 		}
@@ -683,7 +683,7 @@ func (m *Manager) torrentFeeds(cfg Config) ([]*Torznab, error) {
 		feeds = append(feeds, newBuiltinFeed(c))
 	}
 	if cfg.Torznab.configured() {
-		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 		ext, err := resolveFeeds(ctx, cfg.Torznab, time.Duration(cfg.IndexerTimeout))
 		cancel()
 		if err != nil && len(feeds) == 0 {

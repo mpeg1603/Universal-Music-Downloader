@@ -90,3 +90,24 @@ func TestSlskdEntryBecomesSoulseek(t *testing.T) {
 		t.Errorf("%d soulseek entries", n)
 	}
 }
+
+func TestMigrateLegacyFolders(t *testing.T) {
+	root := t.TempDir()
+	for _, v := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"} {
+		t.Setenv(v, filepath.Join(root, v))
+		os.MkdirAll(filepath.Join(root, v, "spotify-downloader"), 0o755)
+	}
+	os.WriteFile(filepath.Join(root, "XDG_CONFIG_HOME", "spotify-downloader", "config.json"), []byte("{}"), 0o600)
+	if moved := MigrateLegacyFolders(); len(moved) != 3 {
+		t.Fatalf("%v", moved)
+	}
+	if _, err := os.Stat(DefaultConfigPath()); err != nil {
+		t.Error(err)
+	}
+	if target, err := os.Readlink(filepath.Join(root, "XDG_DATA_HOME", "spotify-downloader")); err != nil || target != DefaultDataDir() {
+		t.Errorf("link %q %v", target, err)
+	}
+	if moved := MigrateLegacyFolders(); len(moved) != 0 {
+		t.Errorf("moved again: %v", moved)
+	}
+}

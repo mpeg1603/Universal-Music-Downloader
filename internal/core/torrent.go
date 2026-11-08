@@ -39,9 +39,9 @@ func (c TorrentConfig) configured() bool { return len(c.Feeds) > 0 }
 func torrentConfigPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		dir = filepath.Join(os.TempDir(), "spotify-downloader-config")
+		dir = filepath.Join(os.TempDir(), "universal-music-downloader-config")
 	}
-	return filepath.Join(dir, "spotify-downloader", "torrents.json")
+	return filepath.Join(dir, "universal-music-downloader", "torrents.json")
 }
 
 func loadTorrentConfig() TorrentConfig {
@@ -1498,7 +1498,7 @@ func (s *TorrentSource) Download(ctx context.Context, c Candidate, t *Track, wor
 // --- setup check (--check-torrents) ------------------------------------------------------------
 
 // checkTorrents walks through the torrent setup step by step and explains what to fix.
-func CheckTorrents(ctx context.Context, cfg TorrentConfig, query string) bool {
+func CheckTorrents(ctx context.Context, cfg Config, dataDir, query string) bool {
 	ok := func(format string, args ...any) {
 		fmt.Printf("  %s %s\n", Paint("32", "✓"), fmt.Sprintf(format, args...))
 	}
@@ -1509,16 +1509,10 @@ func CheckTorrents(ctx context.Context, cfg TorrentConfig, query string) bool {
 	fmt.Println("Checking the torrent setup (TORRENTS.md explains each step):")
 
 	good := true
-
-	if !cfg.configured() {
-		bad("no Jackett or Prowlarr configured")
-		hint("pass --torznab http://127.0.0.1:9117 (Jackett) or --torznab http://127.0.0.1:9696 (Prowlarr), plus --torznab-key YOUR_KEY")
-		return false
+	if cfg.Torznab.configured() && cfg.Torznab.Key == "" {
+		fmt.Printf("  %s no Jackett/Prowlarr API key set; they need one\n", Paint("33", "!"))
 	}
-	if cfg.Key == "" {
-		fmt.Printf("  %s no API key given (--torznab-key); Jackett and Prowlarr need one\n", Paint("33", "!"))
-	}
-	feeds, err := resolveFeeds(ctx, cfg, 30*time.Second)
+	feeds, err := torrentFeeds(ctx, cfg, loadIndexerDefs(filepath.Join(dataDir, "cache", "indexers")))
 	if err != nil {
 		bad("%v", err)
 		explainFeedError(err, hint)
@@ -1526,6 +1520,11 @@ func CheckTorrents(ctx context.Context, cfg TorrentConfig, query string) bool {
 	}
 	var working []*Torznab
 	for _, f := range feeds {
+		if f.cg != nil {
+			ok("built-in indexer %s", f.Name)
+			working = append(working, f)
+			continue
+		}
 		if err := f.caps(ctx); err != nil {
 			bad("%v", err)
 			explainFeedError(err, hint)
@@ -1538,7 +1537,7 @@ func CheckTorrents(ctx context.Context, cfg TorrentConfig, query string) bool {
 		return false
 	}
 
-	tmp, err := os.MkdirTemp("", "spotify-downloader-check-")
+	tmp, err := os.MkdirTemp("", "universal-music-downloader-check-")
 	if err != nil {
 		return false
 	}
@@ -1552,7 +1551,7 @@ func CheckTorrents(ctx context.Context, cfg TorrentConfig, query string) bool {
 	}
 	if len(results) == 0 {
 		bad("searching for %q found nothing", query)
-		hint("add (more) indexers that carry music in the Jackett/Prowlarr web page and check that their own \"Test\" passes")
+		hint("choose more indexers (Sources → Torrent → Enter → Indexers), or add music indexers in Jackett/Prowlarr")
 		hint("or try another search with --torrent-query \"Artist Album\"")
 		return false
 	}
@@ -1572,7 +1571,7 @@ func CheckTorrents(ctx context.Context, cfg TorrentConfig, query string) bool {
 	meta, err := src.meta(ctx, ranked[0])
 	if err != nil {
 		bad("couldn't get the torrent file of the top result: %v", err)
-		hint("if the indexer is behind Cloudflare, set up FlareSolverr (TORRENTS.md, step 5)")
+		hint("if the indexer is behind Cloudflare, set up FlareSolverr (TORRENTS.md, \"FlareSolverr\")")
 		return false
 	}
 	audio := 0

@@ -204,9 +204,9 @@ func GmailSignIn(ctx context.Context, clientID, secret string, show func(authURL
 		a := answer{code: q.Get("code"), err: q.Get("error")}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if a.code != "" {
-			io.WriteString(w, "<html><body><h3>Signed in. You can close this tab and go back to spotify-downloader.</h3></body></html>")
+			io.WriteString(w, "<html><body><h3>Signed in. You can close this tab and go back to universal-music-downloader.</h3></body></html>")
 		} else {
-			io.WriteString(w, "<html><body><h3>Sign-in didn't complete ("+html.EscapeString(a.err)+"). Go back to spotify-downloader.</h3></body></html>")
+			io.WriteString(w, "<html><body><h3>Sign-in didn't complete ("+html.EscapeString(a.err)+"). Go back to universal-music-downloader.</h3></body></html>")
 		}
 		select {
 		case got <- a:

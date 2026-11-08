@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"spotify-downloader/internal/core"
+	"universal-music-downloader/internal/core"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"

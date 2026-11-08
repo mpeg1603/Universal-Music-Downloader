@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -152,7 +153,7 @@ var Browsers = []string{"", "firefox", "chrome", "chromium", "brave", "edge", "o
 func defaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	c := Config{
-		OutputDir:      filepath.Join(home, "Music", "SpotifyDownloads"),
+		OutputDir:      filepath.Join(home, "Music", "Universal Music Downloader"),
 		Threshold:      "lossless",
 		Format:         "original",
 		Template:       defaultTemplate,
@@ -176,17 +177,17 @@ func defaultConfig() Config {
 func DefaultConfigPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		dir = filepath.Join(os.TempDir(), "spotify-downloader-config")
+		dir = filepath.Join(os.TempDir(), "universal-music-downloader-config")
 	}
-	return filepath.Join(dir, "spotify-downloader", "config.json")
+	return filepath.Join(dir, "universal-music-downloader", "config.json")
 }
 
 func DefaultDataDir() string {
 	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
-		return filepath.Join(d, "spotify-downloader")
+		return filepath.Join(d, "universal-music-downloader")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "spotify-downloader")
+	return filepath.Join(home, ".local", "share", "universal-music-downloader")
 }
 
 // loadConfig reads the config, filling in defaults and sources added since it was written.
@@ -401,4 +402,42 @@ func ContainsString(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// legacyName is what the app was called before; its folders move to the new name.
+const legacyName = "spotify-downloader"
+
+// MigrateLegacyFolders moves the settings, data and cache folders of the app's old name to
+// the new one, the first time, leaving a link at the old place (so an older copy still
+// running finds them). It returns what was moved.
+func MigrateLegacyFolders() []string {
+	newCfg := filepath.Dir(DefaultConfigPath())
+	pairs := [][2]string{
+		{filepath.Join(filepath.Dir(newCfg), legacyName), newCfg},
+		{filepath.Join(filepath.Dir(DefaultDataDir()), legacyName), DefaultDataDir()},
+		{filepath.Join(filepath.Dir(defaultCacheDir()), legacyName), defaultCacheDir()},
+	}
+	var moved []string
+	for _, p := range pairs {
+		old, now := p[0], p[1]
+		if old == now {
+			continue
+		}
+		st, err := os.Lstat(old)
+		if err != nil || !st.IsDir() {
+			continue // nothing there, or already a link
+		}
+		if _, err := os.Stat(now); err == nil {
+			continue
+		}
+		os.MkdirAll(filepath.Dir(now), 0o755)
+		if err := os.Rename(old, now); err != nil {
+			continue
+		}
+		if runtime.GOOS != "windows" {
+			os.Symlink(now, old)
+		}
+		moved = append(moved, old+" → "+now)
+	}
+	return moved
 }

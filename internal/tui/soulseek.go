@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"spotify-downloader/internal/core"
+	"universal-music-downloader/internal/core"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -766,7 +766,7 @@ func (ui *tui) slskPortCheck() {
 			case ok:
 				s.portNote = fmt.Sprintf("[green]port %d is open to others[-]", port)
 			default:
-				s.portNote = fmt.Sprintf("[orange]port %d is closed to others[-] (users behind closed ports can't reach you; forward it in your router or use UPnP and the \"direct\" route)", port)
+				s.portNote = fmt.Sprintf("[orange]port %d is closed to others[-] (users behind closed ports can't reach you; forward it in your router or use UPnP, and the \"direct\" route with a VPN: docs/soulseek-port-forwarding.md)", port)
 			}
 		})
 	}()

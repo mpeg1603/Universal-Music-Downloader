@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"spotify-downloader/internal/core"
+	"universal-music-downloader/internal/core"
 
 	"github.com/rivo/tview"
 )

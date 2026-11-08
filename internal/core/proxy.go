@@ -86,7 +86,7 @@ func (p *LocalProxy) handle(c net.Conn) {
 		c.SetReadDeadline(time.Time{})
 		route, ok := p.route(req)
 		if !ok {
-			io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"spotify-downloader\"\r\nContent-Length: 0\r\n\r\n")
+			io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"universal-music-downloader\"\r\nContent-Length: 0\r\n\r\n")
 			return
 		}
 		if req.Method == http.MethodConnect {

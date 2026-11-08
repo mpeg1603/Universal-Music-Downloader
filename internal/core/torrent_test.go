@@ -848,13 +848,19 @@ func TestCheckTorrents(t *testing.T) {
 	srv := fakeIndexer(t, name, []string{"01 - Give Life Back to Music.mp3", "cover.jpg"}, nil, nil)
 	defer srv.Close()
 	ctx := context.Background()
-	if !CheckTorrents(ctx, TorrentConfig{Feeds: []string{srv.URL}, Key: "secret"}, "Daft Punk Random Access Memories") {
+	dir := t.TempDir()
+	cfg := func(tc TorrentConfig) Config {
+		c := defaultConfig()
+		c.Torznab, c.Indexers.NoBuiltin = tc, true // no built-in indexers: they'd be fetched from GitHub
+		return c
+	}
+	if !CheckTorrents(ctx, cfg(TorrentConfig{Feeds: []string{srv.URL}, Key: "secret"}), dir, "Daft Punk Random Access Memories") {
 		t.Error("a working setup should pass")
 	}
-	if CheckTorrents(ctx, TorrentConfig{Feeds: []string{srv.URL}, Key: "wrong"}, "Daft Punk Random Access Memories") {
+	if CheckTorrents(ctx, cfg(TorrentConfig{Feeds: []string{srv.URL}, Key: "wrong"}), dir, "Daft Punk Random Access Memories") {
 		t.Error("a wrong API key should fail")
 	}
-	if CheckTorrents(ctx, TorrentConfig{}, "x") {
+	if CheckTorrents(ctx, cfg(TorrentConfig{}), dir, "x") {
 		t.Error("no configuration should fail")
 	}
 }

@@ -1,4 +1,4 @@
-module spotify-downloader
+module universal-music-downloader
 
 go 1.25.0
 

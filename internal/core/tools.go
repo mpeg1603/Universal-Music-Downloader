@@ -131,9 +131,9 @@ func keepOld(dest string, err error) (string, error) {
 
 func defaultCacheDir() string {
 	if d, err := os.UserCacheDir(); err == nil {
-		return filepath.Join(d, "spotify-downloader")
+		return filepath.Join(d, "universal-music-downloader")
 	}
-	return filepath.Join(os.TempDir(), "spotify-downloader")
+	return filepath.Join(os.TempDir(), "universal-music-downloader")
 }
 
 // command is exec.CommandContext for the external programs a track's processing runs.

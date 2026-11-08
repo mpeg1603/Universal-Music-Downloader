@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"spotify-downloader/internal/core"
+	"universal-music-downloader/internal/core"
 
 	"context"
 	"fmt"

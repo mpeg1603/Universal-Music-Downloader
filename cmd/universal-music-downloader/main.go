@@ -1,12 +1,12 @@
-// spotify-downloader makes a local copy of the songs in your Spotify playlists from other
+// universal-music-downloader makes a local copy of the songs in your Spotify playlists from other
 // sources (Bandcamp free downloads, Internet Archive, Yandex Music, VK, YouTube Music,
 // SoundCloud, YouTube, torrents), skipping songs your music library already has in good
 // enough quality. It runs as a terminal app where every setting can be changed while it works.
 package main
 
 import (
-	"spotify-downloader/internal/core"
-	"spotify-downloader/internal/tui"
+	"universal-music-downloader/internal/core"
+	"universal-music-downloader/internal/tui"
 
 	"context"
 	"flag"
@@ -26,21 +26,22 @@ type listFlag []string
 func (l *listFlag) String() string     { return strings.Join(*l, ", ") }
 func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
 
-const usage = `spotify-downloader: download the songs of your Spotify playlists from other sources,
-skipping the ones your music library already has in good enough quality.
+const usage = `Universal Music Downloader: download the songs of your playlists, and music you search
+for, from many sources (Bandcamp, Soulseek, torrents, YouTube…), skipping what your music
+library already has in good enough quality.
 
 Run it without options to open the app; everything is set up and controlled in there.
 
 Options (all optional; the app saves its settings):
-  --config FILE      settings file (default ~/.config/spotify-downloader/config.json)
+  --config FILE      settings file (default ~/.config/universal-music-downloader/config.json)
   --data DIR         where the app keeps its state, logs and caches
-                     (default ~/.local/share/spotify-downloader)
+                     (default ~/.local/share/universal-music-downloader)
   --add PATH|URL     add a playlist file, folder, zip or link (repeatable)
   --library DIR      add a library folder to check (repeatable; never written to)
   --out DIR          the downloads folder
   --bandwidth MBPS   bandwidth target and cap in MB/s (0: none)
   --headless         no app: work through the queue, print progress, write the reports, exit
-  --check-torrents   test the Jackett/Prowlarr setup step by step, then exit
+  --check-torrents   test the torrent indexers (built-in, Jackett/Prowlarr) with a search, then exit
   -v                 detailed log
 `
 
@@ -49,7 +50,7 @@ func main() {
 }
 
 func run(args []string) int {
-	fs := flag.NewFlagSet("spotify-downloader", flag.ContinueOnError)
+	fs := flag.NewFlagSet("universal-music-downloader", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	configPath := fs.String("config", core.DefaultConfigPath(), "")
 	dataDir := fs.String("data", core.DefaultDataDir(), "")
@@ -72,6 +73,11 @@ func run(args []string) int {
 	fail := func(err error) int {
 		fmt.Fprintln(os.Stderr, core.Paint("31", "Error: ")+err.Error())
 		return 1
+	}
+	if *configPath == core.DefaultConfigPath() && *dataDir == core.DefaultDataDir() {
+		for _, m := range core.MigrateLegacyFolders() {
+			fmt.Println("Moved", m)
+		}
 	}
 	*configPath, *dataDir = core.CleanPath(*configPath), core.CleanPath(*dataDir)
 	cfg, err := core.LoadConfig(*configPath)
@@ -127,7 +133,7 @@ func run(args []string) int {
 		if query == "" {
 			query = sampleAlbumQuery(filepath.Join(*dataDir, "library.json"))
 		}
-		if core.CheckTorrents(context.Background(), cfg.Torznab, query) {
+		if core.CheckTorrents(context.Background(), cfg, *dataDir, query) {
 			return 0
 		}
 		return 1
