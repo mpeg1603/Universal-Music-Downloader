@@ -4,7 +4,7 @@
 # See docs/INSTALL.md for updating and removing it.
 
 pkgname=universal-music-downloader
-pkgver=1.1.0
+pkgver=1.1.1
 pkgrel=1
 pkgdesc='Finds and downloads your music from many sources: a desktop app and a terminal app'
 arch=('x86_64')
