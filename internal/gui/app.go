@@ -45,6 +45,9 @@ func Run(m core.Backend) error {
 	tick.Start(700)
 	a.tick()
 	a.win.Show()
+	if m.NeedsSetup() {
+		a.runSetup()
+	}
 	a.queue.table.SetFocus()
 	if len(a.queue.rows) > 0 {
 		a.queue.table.SelectRow(0)
