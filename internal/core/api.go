@@ -37,6 +37,10 @@ type Backend interface {
 	Inputs() []InputStatus
 	Playlists() []PlaylistStatus
 	Reimport()
+	AddInput(path string) error // a playlist file, folder, zip, text list or link
+	RemoveInput(path string) error
+	SetInputEnabled(path string, on bool) error
+	SetPlaylist(name string, on bool, priorityDelta int) error
 	SearchMusic(ctx context.Context, text string) ([]MusicResult, error)
 	AddMusic(ctx context.Context, r MusicResult, progress func(string)) (playlist string, tracks int, err error)
 	Additions() []AdditionStatus

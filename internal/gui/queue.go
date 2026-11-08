@@ -126,6 +126,14 @@ func newQueueTab(a *app) *queueTab {
 		"N": func() { t.act("next") }, "Shift+R": t.retryAll, "/": func() { t.find.SetFocus() },
 		"F": func() { t.filter.ShowPopup() }, "O": func() { t.sort.ShowPopup() },
 		"Shift+O": func() { t.reverse.Toggle() },
+		"Escape": func() {
+			if t.q.Playlist != "" || t.q.Text != "" || t.q.Filter != "" {
+				t.q.Playlist = ""
+				t.find.SetText("")
+				t.filter.SetCurrentIndex(0)
+				t.refresh(true)
+			}
+		},
 	}
 	for k, f := range keys {
 		f := f
@@ -443,4 +451,11 @@ func (t *queueTab) details() {
 	buttons.OnRejected(func() { d.Close() })
 	l.AddWidget(buttons.QWidget)
 	d.Exec()
+}
+
+// showPlaylist shows one playlist's tracks.
+func (t *queueTab) showPlaylist(name string) {
+	t.q.Playlist = name
+	t.refresh(true)
+	t.info.SetText(fmt.Sprintf("Playlist %s: %d tracks   ·   Esc shows every track", name, len(t.rows)))
 }

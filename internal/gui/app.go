@@ -22,8 +22,9 @@ type app struct {
 	counts *qt.QLabel
 	pause  *qt.QPushButton
 
-	queue *queueTab
-	log   *logTab
+	queue  *queueTab
+	search *searchTab
+	log    *logTab
 }
 
 // Run opens the window and returns when it's closed. The backend is started already.
@@ -75,11 +76,21 @@ func (a *app) build() {
 	a.tabs = qt.NewQTabWidget2()
 	a.queue = newQueueTab(a)
 	a.tabs.AddTab(a.queue.w, "&1 Queue")
-	for _, name := range []string{"&2 Search", "&3 Library", "&4 Sources", "&5 Soulseek", "&6 Settings"} {
+	a.search = newSearchTab(a)
+	a.tabs.AddTab(a.search.w, "&2 Search")
+	for _, name := range []string{"&3 Library", "&4 Sources", "&5 Soulseek", "&6 Settings"} {
 		a.tabs.AddTab(placeholder(strings.TrimPrefix(name[3:], " ")), name)
 	}
 	a.log = newLogTab(a)
 	a.tabs.AddTab(a.log.w, "&7 Log")
+	a.tabs.OnCurrentChanged(func(i int) {
+		switch i {
+		case 0:
+			a.queue.refresh(false)
+		case 1:
+			a.search.refresh()
+		}
+	})
 	box.AddWidget2(a.tabs.QWidget, 1)
 	a.win.SetCentralWidget(central)
 
@@ -105,6 +116,9 @@ func (a *app) changed(k core.EventKind) {
 	switch k {
 	case core.EventQueue, core.EventConfig:
 		a.queue.changed()
+		if a.tabs.CurrentIndex() == 1 {
+			a.search.refresh()
+		}
 	case core.EventLog:
 		a.log.refresh()
 	}
@@ -152,6 +166,24 @@ func (a *app) tick() {
 		"<span style='color:#38c'>◆ %d in library</span> &nbsp; · %d to do &nbsp; <span style='color:#c33'>✗ %d not found</span>%s",
 		o.Total, c[core.JobDone], c[core.JobInLibrary], todo, c[core.JobFailed], free))
 	a.queue.tick()
+}
+
+// confirm asks a yes/no question.
+func (a *app) confirm(title, text string) bool {
+	return qt.QMessageBox_Question(a.win.QWidget, title, text) == qt.QMessageBox__Yes
+}
+
+// ask asks for a line of text; ok is false when cancelled.
+func (a *app) ask(title, label, value string) (string, bool) {
+	d := qt.NewQInputDialog2()
+	d.SetWindowTitle(title)
+	d.SetLabelText(label)
+	d.SetTextValue(value)
+	d.Resize(560, 120)
+	if d.Exec() != int(qt.QDialog__Accepted) {
+		return "", false
+	}
+	return d.TextValue(), true
 }
 
 // message shows a short note in a box.

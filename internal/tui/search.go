@@ -96,16 +96,7 @@ func (ui *tui) buildSearch() tview.Primitive {
 
 // musicQuery is the Find text with the fields added as tags.
 func (ui *tui) musicQuery() string {
-	q := strings.TrimSpace(ui.findField.GetText())
-	for _, f := range []struct {
-		tag   string
-		field *tview.InputField
-	}{{"artist", ui.fArtist}, {"album", ui.fAlbum}, {"track", ui.fTrack}, {"year", ui.fYear}} {
-		if v := strings.TrimSpace(f.field.GetText()); v != "" {
-			q += " " + f.tag + ":" + v
-		}
-	}
-	return strings.TrimSpace(q)
+	return core.MusicQuery(ui.findField.GetText(), ui.fArtist.GetText(), ui.fAlbum.GetText(), ui.fTrack.GetText(), ui.fYear.GetText())
 }
 
 var resultSections = []struct {
