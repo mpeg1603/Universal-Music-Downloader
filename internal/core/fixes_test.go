@@ -111,11 +111,11 @@ func TestCookiesWithoutLoginAreReported(t *testing.T) {
 	if p := c.check(context.Background()); !strings.Contains(p, "no YouTube login") {
 		t.Errorf("check: %q", p)
 	}
-	if a := c.botCheckAdvice(context.Background()); !strings.Contains(a, "Cookies from browser") {
+	if a := c.botCheckAdvice(context.Background()); !strings.Contains(a, "choose your browser") {
 		t.Errorf("advice: %q", a)
 	}
 	var none *ytCookies
-	if a := none.botCheckAdvice(context.Background()); !strings.Contains(a, "Cookies from browser") {
+	if a := none.botCheckAdvice(context.Background()); !strings.Contains(a, "browser where you're logged in") {
 		t.Errorf("advice without cookies: %q", a)
 	}
 	if newYtCookies("", "", "", dir) != nil {

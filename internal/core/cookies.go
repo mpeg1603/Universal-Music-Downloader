@@ -153,7 +153,7 @@ func (c *ytCookies) check(ctx context.Context) string {
 			return fmt.Sprintf("%s have no YouTube login: log in to YouTube in %s", c.describe(), c.browser)
 		}
 		return fmt.Sprintf("%s has no YouTube login in it (it expired or was rotated out): export it again from a "+
-			"private window you then close, or better, set \"Cookies from browser\"", c.describe())
+			"private window you then close, or better, choose your browser in YouTube's settings", c.describe())
 	}
 	return ""
 }
@@ -161,12 +161,12 @@ func (c *ytCookies) check(ctx context.Context) string {
 // botCheckAdvice is what to say when YouTube asks to sign in.
 func (c *ytCookies) botCheckAdvice(ctx context.Context) string {
 	if c == nil {
-		return "in Sources → YouTube (Enter), set \"Cookies from browser\" to a browser where you're logged in to YouTube"
+		return "in Sources, open YouTube's settings and choose a browser where you're logged in to YouTube"
 	}
 	if problem := c.check(ctx); problem != "" {
 		return problem
 	}
-	return "even with your login (" + c.describe() + "); YouTube may be flagging this connection: try another route for it (e in Sources)"
+	return "even with your login (" + c.describe() + "); YouTube may be flagging this connection: try another connection for it in its settings"
 }
 
 // cookieLines calls f with the domain, name and value of each cookie in a Netscape cookie file.

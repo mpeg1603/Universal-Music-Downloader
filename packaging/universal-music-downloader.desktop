@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Universal Music Downloader
+Comment=Download your playlists and any music you search for, skipping what you already have
+Exec=universal-music-downloader-gui
+Icon=universal-music-downloader
+Terminal=false
+Categories=AudioVideo;Audio;Network;
+Keywords=music;downloader;soulseek;bandcamp;playlist;
+StartupWMClass=universal-music-downloader

@@ -1,7 +1,8 @@
 name: Release
 
-# A tag like v1.2.3 builds the terminal app for Linux and Windows and publishes them, with
-# their SHA-256 checksums, as a GitHub release (a draft, to be checked and published by hand).
+# A tag like v1.2.3 builds the terminal app for Linux and Windows and the window app for Linux
+# (AppImage, tar.gz) and Windows (installer, portable zip), and publishes them with SHA-256
+# checksums as a GitHub release (a draft, to be checked and published by hand).
 
 on:
   push:
@@ -11,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  terminal:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +41,88 @@ jobs:
               tar -C build -czf "dist/$name.tar.gz" "$name"
             fi
           done
-          (cd dist && sha256sum * > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terminal
+          path: dist/*
+
+  window-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Qt and tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qt6-base-dev qt6-wayland g++ pkg-config libfuse2t64 patchelf file desktop-file-utils
+      - name: Build
+        run: go build -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o build/universal-music-downloader-gui ./cmd/universal-music-downloader-gui
+      - name: Package
+        run: packaging/build-appimage.sh build/universal-music-downloader-gui "$GITHUB_REF_NAME" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: window-linux
+          path: dist/*
+
+  window-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-go
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-qt6-base
+            mingw-w64-ucrt-x86_64-qt6-tools
+            mingw-w64-ucrt-x86_64-ntldd
+            zip
+      - name: Build
+        run: |
+          go run github.com/akavel/rsrc@v0.10.2 -ico packaging/icon.ico -o cmd/universal-music-downloader-gui/rsrc_windows_amd64.syso
+          go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$GITHUB_REF_NAME" -o build/universal-music-downloader-gui.exe ./cmd/universal-music-downloader-gui
+      - name: Collect Qt and its libraries
+        run: |
+          set -e
+          windeployqt6 --no-translations --no-opengl-sw --no-system-d3d-compiler build/universal-music-downloader-gui.exe
+          # the MinGW runtime and what Qt links, which windeployqt leaves out
+          ntldd -R build/universal-music-downloader-gui.exe build/platforms/*.dll build/Qt6*.dll | tr '\\' '/' | grep -i ucrt64/bin | awk '{print $3}' | sort -u | while read -r dll; do
+            cp -n "$(cygpath -u "$dll")" build/
+          done
+          cp README.md LICENSE build/
+      - name: Portable zip
+        run: |
+          mkdir -p dist
+          name=universal-music-downloader-gui-$GITHUB_REF_NAME-windows-amd64-portable
+          cp -r build "$name"
+          zip -qr "dist/$name.zip" "$name"
+      - name: Installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$env:GITHUB_REF_NAME /DSourceDir=$PWD\build /DOutputDir=$PWD\dist packaging\windows\installer.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: window-windows
+          path: dist/*
+
+  release:
+    needs: [terminal, window-linux, window-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}

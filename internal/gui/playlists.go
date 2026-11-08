@@ -1,0 +1,282 @@
+package gui
+
+import (
+	"fmt"
+
+	"universal-music-downloader/internal/core"
+
+	qt "github.com/mappu/miqt/qt6"
+)
+
+// The Playlists page: the playlists the queue is made from, and the files and links they came
+// from.
+
+type playlistsTab struct {
+	a      *app
+	w      *qt.QWidget
+	list   *rowList
+	rows   []core.PlaylistStatus
+	inputs *qt.QListWidget
+	inRows []core.InputStatus
+	stack  *qt.QStackedWidget
+
+	show, onoff, up, down, remove *qt.QPushButton
+	inToggle, inRemove            *qt.QPushButton
+}
+
+func newPlaylistsTab(a *app) *playlistsTab {
+	t := &playlistsTab{a: a}
+	p := a.newPage("Playlists", "Bring in whole playlists and the app works through them, skipping what you already have.", "playlists")
+	t.w = p.w
+	p.actions.AddWidget(a.iconButton("file", "Add a file", "primary", "A CSV from Exportify or a similar tool, a zip of them, Spotify's data export, or a text list", t.addFile).QWidget)
+	p.actions.AddWidget(a.iconButton("folder", "Add a folder", "", "A folder of playlist files", t.addFolder).QWidget)
+	p.actions.AddWidget(a.iconButton("link", "Add a link", "", "A public Spotify playlist or album link (only its first 100 tracks)", t.addLink).QWidget)
+
+	e := a.newEmpty("playlist", "No playlists yet", "Export your Spotify playlists with exportify.net and add the file here, or add a public Spotify link. Text files with one song per line work too.")
+	e.row.AddWidget(a.iconButton("external", "Open exportify.net", "primary", "", func() { core.OpenBrowser("https://exportify.net") }).QWidget)
+	e.row.AddWidget(button("How does this work?", "", func() { a.showHelp("playlists") }).QWidget)
+	e.done()
+
+	t.list = newRowList(60, func() int { return len(t.rows) }, t.draw)
+	t.list.onSelect(func(int) { t.updateButtons() })
+	t.list.onActivate(t.showTracks)
+
+	body := qt.NewQWidget2()
+	bb := qt.NewQVBoxLayout(body)
+	bb.SetContentsMargins(0, 0, 0, 0)
+	bb.SetSpacing(10)
+
+	frame, fb := card()
+	fb.SetContentsMargins(8, 8, 8, 8)
+	fb.AddWidget2(t.list.view.QWidget, 1)
+	bb.AddWidget2(frame.QWidget, 1)
+
+	acts := hbox()
+	acts.SetSpacing(6)
+	t.show = a.iconButton("music", "Show songs", "", "See this playlist in Downloads", t.showTracks)
+	t.onoff = button("Turn off", "", t.toggle)
+	t.onoff.SetToolTip("A playlist that's off stays here, but its songs leave the line")
+	t.up = a.iconButton("arrow-up", "Higher priority", "", "Goes before other playlists", func() { t.prio(1) })
+	t.down = a.iconButton("arrow-down", "Lower priority", "", "Goes after other playlists", func() { t.prio(-1) })
+	t.remove = a.iconButton("trash", "Remove", "danger", "Remove what you added from Find music; files already downloaded stay", t.removeList)
+	for _, b := range []*qt.QPushButton{t.show, t.onoff, t.up, t.down} {
+		acts.AddWidget(b.QWidget)
+	}
+	acts.AddStretch()
+	acts.AddWidget(t.remove.QWidget)
+	bb.AddLayout(acts.QLayout)
+
+	// the files and links the playlists come from
+	in, ib := card()
+	ib.SetContentsMargins(14, 10, 14, 10)
+	head := hbox()
+	head.SetSpacing(6)
+	head.AddWidget2(text("Files and links", "h2").QWidget, 1)
+	t.inToggle = button("Turn off", "", t.toggleInput)
+	t.inRemove = a.iconButton("trash", "Remove", "danger", "Stop using this file (the file itself isn't touched)", t.removeInput)
+	head.AddWidget(t.inToggle.QWidget)
+	head.AddWidget(t.inRemove.QWidget)
+	head.AddWidget(a.iconButton("refresh", "Read again", "", "Read the files again, after you've changed them", func() {
+		a.m.Reimport()
+		a.toast("Reading your playlist files again.")
+	}).QWidget)
+	ib.AddLayout(head.QLayout)
+	t.inputs = qt.NewQListWidget2()
+	t.inputs.SetMaximumHeight(110)
+	t.inputs.OnCurrentRowChanged(func(int) { t.updateButtons() })
+	ib.AddWidget(t.inputs.QWidget)
+	bb.AddWidget(in.QWidget)
+
+	t.stack = qt.NewQStackedWidget2()
+	t.stack.AddWidget(e.w)
+	t.stack.AddWidget(body)
+	p.box.AddWidget2(t.stack.QWidget, 1)
+	t.refresh()
+	return t
+}
+
+func (t *playlistsTab) draw(c *rowCtx) {
+	if c.row >= len(t.rows) {
+		return
+	}
+	v := t.rows[c.row]
+	f := drawFonts
+	p := c.p
+	color, titleColor := th.Accent, th.Text
+	if !v.Enabled {
+		color, titleColor = th.Text3, th.Text3
+	}
+	drawBadge(p, c.x+10, c.y+(c.h-32)/2, 32, "playlist", color, th.Raised)
+	right := 190
+	x := c.x + 54
+	w := c.w - 54 - right - 24
+	name := v.Name
+	if !v.Enabled {
+		name += "  (off)"
+	}
+	if v.Priority != 0 {
+		name += fmt.Sprintf("  ·  priority %+d", v.Priority)
+	}
+	drawText(p, x, c.y+9, w, 20, qt.AlignLeft|qt.AlignVCenter, name, f.bold, f.mBold, titleColor)
+	detail := fmt.Sprintf("%d songs  ·  %d downloaded  ·  %d in your library", v.Tracks, v.Done, v.InLib)
+	if v.Failed > 0 {
+		detail += fmt.Sprintf("  ·  %d not found", v.Failed)
+	}
+	drawText(p, x, c.y+31, w, 18, qt.AlignLeft|qt.AlignVCenter, detail, f.small, f.mSmall, th.Text2)
+	frac := 0.0
+	if v.Tracks > 0 {
+		frac = float64(v.Done+v.InLib) / float64(v.Tracks)
+	}
+	rx := c.x + c.w - right - 14
+	drawText(p, rx, c.y+10, right, 18, qt.AlignRight|qt.AlignVCenter, fmt.Sprintf("%.0f%%", frac*100), f.small, f.mSmall, th.Text2)
+	drawBar(p, rx, c.y+35, right, 5, frac, color)
+}
+
+func (t *playlistsTab) try(err error) {
+	if err != nil {
+		t.a.message("That didn't work", err.Error())
+	}
+	t.refresh()
+}
+
+func (t *playlistsTab) addFile() {
+	p := qt.QFileDialog_GetOpenFileName4(t.a.win.QWidget, "Add a playlist file", "", "Playlists (*.csv *.zip *.txt *.json);;All files (*)")
+	if p != "" {
+		t.try(t.a.m.AddInput(p))
+	}
+}
+
+func (t *playlistsTab) addFolder() {
+	if p := qt.QFileDialog_GetExistingDirectory3(t.a.win.QWidget, "Add a folder of playlist files", ""); p != "" {
+		t.try(t.a.m.AddInput(p))
+	}
+}
+
+func (t *playlistsTab) addLink() {
+	if p, ok := t.a.ask("Add a link", "A public Spotify playlist or album link:", ""); ok && p != "" {
+		t.try(t.a.m.AddInput(p))
+	}
+}
+
+func (t *playlistsTab) selected() *core.PlaylistStatus {
+	if r := t.list.current(); r >= 0 && r < len(t.rows) {
+		return &t.rows[r]
+	}
+	return nil
+}
+
+func (t *playlistsTab) selectedInput() *core.InputStatus {
+	if r := t.inputs.CurrentRow(); r >= 0 && r < len(t.inRows) {
+		return &t.inRows[r]
+	}
+	return nil
+}
+
+func (t *playlistsTab) showTracks() {
+	if p := t.selected(); p != nil {
+		t.a.queue.showPlaylist(p.Name)
+	}
+}
+
+func (t *playlistsTab) toggle() {
+	if p := t.selected(); p != nil {
+		t.try(t.a.m.SetPlaylist(p.Name, !p.Enabled, 0))
+	}
+}
+
+func (t *playlistsTab) prio(delta int) {
+	if p := t.selected(); p != nil {
+		t.try(t.a.m.SetPlaylist(p.Name, p.Enabled, delta))
+	}
+}
+
+func (t *playlistsTab) removeList() {
+	p := t.selected()
+	if p == nil {
+		return
+	}
+	if !core.IsAddition(p.Name) {
+		t.a.message("This one can't be removed here", "Only what you added from Find music can be removed. To stop a playlist from a file, turn it off, or remove its file below.")
+		return
+	}
+	if t.a.confirm("Remove "+p.Name+"?", "Its songs leave your downloads. Files already downloaded stay.") {
+		t.a.m.RemoveAddition(p.Name)
+		t.refresh()
+	}
+}
+
+func (t *playlistsTab) toggleInput() {
+	if in := t.selectedInput(); in != nil {
+		t.try(t.a.m.SetInputEnabled(in.Path, !in.Enabled))
+	}
+}
+
+func (t *playlistsTab) removeInput() {
+	if in := t.selectedInput(); in != nil && t.a.confirm("Remove this file?", in.Path+"\n\nThe app stops using it. The file itself isn't touched.") {
+		t.try(t.a.m.RemoveInput(in.Path))
+	}
+}
+
+func (t *playlistsTab) updateButtons() {
+	p := t.selected()
+	on := p != nil
+	for _, b := range []*qt.QPushButton{t.show, t.onoff, t.up, t.down} {
+		b.SetEnabled(on)
+	}
+	t.remove.SetEnabled(on && core.IsAddition(p.Name))
+	if on && !p.Enabled {
+		t.onoff.SetText("Turn on")
+	} else {
+		t.onoff.SetText("Turn off")
+	}
+	in := t.selectedInput()
+	t.inToggle.SetEnabled(in != nil)
+	t.inRemove.SetEnabled(in != nil)
+	if in != nil && !in.Enabled {
+		t.inToggle.SetText("Turn on")
+	} else {
+		t.inToggle.SetText("Turn off")
+	}
+}
+
+// refresh redraws the playlists and files, keeping the selections.
+func (t *playlistsTab) refresh() {
+	sel := ""
+	if p := t.selected(); p != nil {
+		sel = p.Name
+	}
+	rows := t.a.m.Playlists()
+	if len(rows) != len(t.rows) {
+		t.list.reset(func() { t.rows = rows })
+	} else {
+		t.rows = rows
+		t.list.redraw()
+	}
+	for i, p := range t.rows {
+		if p.Name == sel && t.list.current() != i {
+			t.list.selectRow(i)
+		}
+	}
+	inRow := t.inputs.CurrentRow()
+	t.inRows = t.a.m.Inputs()
+	t.inputs.Clear()
+	for _, in := range t.inRows {
+		s := in.Path
+		if !in.Enabled {
+			s = "(off)  " + s
+		}
+		if in.Err != "" {
+			s += "  —  " + in.Err
+		}
+		t.inputs.AddItem(s)
+	}
+	if inRow >= 0 && inRow < len(t.inRows) {
+		t.inputs.SetCurrentRow(inRow)
+	}
+	if len(t.rows) == 0 && len(t.inRows) == 0 {
+		t.stack.SetCurrentIndex(0)
+	} else {
+		t.stack.SetCurrentIndex(1)
+	}
+	t.updateButtons()
+}

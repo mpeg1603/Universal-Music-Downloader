@@ -1,12 +1,18 @@
 // Package gui is the app's window, in Qt (through the miqt bindings), over the same backend
 // as the terminal app (core.Backend). It only reads views and calls methods of the backend;
 // Watch says what changed, and a timer redraws what moves all the time (progress, speeds).
+//
+// The terminal app is for people who like keys and columns; the window is for everyone else.
+// It does everything the terminal app does, but says it in plain words, explains itself, and
+// leads with what most people want: find music, watch it arrive.
 package gui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"universal-music-downloader/internal/core"
 
@@ -14,187 +20,478 @@ import (
 	"github.com/mappu/miqt/qt6/mainthread"
 )
 
+// Version is set by the program that opens the window.
+var Version = "dev"
+
+// shotsHook takes over after the window is built, in the screenshot tool (build tag guishots).
+var shotsHook func(*app)
+
+const appName = "Universal Music Downloader"
+
+type pageID int
+
+const (
+	pageDownloads pageID = iota
+	pageFind
+	pagePlaylists
+	pageLibrary
+	pageSources
+	pageSoulseek
+	pageSettings
+	pageActivity
+	pageHelp
+	pageCount
+)
+
+type navItem struct {
+	b     *qt.QPushButton
+	badge *qt.QLabel
+}
+
 type app struct {
 	m      core.Backend
+	qapp   *qt.QApplication
 	win    *qt.QMainWindow
-	tabs   *qt.QTabWidget
-	header *qt.QLabel
-	counts *qt.QLabel
-	pause  *qt.QPushButton
+	stack  *qt.QStackedWidget
+	nav    [pageCount]navItem
+	assets string // pictures the style sheet refers to
+
+	themed   []func()
+	themeSet bool
+	sysDark  bool
+
+	status, speed, free *qt.QLabel
+	pause               *qt.QPushButton
+	toastLabel          *qt.QLabel
+	toastTimer          *qt.QTimer
+
+	tray     *qt.QSystemTrayIcon
+	trayShow *qt.QAction
+	trayStop *qt.QAction
+	hadWork  bool
+	unread   int
+	quitting bool
 
 	queue    *queueTab
 	search   *searchTab
+	lists    *playlistsTab
 	library  *libraryTab
 	sources  *sourcesTab
+	soulseek *soulseekTab
 	settings *settingsTab
 	log      *logTab
 }
 
 // Run opens the window and returns when it's closed. The backend is started already.
 func Run(m core.Backend) error {
-	qt.NewQApplication(os.Args)
-	qt.QCoreApplication_SetApplicationName("Universal Music Downloader")
-	a := &app{m: m}
-	a.build()
-	stop := m.Watch(func(k core.EventKind) {
-		mainthread.Start(func() { a.changed(k) })
-	})
+	a := newApp(m)
+	defer a.close()
+	stop := a.begin()
 	defer stop()
-	tick := qt.NewQTimer2(a.win.QObject)
-	tick.OnTimeout(a.tick)
-	tick.Start(700)
-	a.tick()
+	if shotsHook != nil {
+		shotsHook(a)
+		return nil
+	}
 	a.win.Show()
 	if m.NeedsSetup() {
 		a.runSetup()
 	}
-	a.queue.table.SetFocus()
-	if len(a.queue.rows) > 0 {
-		a.queue.table.SelectRow(0)
-	}
+	a.queue.focus()
 	qt.QApplication_Exec()
 	return nil
 }
 
+// newApp builds the window, hidden.
+func newApp(m core.Backend) *app {
+	a := &app{m: m}
+	a.qapp = qt.NewQApplication(os.Args)
+	qt.QCoreApplication_SetApplicationName(appName)
+	qt.QGuiApplication_SetApplicationDisplayName(appName)
+	qt.QGuiApplication_SetDesktopFileName("universal-music-downloader")
+	qt.QGuiApplication_SetQuitOnLastWindowClosed(false) // the tray may keep the app running
+	qt.QApplication_SetStyleWithStyle("Fusion")
+	initFonts()
+	a.assets, _ = os.MkdirTemp("", "umd-theme-*")
+	sys := qt.QGuiApplication_Palette().ColorWithCr(qt.QPalette__Window)
+	a.sysDark = sys.Lightness() < 128 // what Qt thinks until the desktop answers
+	ctx, cancel := context.WithTimeout(m.Context(), 1500*time.Millisecond)
+	if dark, known := systemPrefersDark(ctx); known {
+		a.sysDark = dark
+	}
+	cancel()
+	a.applyTheme()
+	a.build()
+	a.setupTray()
+	return a
+}
+
+// close cleans up after the window.
+func (a *app) close() {
+	if a.tray != nil {
+		a.tray.Hide()
+	}
+	if a.assets != "" {
+		os.RemoveAll(a.assets)
+	}
+}
+
+// begin starts following the backend's changes; the result stops that.
+func (a *app) begin() func() {
+	stop := a.m.Watch(func(k core.EventKind) {
+		mainthread.Start(func() { a.changed(k) })
+	})
+	tick := qt.NewQTimer2(a.win.QObject)
+	tick.OnTimeout(a.tick)
+	tick.Start(700)
+	a.watchSystemTheme()
+	a.tick()
+	return stop
+}
+
 func (a *app) build() {
 	a.win = qt.NewQMainWindow2()
-	a.win.SetWindowTitle("Universal Music Downloader")
-	a.win.Resize(1200, 760)
+	a.win.SetWindowTitle(appName)
+	a.win.Resize(1240, 800)
+	a.win.SetMinimumSize2(1000, 640)
+	a.onTheme(func() { a.win.SetWindowIcon(appIcon()) })
 
 	central := qt.NewQWidget2()
-	box := qt.NewQVBoxLayout(central)
-	box.SetContentsMargins(8, 6, 8, 6)
+	root := qt.NewQHBoxLayout(central)
+	root.SetContentsMargins(0, 0, 0, 0)
+	root.SetSpacing(0)
 
-	// The header: state, speeds, downloads at once, the bandwidth, pause.
-	top := qt.NewQHBoxLayout2()
-	a.header = qt.NewQLabel2()
-	a.header.SetTextFormat(qt.RichText)
-	a.pause = qt.NewQPushButton3("Pause")
-	a.pause.SetToolTip("Pause or resume everything (P)")
-	a.pause.OnClicked(func() { a.m.SetPaused(!a.m.Paused()); a.tick() })
-	top.AddWidget2(a.header.QWidget, 1)
-	top.AddWidget(a.pause.QWidget)
-	box.AddLayout(top.QLayout)
-	a.counts = qt.NewQLabel2()
-	a.counts.SetTextFormat(qt.RichText)
-	box.AddWidget(a.counts.QWidget)
-
-	a.tabs = qt.NewQTabWidget2()
-	a.queue = newQueueTab(a)
-	a.tabs.AddTab(a.queue.w, "&1 Queue")
-	a.search = newSearchTab(a)
-	a.tabs.AddTab(a.search.w, "&2 Search")
-	a.library = newLibraryTab(a)
-	a.tabs.AddTab(a.library.w, "&3 Library")
-	a.sources = newSourcesTab(a)
-	a.tabs.AddTab(a.sources.w, "&4 Sources")
-	a.tabs.AddTab(placeholder("Soulseek"), "&5 Soulseek")
-	a.settings = newSettingsTab(a)
-	a.tabs.AddTab(a.settings.w, "&6 Settings")
-	a.log = newLogTab(a)
-	a.tabs.AddTab(a.log.w, "&7 Log")
-	a.tabs.OnCurrentChanged(func(i int) {
-		switch i {
-		case 0:
-			a.queue.refresh(false)
-			a.queue.table.SetFocus()
-		case 1:
-			a.search.refresh()
-			a.search.find.SetFocus()
-		case 2:
-			a.library.refresh()
-		case 3:
-			a.sources.refresh()
-			a.sources.table.SetFocus()
-		}
-	})
-	box.AddWidget2(a.tabs.QWidget, 1)
+	a.stack = qt.NewQStackedWidget2()
+	root.AddWidget(a.buildSidebar())
+	root.AddWidget2(a.stack.QWidget, 1)
 	a.win.SetCentralWidget(central)
 
-	pauseKey := qt.NewQShortcut2(qt.NewQKeySequence2("Shift+P"), a.win.QObject)
-	pauseKey.OnActivated(func() { a.m.SetPaused(!a.m.Paused()); a.tick() })
-	quit := qt.NewQShortcut2(qt.NewQKeySequence2("Ctrl+Q"), a.win.QObject)
-	quit.OnActivated(func() { a.win.Close() })
+	a.queue = newQueueTab(a)
+	a.search = newSearchTab(a)
+	a.lists = newPlaylistsTab(a)
+	a.library = newLibraryTab(a)
+	a.sources = newSourcesTab(a)
+	a.soulseek = newSoulseekTab(a)
+	a.settings = newSettingsTab(a)
+	a.log = newLogTab(a)
+	for _, w := range []*qt.QWidget{a.queue.w, a.search.w, a.lists.w, a.library.w, a.sources.w, a.soulseek.w, a.settings.w, a.log.w, a.buildHelpPage()} {
+		a.stack.AddWidget(w)
+	}
+
+	a.toastLabel = qt.NewQLabel3("")
+	a.toastLabel.SetParent(central)
+	setProp(a.toastLabel.QWidget, "role", "toast")
+	a.toastLabel.Hide()
+	a.toastTimer = qt.NewQTimer2(a.win.QObject)
+	a.toastTimer.SetSingleShot(true)
+	a.toastTimer.OnTimeout(func() { a.toastLabel.Hide() })
+
+	a.show(pageDownloads)
+	a.shortcuts()
+	a.win.OnCloseEvent(func(super func(*qt.QCloseEvent), e *qt.QCloseEvent) {
+		if !a.quitting && a.m.Config().GUI.CloseToTray && a.tray != nil && a.tray.IsVisible() {
+			a.win.Hide()
+			e.Ignore()
+			return
+		}
+		super(e)
+		a.quitting = true
+		qt.QCoreApplication_Quit()
+	})
 }
 
-// placeholder stands in for a tab that comes in a later phase; the terminal app has it.
-func placeholder(name string) *qt.QWidget {
-	w := qt.NewQWidget2()
-	l := qt.NewQVBoxLayout(w)
-	label := qt.NewQLabel3(fmt.Sprintf("The %s tab comes in the next phase of the window.\n"+
-		"Everything in it works in the terminal app meanwhile (universal-music-downloader).", name))
-	label.SetAlignment(qt.AlignCenter)
-	l.AddWidget(label.QWidget)
-	return w
+func (a *app) buildSidebar() *qt.QWidget {
+	bar := qt.NewQFrame2()
+	bar.SetObjectName(*qt.NewQAnyStringView3("sidebar"))
+	bar.SetFixedWidth(224)
+	box := qt.NewQVBoxLayout(bar.QWidget)
+	box.SetContentsMargins(12, 16, 12, 14)
+	box.SetSpacing(2)
+
+	brand := hbox(6, 0, 0, 8)
+	brand.SetSpacing(10)
+	logo := qt.NewQLabel2()
+	a.onTheme(func() { logo.SetPixmap(logoPixmap(30)) })
+	brand.AddWidget(logo.QWidget)
+	name := text("Universal Music\nDownloader", "")
+	name.SetWordWrap(false)
+	name.SetStyleSheet("font-weight: 700;")
+	brand.AddWidget2(name.QWidget, 1)
+	box.AddLayout(brand.QLayout)
+
+	group := qt.NewQButtonGroup2(bar.QObject)
+	group.SetExclusive(true)
+	item := func(id pageID, icon, label, tip string) {
+		b := button("  "+label, "", func() { a.show(id) })
+		setProp(b.QWidget, "nav", "true")
+		b.SetCheckable(true)
+		b.SetToolTip(tip)
+		group.AddButton(b.QAbstractButton)
+		a.onTheme(func() { b.SetIcon(iconTwo(icon, 18, th.Text2, th.Accent)) })
+		b.SetIconSize(qt.NewQSize2(18, 18))
+		inner := qt.NewQHBoxLayout(b.QWidget)
+		inner.SetContentsMargins(0, 0, 8, 0)
+		inner.AddStretch()
+		badge := qt.NewQLabel3("")
+		setProp(badge.QWidget, "role", "badge")
+		badge.SetAttribute(qt.WA_TransparentForMouseEvents)
+		badge.SetFixedHeight(18)
+		badge.Hide()
+		inner.AddWidget3(badge.QWidget, 0, qt.AlignVCenter)
+		a.nav[id] = navItem{b, badge}
+		box.AddWidget(b.QWidget)
+	}
+	head := func(s string) {
+		l := qt.NewQLabel3(s)
+		setProp(l.QWidget, "role", "navhead")
+		box.AddWidget(l.QWidget)
+	}
+	head("MUSIC")
+	item(pageDownloads, "download", "Downloads", "Everything being downloaded, waiting or finished (Ctrl+1)")
+	item(pageFind, "search", "Find music", "Search for songs, albums and artists (Ctrl+2)")
+	item(pagePlaylists, "playlist", "Playlists", "Bring in your playlists from Spotify and other places (Ctrl+3)")
+	item(pageLibrary, "library", "My library", "The music you already have, so it isn't downloaded twice (Ctrl+4)")
+	head("CONNECTIONS")
+	item(pageSources, "sources", "Sources", "The services the app downloads from, and their order (Ctrl+5)")
+	item(pageSoulseek, "people", "Soulseek", "The Soulseek file-sharing network: search, chat, transfers (Ctrl+6)")
+	head("APP")
+	item(pageSettings, "settings", "Settings", "Where files go, quality, speed and the app's look (Ctrl+7)")
+	item(pageActivity, "activity", "Activity", "A running record of what the app is doing (Ctrl+8)")
+	item(pageHelp, "help", "Help", "How the app works, in plain words (F1)")
+
+	box.AddStretch()
+	box.AddWidget(rule().QWidget)
+	box.AddSpacing(8)
+	a.status = richText("", "")
+	box.AddWidget(a.status.QWidget)
+	a.speed = text("", "hint")
+	box.AddWidget(a.speed.QWidget)
+	a.free = text("", "muted")
+	box.AddWidget(a.free.QWidget)
+	box.AddSpacing(8)
+	a.pause = a.iconButton("pause", "Pause everything", "", "Stop all downloads for now (Shift+P). Nothing is lost.", a.togglePause)
+	box.AddWidget(a.pause.QWidget)
+	return bar.QWidget
 }
+
+func (a *app) shortcuts() {
+	add := func(key string, do func()) {
+		sc := qt.NewQShortcut2(qt.NewQKeySequence2(key), a.win.QObject)
+		sc.OnActivated(do)
+	}
+	for i := pageDownloads; i < pageHelp; i++ {
+		i := i
+		add(fmt.Sprintf("Ctrl+%d", int(i)+1), func() { a.show(i) })
+	}
+	add("F1", func() { a.show(pageHelp) })
+	add("Shift+P", a.togglePause)
+	add("Ctrl+Q", a.quit)
+	add("Ctrl+F", func() {
+		a.show(pageFind)
+		a.search.find.SetFocus()
+		a.search.find.SelectAll()
+	})
+}
+
+// quit leaves the app even when closing keeps it in the tray.
+func (a *app) quit() {
+	a.quitting = true
+	a.win.Close()
+	qt.QCoreApplication_Quit()
+}
+
+func (a *app) togglePause() {
+	a.m.SetPaused(!a.m.Paused())
+	a.tick()
+}
+
+// show switches to a page.
+func (a *app) show(id pageID) {
+	a.stack.SetCurrentIndex(int(id))
+	a.stack.CurrentWidget().SetFocus() // not to the first button on the page
+	a.nav[id].b.SetChecked(true)
+	switch id {
+	case pageDownloads:
+		a.queue.refresh(false)
+		a.queue.focus()
+	case pageFind:
+		a.search.find.SetFocus()
+	case pagePlaylists:
+		a.lists.refresh()
+	case pageLibrary:
+		a.library.refresh()
+	case pageSources:
+		a.sources.refresh()
+	case pageSoulseek:
+		a.soulseek.shown()
+	case pageSettings:
+		a.settings.load()
+	case pageActivity:
+		a.log.refresh()
+	}
+}
+
+func (a *app) current() pageID { return pageID(a.stack.CurrentIndex()) }
 
 // changed redraws what an event says changed.
 func (a *app) changed(k core.EventKind) {
 	switch k {
 	case core.EventQueue, core.EventConfig:
 		a.queue.changed()
-		switch a.tabs.CurrentIndex() {
-		case 1:
-			a.search.refresh()
-		case 2:
+		switch a.current() {
+		case pagePlaylists:
+			a.lists.refresh()
+		case pageLibrary:
 			a.library.refresh()
+		case pageSources:
+			if k == core.EventConfig {
+				a.sources.refresh()
+			}
+		case pageSettings:
+			if k == core.EventConfig {
+				a.settings.load()
+			}
+		}
+		if k == core.EventConfig {
+			a.applyTheme()
 		}
 	case core.EventSources:
-		if a.tabs.CurrentIndex() == 3 {
+		if a.current() == pageSources {
 			a.sources.refresh()
 		}
+	case core.EventSoulseek:
+		a.soulseek.changed()
 	case core.EventLog:
-		a.log.refresh()
+		if a.current() == pageActivity {
+			a.log.refresh()
+		}
 	}
 }
 
 // tick redraws what moves all the time.
 func (a *app) tick() {
 	o := a.m.Overview()
-	state := "<span style='color:#3a3'>● running</span>"
+	dot := func(color, label string) string {
+		return fmt.Sprintf("<span style='color:%s'>●</span>&nbsp; <b>%s</b>", color, label)
+	}
+	c := o.Counts
+	active := c[core.JobSearching] + c[core.JobReady] + c[core.JobDownloading]
+	todo := active + c[core.JobQueued] + c[core.JobWaiting]
+	state := dot(th.OK, "Ready")
 	switch {
 	case o.Paused:
-		state = "<span style='color:#c80'>❚❚ paused</span>"
+		state = dot(th.Warn, "Paused")
 	case !o.Ready:
-		state = "<span style='color:#c80'>… starting</span>"
+		state = dot(th.Warn, "Starting…")
+	case o.Importing:
+		state = dot(th.Warn, "Reading playlists…")
+	case active > 0:
+		state = dot(th.Accent, "Working")
+	case todo > 0:
+		state = dot(th.Info, "Waiting")
 	}
+	a.status.SetText(state)
 	if o.Paused {
-		a.pause.SetText("Resume")
+		a.pause.SetText(" Resume")
+		a.pause.SetIcon(iconOf("play", 16, th.Text))
 	} else {
-		a.pause.SetText("Pause")
+		a.pause.SetText(" Pause everything")
+		a.pause.SetIcon(iconOf("pause", 16, th.Text))
 	}
-	limit := "no limit"
+	if a.tray != nil {
+		if o.Paused {
+			a.trayStop.SetText("Resume")
+		} else {
+			a.trayStop.SetText("Pause everything")
+		}
+		a.tray.SetToolTip(fmt.Sprintf("%s: %d of %d tracks done", appName, c[core.JobDone]+c[core.JobInLibrary], o.Total))
+	}
+	speed := fmt.Sprintf("↓ %s", core.FmtRate(o.Own+o.Torrent))
 	if o.Cap > 0 {
-		limit = "cap " + core.FmtRate(o.Cap)
+		speed += " · limit " + core.FmtRate(o.Cap)
 	}
-	parts := []string{
-		"<b>Universal Music Downloader</b>", state,
-		fmt.Sprintf("⇣ %s (%s)", core.FmtRate(o.Own+o.Torrent), limit),
-		fmt.Sprintf("downloads %d/%d", o.DlUsed, o.DlLimit),
-		fmt.Sprintf("searches %d/%d", o.SrUsed, o.SrLimit),
+	if o.SlskOn && o.SlskUp > 0 {
+		speed += " · ↑ " + core.FmtRate(o.SlskUp)
 	}
-	if o.Torrent > 0 {
-		parts = append(parts, "torrents "+core.FmtRate(o.Torrent))
-	}
-	if o.SlskOn {
-		parts = append(parts, fmt.Sprintf("Soulseek ⇣ %s ⇡ %s", core.FmtRate(o.SlskDown), core.FmtRate(o.SlskUp)))
-	}
-	a.header.SetText(strings.Join(parts, " &nbsp;·&nbsp; "))
-	c := o.Counts
-	todo := c[core.JobQueued] + c[core.JobSearching] + c[core.JobReady] + c[core.JobDownloading] + c[core.JobWaiting]
-	free := ""
+	a.speed.SetText(speed)
+	a.free.SetVisible(o.Free > 0)
 	if o.Free > 0 {
-		free = " · " + core.FmtBytes(o.Free) + " free"
+		a.free.SetText(core.FmtBytes(o.Free) + " free on disk")
 	}
-	a.counts.SetText(fmt.Sprintf("%d tracks &nbsp; <span style='color:#3a3'>✓ %d downloaded</span> &nbsp; "+
-		"<span style='color:#38c'>◆ %d in library</span> &nbsp; · %d to do &nbsp; <span style='color:#c33'>✗ %d not found</span>%s",
-		o.Total, c[core.JobDone], c[core.JobInLibrary], todo, c[core.JobFailed], free))
-	a.queue.tick()
+	a.setBadge(pageDownloads, active)
+	a.queue.tick(o)
+	a.soulseek.tick()
+	a.notify(o, todo)
 }
 
+func (a *app) setBadge(id pageID, n int) {
+	b := a.nav[id].badge
+	b.SetVisible(n > 0)
+	if n > 0 {
+		b.SetText(fmt.Sprint(n))
+	}
+}
+
+// --- tray and notifications ---------------------------------------------------------------------
+
+func (a *app) setupTray() {
+	if !qt.QSystemTrayIcon_IsSystemTrayAvailable() {
+		return
+	}
+	a.tray = qt.NewQSystemTrayIcon4(appIcon(), a.win.QObject)
+	menu := qt.NewQMenu2()
+	a.trayShow = menu.AddActionWithText("Open " + appName)
+	a.trayShow.OnTriggered(a.raise)
+	a.trayStop = menu.AddActionWithText("Pause everything")
+	a.trayStop.OnTriggered(a.togglePause)
+	menu.AddSeparator()
+	menu.AddActionWithText("Quit").OnTriggered(a.quit)
+	a.tray.SetContextMenu(menu)
+	a.tray.OnActivated(func(r qt.QSystemTrayIcon__ActivationReason) {
+		if r == qt.QSystemTrayIcon__Trigger || r == qt.QSystemTrayIcon__DoubleClick {
+			if a.win.IsVisible() && a.win.IsActiveWindow() {
+				a.win.Hide()
+			} else {
+				a.raise()
+			}
+		}
+	})
+	a.tray.Show()
+}
+
+func (a *app) raise() {
+	a.win.Show()
+	a.win.ShowNormal()
+	a.win.Raise()
+	a.win.ActivateWindow()
+}
+
+// notify tells the desktop when the queue has finished and when a private message comes.
+func (a *app) notify(o core.Overview, todo int) {
+	if todo > 0 {
+		a.hadWork = true
+	}
+	unread := a.m.SoulseekUnread()
+	if a.tray != nil && !a.m.Config().GUI.NoNotify {
+		if a.hadWork && todo == 0 && o.Ready && !o.Importing {
+			c := o.Counts
+			a.tray.ShowMessage2("Downloads finished", fmt.Sprintf("%d downloaded, %d already in your library, %d not found.", c[core.JobDone], c[core.JobInLibrary], c[core.JobFailed]))
+		}
+		if unread > a.unread && !a.win.IsActiveWindow() {
+			a.tray.ShowMessage2("Soulseek", "You have a new private message.")
+		}
+	}
+	if a.hadWork && todo == 0 && o.Ready && !o.Importing {
+		a.hadWork = false
+	}
+	a.unread = unread
+	a.setBadge(pageSoulseek, unread)
+}
+
+// --- talking to you -----------------------------------------------------------------------------
+
 // confirm asks a yes/no question.
-func (a *app) confirm(title, text string) bool {
-	return qt.QMessageBox_Question(a.win.QWidget, title, text) == qt.QMessageBox__Yes
+func (a *app) confirm(title, body string) bool {
+	return qt.QMessageBox_Question(a.win.QWidget, title, body) == qt.QMessageBox__Yes
 }
 
 // ask asks for a line of text; ok is false when cancelled.
@@ -203,14 +500,51 @@ func (a *app) ask(title, label, value string) (string, bool) {
 	d.SetWindowTitle(title)
 	d.SetLabelText(label)
 	d.SetTextValue(value)
-	d.Resize(560, 120)
+	d.Resize(520, 130)
 	if d.Exec() != int(qt.QDialog__Accepted) {
 		return "", false
 	}
-	return d.TextValue(), true
+	return strings.TrimSpace(d.TextValue()), true
 }
 
-// message shows a short note in a box.
-func (a *app) message(title, text string) {
-	qt.QMessageBox_Information(a.win.QWidget, title, text)
+// message shows a short note in a box; for things you have to read.
+func (a *app) message(title, body string) {
+	qt.QMessageBox_Information(a.win.QWidget, title, body)
 }
+
+// toast says something in passing, at the bottom of the window.
+func (a *app) toast(s string) {
+	l := a.toastLabel
+	l.SetText(s)
+	l.SetMinimumWidth(0)
+	l.SetMaximumWidth(16777215)
+	l.AdjustSize()
+	parent := a.win.CentralWidget()
+	l.SetFixedWidth(max(min(l.Width(), parent.Width()-260), 120))
+	l.Move(224+(parent.Width()-224-l.Width())/2, parent.Height()-l.Height()-22)
+	l.Raise()
+	l.Show()
+	a.toastTimer.Start(3200)
+}
+
+// logoPixmap is the app's mark: a note on the accent color.
+func logoPixmap(size int) *qt.QPixmap {
+	const scale = 2
+	pm := qt.NewQPixmap2(size*scale, size*scale)
+	pm.FillWithFillColor(qt.NewQColor2(qt.Transparent))
+	p := qt.NewQPainter2(pm.QPaintDevice)
+	p.SetRenderHint2(qt.QPainter__Antialiasing, true)
+	p.SetRenderHint2(qt.QPainter__SmoothPixmapTransform, true)
+	fillRound(p, 0, 0, size*scale, size*scale, float64(size*scale)/4.4, th.Accent)
+	inner := size * 62 / 100
+	note := iconPixmap("logo", inner, th.OnAccent)
+	off := (size - inner) * scale / 2
+	p.Scale(scale, scale)
+	p.DrawPixmap9(off/scale, off/scale, note)
+	p.End()
+	p.Delete()
+	pm.SetDevicePixelRatio(scale)
+	return pm
+}
+
+func appIcon() *qt.QIcon { return qt.NewQIcon2(logoPixmap(64)) }

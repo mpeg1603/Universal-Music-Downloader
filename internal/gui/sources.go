@@ -13,226 +13,257 @@ import (
 	"github.com/mappu/miqt/qt6/mainthread"
 )
 
-// The Sources tab: the sources in the order they're tried, their state and counts, and each
-// one's settings window (route, account, tokens, cookies, indexers, Soulseek).
+// The Sources page: the services music comes from, in the order they're tried, each with a
+// switch, what it's doing, and what it takes to set up.
 type sourcesTab struct {
-	a      *app
-	w      *qt.QWidget
-	table  *qt.QTableWidget
-	detail *qt.QLabel
-	rows   []core.SourceStatus
+	a     *app
+	w     *qt.QWidget
+	cards []*sourceCard
+	box   *qt.QVBoxLayout
+	order string // the names in order the cards were built for
+	paste *qt.QPushButton
+	rows  []core.SourceStatus
+}
+
+type sourceCard struct {
+	name                  string
+	w                     *qt.QFrame
+	toggle                *qt.QCheckBox
+	title, state, quality *qt.QLabel
+	blurb, problem, stats *qt.QLabel
+	detail                *qt.QLabel
+	detailBtn             *qt.QPushButton
+	up, down              *qt.QPushButton
+	pause                 *qt.QPushButton
+	open                  bool
 }
 
 func newSourcesTab(a *app) *sourcesTab {
-	t := &sourcesTab{a: a, w: qt.NewQWidget2()}
-	box := qt.NewQVBoxLayout(t.w)
-	box.SetContentsMargins(0, 4, 0, 0)
-	t.table = qt.NewQTableWidget2()
-	heads := []string{"#", "On", "Source", "Route", "Status", "Searched", "Found", "Downloaded", "Failed"}
-	t.table.SetColumnCount(len(heads))
-	t.table.SetHorizontalHeaderLabels(heads)
-	t.table.SetSelectionBehavior(qt.QAbstractItemView__SelectRows)
-	t.table.SetSelectionMode(qt.QAbstractItemView__SingleSelection)
-	t.table.SetEditTriggers(qt.QAbstractItemView__NoEditTriggers)
-	t.table.VerticalHeader().Hide()
-	h := t.table.HorizontalHeader()
-	h.SetSectionResizeMode2(4, qt.QHeaderView__Stretch)
-	for i, w := range []int{30, 34, 130, 140} {
-		t.table.SetColumnWidth(i, w)
-	}
-	t.table.OnCurrentCellChanged(func(int, int, int, int) { t.showDetail() })
-	t.table.OnCellDoubleClicked(func(int, int) { t.settings() })
-	box.AddWidget2(t.table.QWidget, 2)
-
-	buttons := qt.NewQHBoxLayout2()
-	add := func(text, tip string, do func()) {
-		b := qt.NewQPushButton3(text)
-		b.SetToolTip(tip)
-		b.OnClicked(do)
-		buttons.AddWidget(b.QWidget)
-	}
-	add("Settings…", "Route, account, tokens, cookies (Enter)", t.settings)
-	add("On / off", "Use this source or not (space)", func() {
-		if s := t.selected(); s != nil {
-			t.try(t.a.m.SetSourceEnabled(s.Name, !s.Enabled))
-		}
-	})
-	add("Move up", "Tried earlier (K)", func() { t.move(-1) })
-	add("Move down", "Tried later (J)", func() { t.move(1) })
-	add("Pause / resume", "Stop using it for now, or use it again right away after a pause (P)", func() {
-		if s := t.selected(); s != nil {
-			t.a.m.PauseSource(s.Name, !s.Paused && s.Until.IsZero())
-			t.refresh()
-		}
-	})
-	add("Paste Bandcamp links…", "Download links from Bandcamp's emails", t.pasteBandcampLinks)
-	buttons.AddStretch()
-	box.AddLayout(buttons.QLayout)
-
-	t.detail = qt.NewQLabel2()
-	t.detail.SetTextFormat(qt.RichText)
-	t.detail.SetWordWrap(true)
-	t.detail.SetAlignment(qt.AlignTop | qt.AlignLeft)
-	t.detail.SetTextInteractionFlags(qt.TextSelectableByMouse)
-	scroll := qt.NewQScrollArea2()
-	scroll.SetWidgetResizable(true)
-	scroll.SetWidget(t.detail.QWidget)
-	box.AddWidget2(scroll.QWidget, 3)
-
-	for key, do := range map[string]func(){"Return": t.settings, "Space": func() {
-		if s := t.selected(); s != nil {
-			t.try(t.a.m.SetSourceEnabled(s.Name, !s.Enabled))
-		}
-	}, "K": func() { t.move(-1) }, "J": func() { t.move(1) }} {
-		sc := qt.NewQShortcut2(qt.NewQKeySequence2(key), t.table.QObject)
-		sc.SetContext(qt.WidgetShortcut)
-		sc.OnActivated(do)
-	}
+	t := &sourcesTab{a: a}
+	p := a.newPage("Sources", "Where your music comes from. For each song the app tries these from top to bottom and takes the first good copy.", "sources")
+	t.w = p.w
+	t.paste = a.iconButton("link", "Paste Bandcamp links", "", "Some releases are waiting for the links Bandcamp emailed you", t.pasteBandcampLinks)
+	t.paste.Hide()
+	p.actions.AddWidget(t.paste.QWidget)
+	scroll, box, _ := scrolling()
+	box.SetSpacing(8)
+	t.box = box
+	p.box.AddWidget2(scroll.QWidget, 1)
+	box.AddStretch()
 	t.refresh()
 	return t
 }
 
+func (t *sourcesTab) buildCard(name string) *sourceCard {
+	a := t.a
+	c := &sourceCard{name: name}
+	info := sourceInfos[name]
+	f, box := card()
+	c.w = f
+	box.SetContentsMargins(14, 11, 12, 11)
+	box.SetSpacing(3)
+
+	top := hbox()
+	top.SetSpacing(10)
+	c.toggle = newToggle("Use this source", func(on bool) { t.try(a.m.SetSourceEnabled(name, on)) })
+	top.AddWidget(c.toggle.QWidget)
+	c.title = qt.NewQLabel3(core.SourceLabels[name])
+	setProp(c.title.QWidget, "role", "h2")
+	top.AddWidget(c.title.QWidget)
+	c.state = pill("", "off")
+	top.AddWidget(c.state.QWidget)
+	if info.quality != "" {
+		c.quality = pill(info.quality, "accent")
+		top.AddWidget(c.quality.QWidget)
+	}
+	top.AddStretch()
+	c.up = a.iconButton("arrow-up", "", "ghost", "Try this source earlier", func() { t.move(name, -1) })
+	c.down = a.iconButton("arrow-down", "", "ghost", "Try this source later", func() { t.move(name, 1) })
+	c.pause = a.iconButton("pause", "", "ghost", "Stop using it for now, or use it again right away after a pause", func() {
+		for _, s := range t.rows {
+			if s.Name == name {
+				a.m.PauseSource(name, !s.Paused && s.Until.IsZero())
+			}
+		}
+		t.refresh()
+	})
+	top.AddWidget(c.up.QWidget)
+	top.AddWidget(c.down.QWidget)
+	top.AddWidget(c.pause.QWidget)
+	setup := button("Set up…", "", func() { t.settings(name) })
+	top.AddWidget(setup.QWidget)
+	box.AddLayout(top.QLayout)
+
+	indent := func(l *qt.QLabel) {
+		l.SetContentsMargins(48, 0, 0, 0)
+		box.AddWidget(l.QWidget)
+	}
+	c.blurb = text(info.blurb+" "+info.needs+".", "hint")
+	indent(c.blurb)
+	c.problem = text("", "error")
+	c.problem.SetTextFormat(qt.PlainText)
+	c.problem.Hide()
+	indent(c.problem)
+	statRow := hbox(48, 0, 0, 0)
+	statRow.SetSpacing(8)
+	c.stats = oneLine("", "muted")
+	statRow.AddWidget2(c.stats.QWidget, 1)
+	c.detailBtn = button("More", "link", func() {
+		c.open = !c.open
+		t.refresh()
+	})
+	statRow.AddWidget(c.detailBtn.QWidget)
+	box.AddLayout(statRow.QLayout)
+	c.detail = richText("", "hint")
+	c.detail.Hide()
+	indent(c.detail)
+	return c
+}
+
 func (t *sourcesTab) try(err error) {
 	if err != nil {
-		t.a.message("Can't do that", err.Error())
+		t.a.message("That didn't work", err.Error())
 	}
 	t.refresh()
 }
 
-func (t *sourcesTab) selected() *core.SourceStatus {
-	if r := t.table.CurrentRow(); r >= 0 && r < len(t.rows) {
-		return &t.rows[r]
-	}
-	return nil
-}
+func (t *sourcesTab) move(name string, delta int) { t.try(t.a.m.MoveSource(name, delta)) }
 
-func (t *sourcesTab) move(delta int) {
-	s := t.selected()
-	if s == nil {
-		return
-	}
-	r := t.table.CurrentRow()
-	t.try(t.a.m.MoveSource(s.Name, delta))
-	if j := r + delta; j >= 0 && j < len(t.rows) {
-		t.table.SelectRow(j)
-	}
-}
-
-func sourceState(s core.SourceStatus) (string, string) {
+// sourceState is a source's state, short, and in full if there's more to say.
+func sourceState(s core.SourceStatus) (state, kind, more string) {
 	switch {
 	case !s.Enabled:
-		return "off", "#888"
+		return "Off", "off", ""
 	case s.Problem != "":
-		return s.Problem, "#c33"
+		return "Needs attention", "bad", s.Problem
 	case s.Paused:
-		return "paused by you", "#b90"
+		return "Paused by you", "warn", ""
 	case !s.Until.IsZero():
-		return "paused until " + s.Until.Format("15:04") + ": " + s.Reason, "#d70"
+		return "Resting until " + s.Until.Format("15:04"), "warn", s.Reason
 	case s.Note != "":
-		return "ok, but " + s.Note, "#b90"
+		return "Working", "ok", s.Note
 	}
-	return "ok", "#3a3"
+	return "Working", "ok", ""
 }
 
+// refresh redraws the sources; the cards are rebuilt only when the order changed.
 func (t *sourcesTab) refresh() {
-	r := t.table.CurrentRow()
 	t.rows = t.a.m.SourceStatus()
-	t.table.SetRowCount(len(t.rows))
+	pending, _ := t.a.m.BandcampMailStatus()
+	t.paste.SetVisible(pending > 0)
+	var names []string
+	for _, s := range t.rows {
+		names = append(names, s.Name)
+	}
+	if order := strings.Join(names, ","); order != t.order {
+		t.order = order
+		byName := map[string]*sourceCard{}
+		for _, c := range t.cards {
+			byName[c.name] = c
+			t.box.RemoveWidget(c.w.QWidget)
+		}
+		t.cards = t.cards[:0]
+		for i, n := range names {
+			c := byName[n]
+			if c == nil {
+				c = t.buildCard(n)
+			}
+			t.cards = append(t.cards, c)
+			t.box.InsertWidget(i, c.w.QWidget)
+		}
+	}
 	for i, s := range t.rows {
-		on := "✓"
-		if !s.Enabled {
-			on = "·"
+		c := t.cards[i]
+		setToggle(c.toggle, s.Enabled)
+		c.toggle.Update()
+		state, kind, more := sourceState(s)
+		setPill(c.state, state, kind)
+		c.problem.SetVisible(more != "")
+		if more != "" {
+			c.problem.SetText(more)
 		}
-		state, color := sourceState(s)
-		st := cell(state)
-		st.SetForeground(qt.NewQBrush3(qt.NewQColor6(color)))
-		st.SetToolTip(state)
-		t.table.SetItem(i, 0, number(i+1))
-		t.table.SetItem(i, 1, cell(on))
-		t.table.SetItem(i, 2, cell(s.Label))
-		t.table.SetItem(i, 3, cell(core.ParseRoute(s.Route).Short()))
-		t.table.SetItem(i, 4, st)
-		for c, n := range []int{s.Searches, s.Found, s.Downloads, s.DlFails} {
-			t.table.SetItem(i, 5+c, number(n))
+		c.up.SetEnabled(i > 0)
+		c.down.SetEnabled(i < len(t.rows)-1)
+		c.pause.SetVisible(s.Enabled)
+		if s.Paused || !s.Until.IsZero() {
+			c.pause.SetIcon(iconOf("play", 16, th.Text2))
+		} else {
+			c.pause.SetIcon(iconOf("pause", 16, th.Text2))
+		}
+		bits := []string{fmt.Sprintf("Position %d", i+1), routeWords[core.ParseRoute(s.Route).Kind]}
+		if s.Searches > 0 {
+			bits = append(bits, fmt.Sprintf("searched %d, found %d, downloaded %d", s.Searches, s.Found, s.Downloads))
+			if s.DlFails > 0 {
+				bits = append(bits, fmt.Sprintf("%d failed", s.DlFails))
+			}
+		}
+		c.stats.SetText(strings.Join(bits, "  ·  "))
+		extra := t.detailHTML(s)
+		c.detailBtn.SetVisible(extra != "")
+		if c.open && extra != "" {
+			c.detail.SetText(extra)
+			c.detail.Show()
+			c.detailBtn.SetText("Less")
+		} else {
+			c.detail.Hide()
+			c.detailBtn.SetText("More")
 		}
 	}
-	if r < 0 && len(t.rows) > 0 {
-		r = 0
-	}
-	if r >= 0 && r < len(t.rows) {
-		t.table.SelectRow(r)
-	}
-	t.showDetail()
 }
 
-func (t *sourcesTab) showDetail() {
-	s := t.selected()
-	if s == nil {
-		return
-	}
+// detailHTML is what there's to say beyond the card itself: Bandcamp's mailbox, torrent sites.
+func (t *sourcesTab) detailHTML(s core.SourceStatus) string {
 	e := html.EscapeString
+	span := func(color, s string) string { return "<span style='color:" + color + "'>" + s + "</span>" }
 	var b strings.Builder
-	fmt.Fprintf(&b, "<b>%s</b> · route: %s<br>%s", e(s.Label), e(core.DescribeRoute(s.Route)), e(core.SourceHelp[s.Name]))
-	if s.Problem != "" {
-		fmt.Fprintf(&b, "<p style='color:#c33'>%s</p>", e(s.Problem))
-	}
-	if s.Note != "" {
-		fmt.Fprintf(&b, "<p style='color:#b90'>%s</p>", e(s.Note))
-	}
-	if s.Reason != "" {
-		fmt.Fprintf(&b, "<p style='color:#d70'>Paused until %s: %s (Pause / resume uses it again now)</p>", s.Until.Format("15:04"), e(s.Reason))
-	}
 	switch s.Name {
 	case "bandcamp":
 		bc := t.a.m.Config().Bandcamp
-		b.WriteString("<p><b>Releases that ask for an email address</b><br>")
+		b.WriteString("<b>Releases that ask for an email address</b><br>")
 		if bc.Email == "" {
-			b.WriteString("skipped: enter your email address in the settings.")
+			b.WriteString("Skipped until you enter your email address in Set up.")
 		} else {
 			pending, problem := t.a.m.BandcampMailStatus()
-			from := map[string]string{"paste": "you paste them (Paste Bandcamp links)", "gmail": "read from Gmail (" + core.FirstNonEmpty(bc.GmailAccount, "not signed in") + ")",
+			from := map[string]string{"paste": "you paste them here (Paste Bandcamp links)", "gmail": "read from Gmail (" + core.FirstNonEmpty(bc.GmailAccount, "not signed in") + ")",
 				"imap": "read from " + bc.IMAPHost}[bc.MailboxMode()]
 			fmt.Fprintf(&b, "Bandcamp emails the links to %s; %s.", e(bc.Email), e(from))
 			if pending > 0 {
-				fmt.Fprintf(&b, "<br><span style='color:#b90'>%d releases waiting for their link</span>", pending)
+				b.WriteString("<br>" + span(th.Warn, fmt.Sprintf("%d releases are waiting for their link", pending)))
 			}
 			if problem != "" {
-				fmt.Fprintf(&b, "<br><span style='color:#c33'>Mailbox: %s</span>", e(problem))
+				b.WriteString("<br>" + span(th.Bad, "Mailbox: "+e(problem)))
 			}
 		}
-		b.WriteString("</p>")
 	case "torrent":
 		feeds := t.a.m.TorrentFeeds()
-		if len(feeds) > 0 {
-			b.WriteString("<p><b>Indexers</b><br>")
+		if len(feeds) == 0 {
+			return ""
 		}
+		b.WriteString("<b>Torrent sites</b><br>")
 		for _, f := range feeds {
-			state := "<span style='color:#3a3'>ok</span>"
+			state := span(th.OK, "ok")
 			if !f.OK {
-				state = "<span style='color:#d70'>left out until " + f.Until.Format("15:04") + "</span>"
+				state = span(th.Warn, "left out until "+f.Until.Format("15:04"))
 			}
-			fmt.Fprintf(&b, "%s &nbsp;%s · %d searches, %d errors", state, e(f.Name), f.Searches, f.Errors)
+			fmt.Fprintf(&b, "%s &nbsp;%s: %d searches, %d errors", state, e(f.Name), f.Searches, f.Errors)
 			if f.Avg > 0 {
 				fmt.Fprintf(&b, ", answers in %.1fs", f.Avg.Seconds())
 			}
 			if f.LastErr != "" {
-				fmt.Fprintf(&b, "<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#888'>last error: %s</span>", e(core.FitWidth(f.LastErr, 160)))
+				b.WriteString("<br>&nbsp;&nbsp;&nbsp;&nbsp;" + span(th.Text3, "last error: "+e(core.FitWidth(f.LastErr, 160))))
 			}
 			b.WriteString("<br>")
 		}
 	}
-	t.detail.SetText(b.String())
+	return b.String()
 }
 
-// --- settings windows -------------------------------------------------------------------------
+// --- setting up a source ------------------------------------------------------------------------
 
-func (t *sourcesTab) settings() {
-	s := t.selected()
-	if s == nil {
-		return
-	}
+func (t *sourcesTab) settings(name string) {
 	c := t.a.m.Config()
-	switch s.Name {
+	label := core.SourceLabels[name]
+	switch name {
 	case "bandcamp":
 		t.bandcampSettings()
 		t.refresh()
@@ -242,34 +273,40 @@ func (t *sourcesTab) settings() {
 		t.refresh()
 		return
 	}
-	f := newForm(t.a, s.Label+" settings", 720)
-	f.route(s.Name, c.Source(s.Name).Route)
-	switch s.Name {
+	f := newForm(t.a, label, sourceInfos[name].blurb, 700)
+	switch name {
 	case "youtube", "youtube_music", "soundcloud":
-		f.text("Cookies file (cookies.txt)", c.Cookies, func(c *core.Config, v string) error { c.Cookies = v; return nil })
 		idx := 0
 		for i, b := range core.Browsers {
 			if b == c.CookiesFromBrowser {
 				idx = i
 			}
 		}
-		f.combo("Cookies from browser", append([]string{"(none)"}, core.Browsers[1:]...), idx, func(c *core.Config, i int) {
+		f.combo("Use my login from", append([]string{"Nowhere (no login)"}, browserNames()...), idx, func(c *core.Config, i int) {
 			if i >= 0 && i < len(core.Browsers) {
 				c.CookiesFromBrowser = core.Browsers[i]
 			}
 		})
+		f.note("If YouTube says “sign in to confirm you're not a bot”, pick the browser you're signed in to YouTube with. " +
+			"Your browser and cookies are only read, and only YouTube's, Google's and SoundCloud's.")
+		f.collapsed("Advanced", c.Cookies != "" || c.YtDlpPath != "")
+		f.text("Cookies file (cookies.txt)", c.Cookies, func(c *core.Config, v string) error { c.Cookies = v; return nil })
 		f.number("Seconds between YouTube requests", c.YouTubePace, func(c *core.Config, v float64) { c.YouTubePace = max(0, v) })
-		f.text("yt-dlp program (empty: download it automatically)", c.YtDlpPath, func(c *core.Config, v string) error { c.YtDlpPath = v; return nil })
-		f.note("Your browser's YouTube login (cookies) is the best fix for \"sign in to confirm you're not a bot\". They're read " +
-			"from the browser every 10 minutes (YouTube's, Google's and SoundCloud's only); your browser and your cookies file are never written to.")
+		f.text("yt-dlp program (empty: fetch it automatically)", c.YtDlpPath, func(c *core.Config, v string) error { c.YtDlpPath = v; return nil })
+		f.route(name, c.Source(name).Route)
 	case "torrent":
-		f.check("Built-in indexers (Jackett's public sites, RuTracker.org with your account)", !c.Indexers.NoBuiltin, func(c *core.Config, v bool) { c.Indexers.NoBuiltin = !v })
-		f.text("FlareSolverr address (for Cloudflare's checks)", c.Indexers.FlareSolverr, func(c *core.Config, v string) error { c.Indexers.FlareSolverr = v; return nil })
-		f.text("Jackett / Prowlarr address(es), optional", strings.Join(c.Torznab.Feeds, ", "), func(c *core.Config, v string) error {
+		f.check("Search the built-in torrent sites", !c.Indexers.NoBuiltin, func(c *core.Config, v bool) { c.Indexers.NoBuiltin = !v })
+		f.button("Choose torrent sites…", func() { t.a.pickIndexers() })
+		f.head("Optional helper programs")
+		f.note("The app searches the sites on its own. <b>FlareSolverr</b> gets past Cloudflare's “checking your browser” pages. " +
+			"<b>Jackett</b> and <b>Prowlarr</b> add private trackers you have accounts on.")
+		f.text("FlareSolverr address", c.Indexers.FlareSolverr, func(c *core.Config, v string) error { c.Indexers.FlareSolverr = v; return nil })
+		f.text("Jackett / Prowlarr address", strings.Join(c.Torznab.Feeds, ", "), func(c *core.Config, v string) error {
 			c.Torznab.Feeds = core.SplitList(v)
 			return nil
 		})
 		f.secret("Jackett / Prowlarr API key", c.Torznab.Key, func(c *core.Config, v string) { c.Torznab.Key = v })
+		f.collapsed("Advanced", false)
 		dur := func(label string, d core.Duration, set func(*core.Config, core.Duration)) {
 			f.text(label, time.Duration(d).String(), func(c *core.Config, v string) error {
 				x, err := time.ParseDuration(v)
@@ -280,33 +317,42 @@ func (t *sourcesTab) settings() {
 				return nil
 			})
 		}
-		dur("Give up on an indexer search after", c.IndexerTimeout, func(c *core.Config, d core.Duration) { c.IndexerTimeout = d })
-		dur("Give up on a torrent download after", c.TorrentTimeout, func(c *core.Config, d core.Duration) { c.TorrentTimeout = d })
-		f.button("Choose indexers…", func() { t.a.pickIndexers() })
-		f.note("Jackett, Prowlarr and FlareSolverr are optional programs: the app searches the sites itself. FlareSolverr gets " +
-			"past Cloudflare's \"checking your browser\" pages; Jackett or Prowlarr add private trackers you have accounts on. TORRENTS.md explains them.")
+		dur("Give up on a site's search after", c.IndexerTimeout, func(c *core.Config, d core.Duration) { c.IndexerTimeout = d })
+		dur("Give up on a torrent after", c.TorrentTimeout, func(c *core.Config, d core.Duration) { c.TorrentTimeout = d })
+		f.route(name, c.Source(name).Route)
 	case "vk":
 		f.secret("Token", c.VKToken, func(c *core.Config, v string) { c.VKToken = v })
 		f.button("Log in to get a token…", func() { f.d.Reject(); t.vkLogin() })
+		f.route(name, c.Source(name).Route)
 	case "yandex":
-		f.secret("OAuth token", c.YandexToken, func(c *core.Config, v string) { c.YandexToken = v })
-		f.note("Open <a href='" + core.YandexTokenURL + "'>Yandex's token page</a> in your browser, log in, then copy the access_token=… value from the address bar.")
+		f.secret("Token", c.YandexToken, func(c *core.Config, v string) { c.YandexToken = v })
+		f.note("Open <a href='" + core.YandexTokenURL + "'>Yandex's token page</a> in your browser, log in, then copy the access_token=… part from the address bar.")
+		f.route(name, c.Source(name).Route)
+	default:
+		f.route(name, c.Source(name).Route)
 	}
 	f.run()
 	t.refresh()
 }
 
+// browserNames are the browsers logins can come from.
+func browserNames() []string {
+	var out []string
+	for _, b := range core.Browsers[1:] {
+		out = append(out, capitalized(b))
+	}
+	return out
+}
+
 var (
 	mailboxModes  = []string{"paste", "gmail", "imap"}
-	mailboxLabels = []string{"I paste them from the emails (no mailbox access)", "Gmail: sign in with Google (read only)", "IMAP mailbox (Yandex, Mail.ru, …)"}
+	mailboxLabels = []string{"I'll paste them myself (no mailbox access)", "Gmail: sign in with Google (read only)", "An IMAP mailbox (Yandex, Mail.ru, …)"}
 )
 
 func (t *sourcesTab) bandcampSettings() {
 	c := t.a.m.Config()
 	d := c.Bandcamp
-	f := newForm(t.a, "Bandcamp settings", 760)
-	f.note("<b>Name-your-price releases that ask for an email address</b>: Bandcamp emails you the download link.")
-	f.route("bandcamp", c.Source("bandcamp").Route)
+	f := newForm(t.a, "Bandcamp", "Free and name-your-price releases are downloaded by themselves. Some artists ask for an email address first: Bandcamp then emails you a download link.", 740)
 	f.text("Your email address", d.Email, func(c *core.Config, v string) error { c.Bandcamp.Email = v; return nil })
 	f.text("Country", d.Country, func(c *core.Config, v string) error { c.Bandcamp.Country = v; return nil })
 	f.text("Postcode", d.Postcode, func(c *core.Config, v string) error { c.Bandcamp.Postcode = v; return nil })
@@ -316,7 +362,7 @@ func (t *sourcesTab) bandcampSettings() {
 			cur = i
 		}
 	}
-	mode := f.combo("Download links from", mailboxLabels, cur, func(c *core.Config, i int) {
+	mode := f.combo("Links from those emails", mailboxLabels, cur, func(c *core.Config, i int) {
 		if i >= 0 && i < len(mailboxModes) {
 			c.Bandcamp.Mailbox = mailboxModes[i]
 		}
@@ -324,18 +370,18 @@ func (t *sourcesTab) bandcampSettings() {
 	f.head("Gmail")
 	id := f.text("OAuth client ID", d.GmailClientID, func(c *core.Config, v string) error { c.Bandcamp.GmailClientID = v; return nil })
 	secret := f.secret("OAuth client secret", d.GmailClientSecret, func(c *core.Config, v string) { c.Bandcamp.GmailClientSecret = v })
-	state := "not signed in"
+	state := "Not signed in."
 	if d.GmailToken != "" {
-		state = "signed in as " + core.FirstNonEmpty(d.GmailAccount, "?")
+		state = "Signed in as " + core.FirstNonEmpty(d.GmailAccount, "?") + "."
 	}
-	f.note("Gmail: " + state + ". You sign in on Google's page in your browser and allow read-only access; Google wants your own " +
-		"(free) OAuth client for that: README → \"Gmail\" shows how to make one.")
-	f.head("IMAP")
-	imapHost := f.text("IMAP server (host:port)", d.IMAPHost, func(c *core.Config, v string) error { c.Bandcamp.IMAPHost = v; return nil })
-	imapUser := f.text("IMAP user", d.IMAPUser, func(c *core.Config, v string) error { c.Bandcamp.IMAPUser = v; return nil })
-	imapPass := f.secret("IMAP password", d.IMAPPass, func(c *core.Config, v string) { c.Bandcamp.IMAPPass = v })
-	f.note("Yandex: imap.yandex.ru:993 with an app password (id.yandex.ru → Security → App passwords) and IMAP on in Mail settings → " +
-		"Email clients. Mail.ru: imap.mail.ru:993 with an app password. Only read: nothing is marked, moved or deleted.")
+	f.note(state + " You sign in on Google's page in your browser and allow read-only access. Google asks for your own free OAuth client for that; the README's “Gmail” section shows how to make one.")
+	f.head("IMAP mailbox")
+	imapHost := f.text("Server (host:port)", d.IMAPHost, func(c *core.Config, v string) error { c.Bandcamp.IMAPHost = v; return nil })
+	imapUser := f.text("User", d.IMAPUser, func(c *core.Config, v string) error { c.Bandcamp.IMAPUser = v; return nil })
+	imapPass := f.secret("Password", d.IMAPPass, func(c *core.Config, v string) { c.Bandcamp.IMAPPass = v })
+	f.note("Yandex: imap.yandex.ru:993 with an app password (id.yandex.ru → Security → App passwords), and IMAP on in Mail settings. " +
+		"Mail.ru: imap.mail.ru:993 with an app password. The mailbox is only read: nothing is marked, moved or deleted.")
+	f.route("bandcamp", c.Source("bandcamp").Route)
 	enable := func(i int) {
 		id.SetEnabled(i == 1)
 		secret.SetEnabled(i == 1)
@@ -403,72 +449,73 @@ func (t *sourcesTab) gmailSignIn() {
 // pasteBandcampLinks takes download links copied from Bandcamp's emails.
 func (t *sourcesTab) pasteBandcampLinks() {
 	d := qt.NewQDialog(t.a.win.QWidget)
-	d.SetWindowTitle("Paste Bandcamp download links")
-	d.Resize(720, 380)
+	d.SetWindowTitle("Paste Bandcamp links")
+	d.Resize(680, 380)
 	box := qt.NewQVBoxLayout(d.QWidget)
-	intro := "Paste the download links from Bandcamp's emails (or the whole emails; several at once is fine)."
+	box.SetContentsMargins(20, 16, 20, 14)
+	box.SetSpacing(10)
+	h := qt.NewQLabel3("Paste Bandcamp links")
+	setProp(h.QWidget, "role", "h1")
+	box.AddWidget(h.QWidget)
+	intro := "Paste the download links from Bandcamp's emails, or the whole emails. Several at once is fine."
 	if pending, _ := t.a.m.BandcampMailStatus(); pending > 0 {
 		intro += fmt.Sprintf(" %d releases are waiting for theirs.", pending)
 	}
-	l := qt.NewQLabel3(intro)
-	l.SetWordWrap(true)
-	box.AddWidget(l.QWidget)
+	box.AddWidget(text(intro, "subtitle").QWidget)
 	area := qt.NewQPlainTextEdit2()
 	box.AddWidget2(area.QWidget, 1)
-	status := qt.NewQLabel2()
-	status.SetWordWrap(true)
+	status := text("", "error")
 	box.AddWidget(status.QWidget)
-	buttons := qt.NewQHBoxLayout2()
-	use := qt.NewQPushButton3("Use these links")
-	cancel := qt.NewQPushButton3("Cancel")
+	buttons := hbox()
+	buttons.SetSpacing(8)
 	buttons.AddStretch()
-	buttons.AddWidget(use.QWidget)
-	buttons.AddWidget(cancel.QWidget)
-	box.AddLayout(buttons.QLayout)
-	cancel.OnClicked(func() { d.Reject() })
-	use.OnClicked(func() {
-		text := area.ToPlainText()
-		if strings.TrimSpace(text) == "" {
+	buttons.AddWidget(button("Cancel", "", func() { d.Reject() }).QWidget)
+	var use *qt.QPushButton
+	use = button("Use these links", "primary", func() {
+		pasted := area.ToPlainText()
+		if strings.TrimSpace(pasted) == "" {
 			return
 		}
-		if len(core.FindBandcampLinks(text)) == 0 {
-			status.SetText("No Bandcamp download links in that (they look like https://bandcamp.com/download?…).")
+		if len(core.FindBandcampLinks(pasted)) == 0 {
+			status.SetText("There are no Bandcamp download links in that. They look like https://bandcamp.com/download?…")
 			return
 		}
 		use.SetEnabled(false)
 		status.SetText("Opening the links…")
 		go func() {
-			found, added, errs := t.a.m.AddBandcampLinks(text)
+			found, added, errs := t.a.m.AddBandcampLinks(pasted)
 			mainthread.Start(func() {
 				use.SetEnabled(true)
-				msg := fmt.Sprintf("%d links, %d new: the tracks waiting for them go on.", found, added)
+				msg := fmt.Sprintf("%d links, %d new. The songs waiting for them carry on.", found, added)
 				if len(errs) > 0 {
-					status.SetText(msg + " Not usable: " + strings.Join(errs, "; "))
+					status.SetText(msg + " Couldn't use: " + strings.Join(errs, "; "))
 					return
 				}
 				d.Accept()
-				t.a.message("Bandcamp links", msg)
+				t.a.toast(msg)
 			})
 		}()
 	})
+	buttons.AddWidget(use.QWidget)
+	box.AddLayout(buttons.QLayout)
 	d.Exec()
 }
 
 func (t *sourcesTab) vkLogin() {
 	d := qt.NewQDialog(t.a.win.QWidget)
-	d.SetWindowTitle("VK login (Kate Mobile token)")
+	d.SetWindowTitle("Log in to VK")
 	form := qt.NewQFormLayout(d.QWidget)
+	form.SetContentsMargins(20, 16, 20, 14)
+	form.SetVerticalSpacing(10)
 	user, pass, code := qt.NewQLineEdit2(), qt.NewQLineEdit2(), qt.NewQLineEdit2()
 	pass.SetEchoMode(qt.QLineEdit__Password)
 	form.AddRow3("Phone or email", user.QWidget)
 	form.AddRow3("Password (not stored)", pass.QWidget)
-	form.AddRow3("Confirmation code (if asked)", code.QWidget)
-	status := qt.NewQLabel2()
-	status.SetWordWrap(true)
+	form.AddRow3("Confirmation code, if asked", code.QWidget)
+	status := text("", "hint")
 	form.AddRowWithWidget(status.QWidget)
-	get := qt.NewQPushButton3("Get token")
-	form.AddRowWithWidget(get.QWidget)
-	get.OnClicked(func() {
+	var get *qt.QPushButton
+	get = button("Log in", "primary", func() {
 		status.SetText("Logging in…")
 		get.SetEnabled(false)
 		route := t.a.m.Config().Source("vk").Route
@@ -481,82 +528,30 @@ func (t *sourcesTab) vkLogin() {
 				case err != nil:
 					status.SetText(err.Error())
 				case needCode:
-					status.SetText("VK sent a confirmation code (SMS or app): enter it and press Get token again.")
+					status.SetText("VK sent a confirmation code (SMS or app). Enter it and press Log in again.")
 				default:
 					d.Accept()
 					if err := t.a.m.UpdateConfig(func(c *core.Config) { c.VKToken = token; c.SetSource("vk", true) }); err != nil {
 						t.a.message("VK", err.Error())
 						return
 					}
-					t.a.message("VK", "Logged in; the VK source is on.")
+					t.a.toast("Logged in. VK is on.")
 					t.refresh()
 				}
 			})
 		}()
 	})
-	d.Resize(520, 200)
+	form.AddRowWithWidget(get.QWidget)
+	d.Resize(500, 220)
 	d.Exec()
 }
 
-// soulseekSettings edits the Soulseek source: route, account, limits, sharing and chat.
+// soulseekSettings edits the Soulseek source: account, sharing, limits and chat.
 func (t *sourcesTab) soulseekSettings(sk core.SoulseekConfig) {
 	c := t.a.m.Config()
-	f := newForm(t.a, "Soulseek settings", 780)
-	f.route("soulseek", c.Source("soulseek").Route)
-	f.note("With a VPN, use the <b>direct</b> route so others reach your forwarded port: docs/soulseek-port-forwarding.md (MikroTik included).")
-	f.head("Account")
+	f := newForm(t.a, "Soulseek", "Pick any new name and password to create a free account, or use the one you already have.", 760)
 	f.text("Username", sk.Username, func(c *core.Config, v string) error { c.Soulseek.Username = v; return nil })
 	f.secret("Password", sk.Password, func(c *core.Config, v string) { c.Soulseek.Password = v })
-	f.text("Server", sk.ServerAddr(), func(c *core.Config, v string) error {
-		if v == core.SlskDefaultServer {
-			v = ""
-		}
-		c.Soulseek.Server = v
-		return nil
-	})
-	f.number("Listening port", float64(sk.ListenPort()), func(c *core.Config, v float64) {
-		if c.Soulseek.Port = int(v); c.Soulseek.Port == core.SlskDefaultPort {
-			c.Soulseek.Port = 0
-		}
-	})
-	f.check("Ask the router to forward the port (UPnP)", !sk.NoUPnP, func(c *core.Config, v bool) { c.Soulseek.NoUPnP = !v })
-	f.head("Downloading (the network asks for restraint)")
-	f.number("Downloads at once (1-4)", float64(sk.MaxDownloads()), func(c *core.Config, v float64) { c.Soulseek.Downloads = int(v) })
-	f.number("Seconds between searches (8 or more)", sk.SearchInterval().Seconds(), func(c *core.Config, v float64) { c.Soulseek.SearchGap = v })
-	f.number("Most searches an hour (20 to 200; the server bans floods)", float64(sk.SearchesPerHour()), func(c *core.Config, v float64) { c.Soulseek.PerHour = int(v) })
-	f.text("Give up waiting in a user's queue after", sk.QueueTimeout().String(), func(c *core.Config, v string) error {
-		d, err := time.ParseDuration(v)
-		if err != nil || d < time.Minute {
-			return fmt.Errorf("give up waiting in a user's queue after: a duration like 5m (at least 1m)")
-		}
-		c.Soulseek.QueueWait = core.Duration(d)
-		return nil
-	})
-	f.head("Sharing")
-	f.check("Share files", !sk.NoShare, func(c *core.Config, v bool) { c.Soulseek.NoShare = !v })
-	shares := f.text("Shared folders (; between them)", strings.Join(sk.Shares, "; "), func(c *core.Config, v string) error {
-		c.Soulseek.Shares = core.SplitBy(v, ";")
-		return nil
-	})
-	var defaults []string
-	for _, r := range c.ShareRoots() {
-		defaults = append(defaults, r.Path)
-	}
-	shares.SetPlaceholderText("empty: " + strings.Join(defaults, "; "))
-	f.number("Upload slots", float64(sk.Slots()), func(c *core.Config, v float64) { c.Soulseek.UploadSlots = int(v) })
-	f.number("Upload speed limit, KB/s (0: none)", float64(sk.UploadKBps), func(c *core.Config, v float64) { c.Soulseek.UploadKBps = int(v) })
-	f.number("Queue limit per user, files", float64(sk.FilesPerUser()), func(c *core.Config, v float64) { c.Soulseek.QueueFiles = int(v) })
-	f.number("Queue limit per user, MB", float64(sk.MBPerUser()), func(c *core.Config, v float64) { c.Soulseek.QueueMB = int(v) })
-	f.text("Banned users (comma-separated)", strings.Join(sk.Banned, ", "), func(c *core.Config, v string) error {
-		c.Soulseek.Banned = core.SplitList(v)
-		return nil
-	})
-	f.head("Chat")
-	f.text("Rooms to join (comma-separated)", strings.Join(sk.Rooms, ", "), func(c *core.Config, v string) error {
-		c.Soulseek.Rooms = core.SplitList(v)
-		return nil
-	})
-	f.text("Description others see", sk.Description, func(c *core.Config, v string) error { c.Soulseek.Description = v; return nil })
 	f.button("Import from Nicotine+", func() {
 		got, err := core.ImportNicotine(sk)
 		if err != nil {
@@ -564,9 +559,62 @@ func (t *sourcesTab) soulseekSettings(sk core.SoulseekConfig) {
 			return
 		}
 		f.d.Reject()
-		t.a.message("Imported from Nicotine+", fmt.Sprintf("Account %s, port %d, %d shared folders, %d upload slots. Check and Save.\n\n"+
+		t.a.message("Imported from Nicotine+", fmt.Sprintf("Account %s, port %d, %d shared folders, %d upload slots. Check them and press Save.\n\n"+
 			"Don't run Nicotine+ with the same account at the same time: each logs the other out.", got.Username, got.ListenPort(), len(got.Shares), got.Slots()))
 		t.soulseekSettings(got)
 	})
+	f.head("Sharing")
+	f.note("Sharing is what keeps the network alive, and many people won't send files to someone who shares nothing. Only what's listed here is visible to others.")
+	f.check("Share files with others", !sk.NoShare, func(c *core.Config, v bool) { c.Soulseek.NoShare = !v })
+	shares := f.text("Shared folders (separate with ;)", strings.Join(sk.Shares, "; "), func(c *core.Config, v string) error {
+		c.Soulseek.Shares = core.SplitBy(v, ";")
+		return nil
+	})
+	var defaults []string
+	for _, r := range c.ShareRoots() {
+		defaults = append(defaults, r.Path)
+	}
+	shares.SetPlaceholderText("Empty: " + strings.Join(defaults, "; "))
+	f.number("People who can download at once", float64(sk.Slots()), func(c *core.Config, v float64) { c.Soulseek.UploadSlots = int(v) })
+	f.number("Upload speed limit, KB/s (0: none)", float64(sk.UploadKBps), func(c *core.Config, v float64) { c.Soulseek.UploadKBps = int(v) })
+	f.head("Being reachable")
+	f.note("Things work better when others can reach you. The app can ask your router to allow it. With a VPN, set Connection below to Direct.")
+	f.number("Port", float64(sk.ListenPort()), func(c *core.Config, v float64) {
+		if c.Soulseek.Port = int(v); c.Soulseek.Port == core.SlskDefaultPort {
+			c.Soulseek.Port = 0
+		}
+	})
+	f.check("Ask my router to open the port (UPnP)", !sk.NoUPnP, func(c *core.Config, v bool) { c.Soulseek.NoUPnP = !v })
+	f.route("soulseek", c.Source("soulseek").Route)
+	f.collapsed("Advanced", false)
+	f.text("Server", sk.ServerAddr(), func(c *core.Config, v string) error {
+		if v == core.SlskDefaultServer {
+			v = ""
+		}
+		c.Soulseek.Server = v
+		return nil
+	})
+	f.number("Downloads at once (1-4)", float64(sk.MaxDownloads()), func(c *core.Config, v float64) { c.Soulseek.Downloads = int(v) })
+	f.number("Seconds between searches (8 or more)", sk.SearchInterval().Seconds(), func(c *core.Config, v float64) { c.Soulseek.SearchGap = v })
+	f.number("Most searches an hour (20-200)", float64(sk.SearchesPerHour()), func(c *core.Config, v float64) { c.Soulseek.PerHour = int(v) })
+	f.text("Stop waiting in someone's queue after", sk.QueueTimeout().String(), func(c *core.Config, v string) error {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute {
+			return fmt.Errorf("stop waiting in someone's queue after: a duration like 5m (at least 1m)")
+		}
+		c.Soulseek.QueueWait = core.Duration(d)
+		return nil
+	})
+	f.number("Queue limit per person, files", float64(sk.FilesPerUser()), func(c *core.Config, v float64) { c.Soulseek.QueueFiles = int(v) })
+	f.number("Queue limit per person, MB", float64(sk.MBPerUser()), func(c *core.Config, v float64) { c.Soulseek.QueueMB = int(v) })
+	f.text("Banned users (comma-separated)", strings.Join(sk.Banned, ", "), func(c *core.Config, v string) error {
+		c.Soulseek.Banned = core.SplitList(v)
+		return nil
+	})
+	f.text("Chat rooms to join (comma-separated)", strings.Join(sk.Rooms, ", "), func(c *core.Config, v string) error {
+		c.Soulseek.Rooms = core.SplitList(v)
+		return nil
+	})
+	f.text("Description others see", sk.Description, func(c *core.Config, v string) error { c.Soulseek.Description = v; return nil })
 	f.run()
 }

@@ -807,7 +807,7 @@ func (c *slskClient) session() (err error, permanent bool) {
 			return errors.New("lost the connection to the Soulseek server"), false
 		}
 		if relogged := c.onServer(code, &slskRead{b: body}); relogged {
-			return errors.New("logged out: someone logged in with your Soulseek account elsewhere (another Soulseek client?); reconnect from the Soulseek tab (R)"), true
+			return errors.New("logged out: someone logged in with your Soulseek account elsewhere (another Soulseek client?); reconnect from the Soulseek page"), true
 		}
 	}
 }

@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"html"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,21 +12,41 @@ import (
 	qt "github.com/mappu/miqt/qt6"
 )
 
-// The Queue tab: every track, with what's happening to it. The table reads its rows from a
-// list kept here (a model, so even 70,000 tracks draw only what's visible).
+// The Downloads page: every track, with what's happening to it. The list reads its rows from
+// a slice kept here and draws only what's visible, so even 70,000 tracks are instant.
 
-var queueColumns = []string{"", "Track", "Album", "Status", "Quality", "Playlist"}
+// The filters with a button of their own; the rest are under "More".
+var mainFilters = []string{"all", "active", "queued", "done", "library", "failed"}
+
+var chipWords = map[string]string{"all": "All", "active": "Active", "queued": "Waiting", "done": "Done", "library": "In library", "failed": "Not found"}
 
 type queueTab struct {
-	a       *app
-	w       *qt.QWidget
-	table   *qt.QTableView
-	model   *qt.QAbstractTableModel
-	filter  *qt.QComboBox
-	sort    *qt.QComboBox
-	reverse *qt.QCheckBox
-	find    *qt.QLineEdit
-	info    *qt.QLabel
+	a    *app
+	w    *qt.QWidget
+	page *page
+	list *rowList
+
+	chips    map[string]*qt.QPushButton
+	more     *qt.QComboBox
+	moreKeys []string
+	sort     *qt.QComboBox
+	reverse  *qt.QPushButton
+	find     *qt.QLineEdit
+	retry    *qt.QPushButton
+	progress *qt.QProgressBar
+	notice   *qt.QFrame
+	noticeT  *qt.QLabel
+	stack    *qt.QStackedWidget
+	empty    *emptyState
+	nomatch  *emptyState
+
+	// the details pane
+	pane                   *qt.QFrame
+	dTitle, dArtist, dBody *qt.QLabel
+	dState                 *qt.QLabel
+	dNext, dAgain, dCancel *qt.QPushButton
+	dOpen                  *qt.QPushButton
+	paneKey                string
 
 	q    core.QueueQuery
 	rows []core.JobView
@@ -35,29 +56,22 @@ type queueTab struct {
 }
 
 func newQueueTab(a *app) *queueTab {
-	t := &queueTab{a: a, w: qt.NewQWidget2()}
-	box := qt.NewQVBoxLayout(t.w)
-	box.SetContentsMargins(0, 4, 0, 0)
+	t := &queueTab{a: a, chips: map[string]*qt.QPushButton{}}
+	p := a.newPage("Downloads", "", "downloads")
+	t.page, t.w = p, p.w
 
-	bar := qt.NewQHBoxLayout2()
-	t.filter = qt.NewQComboBox2()
-	t.filter.SetToolTip("Which tracks to show (F)")
-	for _, f := range core.QueueFilters {
-		t.filter.AddItem(f.Label)
-	}
-	t.filter.OnCurrentIndexChanged(func(i int) {
-		if i >= 0 && i < len(core.QueueFilters) {
-			t.q.Filter = core.QueueFilters[i].Name
-			if t.q.Filter == "all" {
-				t.q.Filter = ""
-			}
-			t.refresh(true)
-		}
-	})
+	t.find = qt.NewQLineEdit2()
+	t.find.SetPlaceholderText("Filter by name")
+	t.find.SetToolTip("Show only songs with this artist, title or album (/)")
+	t.find.SetClearButtonEnabled(true)
+	t.find.SetFixedWidth(150)
+	t.find.OnTextChanged(func(s string) { t.q.Text = strings.TrimSpace(s); t.refresh(true) })
+	p.actions.AddWidget(t.find.QWidget)
 	t.sort = qt.NewQComboBox2()
-	t.sort.SetToolTip("Order (O)")
+	t.sort.SetToolTip("The order of the list (O)")
+	compactCombo(t.sort, 12)
 	for _, s := range core.QueueSorts {
-		t.sort.AddItem("Sort: " + s.Label)
+		t.sort.AddItem(sortWords[s.Name])
 	}
 	t.sort.OnCurrentIndexChanged(func(i int) {
 		if i >= 0 && i < len(core.QueueSorts) {
@@ -65,79 +79,101 @@ func newQueueTab(a *app) *queueTab {
 			t.refresh(true)
 		}
 	})
-	t.reverse = qt.NewQCheckBox3("Reverse")
-	t.reverse.OnToggled(func(on bool) { t.q.Reverse = on; t.refresh(true) })
-	t.find = qt.NewQLineEdit2()
-	t.find.SetPlaceholderText("Find: artist, title, album (/)")
-	t.find.SetClearButtonEnabled(true)
-	t.find.OnTextChanged(func(s string) { t.q.Text = strings.TrimSpace(s); t.refresh(true) })
-	bar.AddWidget(t.filter.QWidget)
-	bar.AddWidget(t.sort.QWidget)
-	bar.AddWidget(t.reverse.QWidget)
-	bar.AddWidget2(t.find.QWidget, 1)
-	box.AddLayout(bar.QLayout)
-
-	t.model = qt.NewQAbstractTableModel()
-	t.model.OnRowCount(func(parent *qt.QModelIndex) int {
-		if parent.IsValid() {
-			return 0
-		}
-		return len(t.rows)
+	p.actions.AddWidget(t.sort.QWidget)
+	t.reverse = a.iconButton("sort", "", "ghost", "Reverse the order (Shift+O)", func() {
+		t.q.Reverse = !t.q.Reverse
+		t.reverse.SetChecked(t.q.Reverse)
+		t.refresh(true)
 	})
-	t.model.OnColumnCount(func(parent *qt.QModelIndex) int { return len(queueColumns) })
-	t.model.OnHeaderData(func(super func(int, qt.Orientation, int) *qt.QVariant, section int, o qt.Orientation, role int) *qt.QVariant {
-		if o == qt.Horizontal && role == int(qt.DisplayRole) && section < len(queueColumns) {
-			return qt.NewQVariant14(queueColumns[section])
-		}
-		return super(section, o, role)
-	})
-	t.model.OnData(t.data)
+	t.reverse.SetCheckable(true)
+	p.actions.AddWidget(t.reverse.QWidget)
+	p.actions.AddWidget(a.iconButton("folder", "Open folder", "", "Open your downloads folder", func() { openPath(a.m.Config().OutputDir) }).QWidget)
 
-	t.table = qt.NewQTableView2()
-	t.table.SetModel(t.model.QAbstractItemModel)
-	t.table.SetSelectionBehavior(qt.QAbstractItemView__SelectRows)
-	t.table.SetSelectionMode(qt.QAbstractItemView__SingleSelection)
-	t.table.SetAlternatingRowColors(true)
-	t.table.SetShowGrid(false)
-	t.table.SetWordWrap(false)
-	t.table.VerticalHeader().Hide()
-	t.table.VerticalHeader().SetDefaultSectionSize(22)
-	h := t.table.HorizontalHeader()
-	// The track takes what's left; the others keep their width (sizing them to their contents
-	// would measure every row).
-	h.SetStretchLastSection(false)
-	for i, w := range []int{26, 300, 170, 320, 110, 140} {
-		t.table.SetColumnWidth(i, w)
-		h.SetSectionResizeMode2(i, qt.QHeaderView__Interactive)
+	t.progress = qt.NewQProgressBar2()
+	t.progress.SetTextVisible(false)
+	t.progress.SetRange(0, 1000)
+	p.box.AddWidget(t.progress.QWidget)
+
+	t.notice = qt.NewQFrame2()
+	setProp(t.notice.QWidget, "role", "banner")
+	nb := qt.NewQHBoxLayout(t.notice.QWidget)
+	nb.SetContentsMargins(14, 7, 8, 7)
+	t.noticeT = text("", "")
+	nb.AddWidget2(t.noticeT.QWidget, 1)
+	nb.AddWidget(button("Show everything", "link", t.clearFilters).QWidget)
+	t.notice.Hide()
+	p.box.AddWidget(t.notice.QWidget)
+
+	// the filters, and everything else that narrows or orders the list
+	bar := hbox()
+	bar.SetSpacing(6)
+	group := qt.NewQButtonGroup2(t.w.QObject)
+	group.SetExclusive(true)
+	for _, name := range mainFilters {
+		name := name
+		b := button(chipWords[name], "chip", func() { t.setFilter(name) })
+		b.SetCheckable(true)
+		b.SetSizePolicy2(qt.QSizePolicy__Fixed, qt.QSizePolicy__Fixed)
+		group.AddButton(b.QAbstractButton)
+		t.chips[name] = b
+		bar.AddWidget(b.QWidget)
 	}
-	h.SetSectionResizeMode2(0, qt.QHeaderView__Fixed)
-	h.SetSectionResizeMode2(1, qt.QHeaderView__Stretch)
-	t.table.OnDoubleClicked(func(*qt.QModelIndex) { t.details() })
-	t.table.SetContextMenuPolicy(qt.CustomContextMenu)
-	t.table.OnCustomContextMenuRequested(func(pos *qt.QPoint) { t.menu(t.table.Viewport().MapToGlobalWithQPoint(pos)) })
-	box.AddWidget2(t.table.QWidget, 1)
-
-	t.info = qt.NewQLabel2()
-	box.AddWidget(t.info.QWidget)
-
-	// The terminal app's keys work here too.
-	keys := map[string]func(){
-		"Return": t.details, "C": func() { t.act("cancel") }, "R": func() { t.act("restart") },
-		"N": func() { t.act("next") }, "Shift+R": t.retryAll, "/": func() { t.find.SetFocus() },
-		"F": func() { t.filter.ShowPopup() }, "O": func() { t.sort.ShowPopup() },
-		"Shift+O": func() { t.reverse.Toggle() },
-		"Escape": func() {
-			if t.q.Playlist != "" || t.q.Text != "" || t.q.Filter != "" {
-				t.q.Playlist = ""
-				t.find.SetText("")
-				t.filter.SetCurrentIndex(0)
-				t.refresh(true)
+	t.chips["all"].SetChecked(true)
+	t.more = qt.NewQComboBox2()
+	t.more.SetToolTip("More ways to narrow the list (F)")
+	compactCombo(t.more, 5)
+	t.more.AddItem("More…")
+	t.moreKeys = []string{""}
+	for _, f := range core.QueueFilters {
+		if !core.ContainsString(mainFilters, f.Name) {
+			t.more.AddItem(filterWords[f.Name])
+			t.moreKeys = append(t.moreKeys, f.Name)
+		}
+	}
+	t.more.OnActivated(func(i int) {
+		if i > 0 && i < len(t.moreKeys) {
+			t.q.Filter = t.moreKeys[i]
+			group.SetExclusive(false)
+			for _, b := range t.chips {
+				b.SetChecked(false)
 			}
-		},
+			group.SetExclusive(true)
+			t.refresh(true)
+		}
+	})
+	bar.AddWidget(t.more.QWidget)
+	bar.AddStretch()
+	t.retry = a.iconButton("refresh", "Try again", "", "Search again for every song that wasn't found (Shift+R)", t.retryAll)
+	t.retry.Hide()
+	t.retry.SetSizePolicy2(qt.QSizePolicy__Fixed, qt.QSizePolicy__Fixed)
+	bar.AddWidget(t.retry.QWidget)
+	p.box.AddLayout(bar.QLayout)
+
+	t.list = newRowList(58, func() int { return len(t.rows) }, t.draw)
+	t.list.onSelect(func(int) { t.showPane() })
+	t.list.onActivate(t.showPane)
+	t.list.onMenu(t.menu)
+	t.buildEmpty()
+
+	t.stack = qt.NewQStackedWidget2()
+	t.stack.AddWidget(t.list.view.QWidget)
+	t.stack.AddWidget(t.empty.w)
+	t.stack.AddWidget(t.nomatch.w)
+
+	main := hbox()
+	main.SetSpacing(14)
+	main.AddWidget2(t.stack.QWidget, 1)
+	main.AddWidget(t.buildPane())
+	p.box.AddLayout2(main.QLayout, 1)
+
+	keys := map[string]func(){
+		"Return": t.showPane, "C": func() { t.act("cancel") }, "R": func() { t.act("restart") },
+		"N": func() { t.act("next") }, "P": func() { t.act("next") }, "Shift+R": t.retryAll, "/": func() { t.find.SetFocus() },
+		"F": func() { t.more.ShowPopup() }, "O": func() { t.sort.ShowPopup() },
+		"Shift+O": func() { t.reverse.Click() }, "Escape": t.clearFilters,
 	}
 	for k, f := range keys {
-		f := f
-		sc := qt.NewQShortcut2(qt.NewQKeySequence2(k), t.table.QObject)
+		sc := qt.NewQShortcut2(qt.NewQKeySequence2(k), t.list.view.QObject)
 		sc.SetContext(qt.WidgetShortcut)
 		sc.OnActivated(f)
 	}
@@ -145,133 +181,226 @@ func newQueueTab(a *app) *queueTab {
 	return t
 }
 
-// data is what the table shows in a cell.
-func (t *queueTab) data(idx *qt.QModelIndex, role int) *qt.QVariant {
-	r, c := idx.Row(), idx.Column()
-	if r < 0 || r >= len(t.rows) {
-		return qt.NewQVariant()
-	}
-	v := t.rows[r]
-	switch qt.ItemDataRole(role) {
-	case qt.DisplayRole:
-		switch c {
-		case 0:
-			icon, _ := stateIcon(v)
-			return qt.NewQVariant14(icon)
-		case 1:
-			return qt.NewQVariant14(v.Track.String())
-		case 2:
-			return qt.NewQVariant14(v.Track.Album)
-		case 3:
-			return qt.NewQVariant14(statusText(v))
-		case 4:
-			return qt.NewQVariant14(qualityText(v))
-		case 5:
-			p := ""
-			if len(v.Playlists) > 0 {
-				p = v.Playlists[0]
-				if len(v.Playlists) > 1 {
-					p += fmt.Sprintf(" +%d", len(v.Playlists)-1)
-				}
-			}
-			return qt.NewQVariant14(p)
-		}
-	case qt.ForegroundRole:
-		if c == 0 || c == 3 {
-			_, color := stateIcon(v)
-			if color != "" {
-				return qt.NewQColor6(color).ToQVariant()
-			}
-		}
-	case qt.ToolTipRole:
-		if c == 3 && v.Reason != "" {
-			return qt.NewQVariant14(v.Reason)
-		}
-	}
-	return qt.NewQVariant()
+func (t *queueTab) buildEmpty() {
+	a := t.a
+	e := a.newEmpty("music", "Nothing to download yet", "Search for a song, album or artist, or bring in your playlists. Whatever you add shows up here while it downloads.")
+	e.row.AddWidget(a.iconButton("search", "Find music", "primary", "", func() { a.show(pageFind) }).QWidget)
+	e.row.AddWidget(a.iconButton("playlist", "Add playlists", "", "", func() { a.show(pagePlaylists) }).QWidget)
+	e.done()
+	t.empty = e
+	n := a.newEmpty("search", "Nothing matches", "No songs here fit what you've chosen.")
+	n.row.AddWidget(button("Show everything", "", t.clearFilters).QWidget)
+	n.done()
+	t.nomatch = n
 }
 
-// stateIcon is a track's state as a symbol, and its color ("" for the default).
-func stateIcon(v core.JobView) (string, string) {
+func (t *queueTab) buildPane() *qt.QWidget {
+	a := t.a
+	f := qt.NewQFrame2()
+	setProp(f.QWidget, "role", "card")
+	f.SetFixedWidth(320)
+	box := qt.NewQVBoxLayout(f.QWidget)
+	box.SetContentsMargins(16, 12, 12, 14)
+	box.SetSpacing(8)
+	head := hbox()
+	state := qt.NewQLabel3("")
+	setProp(state.QWidget, "role", "pill")
+	setProp(state.QWidget, "pill", "off")
+	state.SetSizePolicy2(qt.QSizePolicy__Maximum, qt.QSizePolicy__Fixed)
+	head.AddWidget(state.QWidget)
+	head.AddStretch()
+	head.AddWidget(a.iconButton("x", "", "ghost", "Close (Esc)", t.hidePane).QWidget)
+	box.AddLayout(head.QLayout)
+	t.dState = state
+	t.dTitle = text("", "h1")
+	box.AddWidget(t.dTitle.QWidget)
+	t.dArtist = text("", "subtitle")
+	box.AddWidget(t.dArtist.QWidget)
+
+	row := qt.NewQGridLayout2()
+	row.SetSpacing(6)
+	t.dNext = a.iconButton("arrow-up", "Do next", "", "Move to the front of the line (N)", func() { t.act("next") })
+	t.dAgain = a.iconButton("refresh", "Try again", "", "Search from the first source again; a finished song is downloaded again (R)", func() { t.act("restart") })
+	t.dCancel = a.iconButton("x", "Cancel", "danger", "Stop working on this song (C)", func() { t.act("cancel") })
+	t.dOpen = a.iconButton("folder", "Show in folder", "", "Open the folder with this file", t.openFile)
+	row.AddWidget2(t.dNext.QWidget, 0, 0)
+	row.AddWidget2(t.dAgain.QWidget, 0, 1)
+	row.AddWidget2(t.dCancel.QWidget, 1, 0)
+	row.AddWidget2(t.dOpen.QWidget, 1, 1)
+	box.AddLayout(row.QLayout)
+	box.AddWidget(rule().QWidget)
+
+	t.dBody = richText("", "hint")
+	t.dBody.SetAlignment(qt.AlignTop | qt.AlignLeft)
+	t.dBody.SetTextInteractionFlags(qt.TextBrowserInteraction)
+	scroll, inner, _ := scrolling()
+	inner.SetContentsMargins(0, 0, 4, 0)
+	inner.AddWidget(t.dBody.QWidget)
+	inner.AddStretch()
+	box.AddWidget2(scroll.QWidget, 1)
+	t.pane = f
+	f.Hide()
+	return f.QWidget
+}
+
+// --- drawing a row ------------------------------------------------------------------------------
+
+func (t *queueTab) draw(c *rowCtx) {
+	if c.row >= len(t.rows) {
+		return
+	}
+	v := t.rows[c.row]
+	f := drawFonts
+	p := c.p
+	icon, color, soft := stateVisual(v)
+	drawBadge(p, c.x+10, c.y+(c.h-32)/2, 32, icon, color, soft)
+	right := min(270, c.w/3)
+	x := c.x + 54
+	w := c.w - 54 - right - 22
+	tr := v.Track
+	drawText(p, x, c.y+9, w, 20, qt.AlignLeft|qt.AlignVCenter, tr.Title, f.bold, f.mBold, th.Text)
+	sub := tr.ArtistStr()
+	if tr.Album != "" {
+		sub += "  ·  " + tr.Album
+	}
+	drawText(p, x, c.y+30, w, 18, qt.AlignLeft|qt.AlignVCenter, sub, f.small, f.mSmall, th.Text2)
+
+	rx := c.x + c.w - right - 14
+	main, detail := statusLines(v)
+	drawText(p, rx, c.y+9, right, 20, qt.AlignRight|qt.AlignVCenter, main, f.normal, f.mNormal, statusColor(v))
+	if v.State == core.JobDownloading && v.Task.Total > 0 {
+		drawBar(p, rx+right-150, c.y+35, 150, 5, float64(v.Task.Done)/float64(v.Task.Total), th.Accent)
+	} else if detail != "" {
+		drawText(p, rx, c.y+30, right, 18, qt.AlignRight|qt.AlignVCenter, detail, f.small, f.mSmall, th.Text3)
+	}
+	if c.row < len(t.rows)-1 && !c.selected {
+		p.SetPen(col(th.Line))
+		p.DrawLine2(c.x+54, c.y+c.h-1, c.x+c.w-14, c.y+c.h-1)
+	}
+}
+
+// stateVisual is a track's state as an icon and colors.
+func stateVisual(v core.JobView) (icon, color, soft string) {
 	switch v.State {
 	case core.JobDownloading:
-		return "↓", "#29a"
-	case core.JobSearching:
-		return "⌕", "#b90"
-	case core.JobReady:
-		return "…", "#b90"
+		return "download", th.Accent, th.AccentSoft
+	case core.JobSearching, core.JobReady:
+		return "search", th.Info, th.InfoSoft
 	case core.JobWaiting:
-		return "⟳", "#d70"
+		return "clock", th.Warn, th.WarnSoft
 	case core.JobDone:
-		return "✓", "#3a3"
+		return "check", th.OK, th.OKSoft
 	case core.JobInLibrary:
-		return "◆", "#38c"
+		return "library", th.Info, th.InfoSoft
 	case core.JobFailed:
-		return "✗", "#c33"
+		return "x", th.Bad, th.BadSoft
 	case core.JobCancelled:
-		return "⊘", "#888"
+		return "ban", th.Text3, th.Raised
 	}
 	if v.Bumped {
-		return "▲", ""
+		return "arrow-up", th.Accent, th.AccentSoft
 	}
-	return "·", "#888"
+	return "dot", th.Text3, th.Raised
 }
 
-func statusText(v core.JobView) string {
+func statusColor(v core.JobView) string {
 	switch v.State {
-	case core.JobSearching, core.JobReady, core.JobDownloading:
-		t := v.Task
-		s := core.FirstNonEmpty(t.Stage, v.State.String())
-		if t.Total > 0 {
-			s = fmt.Sprintf("%3.0f%% %s", 100*float64(t.Done)/float64(t.Total), core.FmtBytePair(t.Done, t.Total))
-			if t.Speed > 0 {
-				s += " " + core.FmtRate(t.Speed)
-			}
-		}
-		if t.Note != "" {
-			s += " · " + t.Note
-		}
-		return s
+	case core.JobDownloading:
+		return th.Accent
 	case core.JobDone:
-		s := "← " + core.FirstNonEmpty(core.SourceLabels[v.Rec.Source], v.Rec.Source)
-		if v.Rec.LibPath != "" {
-			s += " (better than your library copy)"
+		return th.OK
+	case core.JobFailed:
+		return th.Bad
+	case core.JobWaiting:
+		return th.Warn
+	}
+	return th.Text2
+}
+
+// statusLines are what a row says about a track, in two lines.
+func statusLines(v core.JobView) (string, string) {
+	switch v.State {
+	case core.JobSearching:
+		return core.FirstNonEmpty(capitalized(v.Task.Stage), "Searching…"), v.Task.Note
+	case core.JobReady:
+		return "Starting…", ""
+	case core.JobDownloading:
+		t := v.Task
+		if t.Total > 0 {
+			s := fmt.Sprintf("%.0f%%  ·  %s", 100*float64(t.Done)/float64(t.Total), core.FmtBytes(t.Total))
+			if t.Speed > 0 {
+				s += "  ·  " + core.FmtRate(t.Speed)
+			}
+			return s, ""
 		}
-		return s
+		return core.FirstNonEmpty(capitalized(t.Stage), "Downloading…"), t.Note
+	case core.JobDone:
+		detail := v.Rec.Quality.String() + "  ·  " + core.FirstNonEmpty(core.SourceLabels[v.Rec.Source], v.Rec.Source)
+		if v.Rec.LibPath != "" {
+			return "Downloaded, better than your copy", detail
+		}
+		return "Downloaded", detail
 	case core.JobInLibrary:
 		if v.Lib != nil {
-			return "in your library: " + filepath.Base(v.Lib.Path)
+			return "In your library", v.Lib.Q.String()
 		}
-		return "in your library"
+		return "In your library", ""
 	case core.JobWaiting:
-		return fmt.Sprintf("retry %s · %s", v.RetryAt.Format("15:04"), v.Reason)
+		return "Will retry at " + v.RetryAt.Format("15:04"), v.Reason
 	case core.JobFailed:
-		return v.Reason
+		if n := len(v.Reasons); n > 1 {
+			return "Not found", fmt.Sprintf("%d sources tried", n)
+		}
+		return "Not found", v.Reason
 	case core.JobCancelled:
-		return "cancelled"
+		return "Cancelled", ""
 	case core.JobQueued:
-		if v.NeedBetter && v.Lib != nil {
-			return "queued · only if better than your " + v.Lib.Q.String()
+		switch {
+		case v.NeedBetter && v.Lib != nil:
+			return "Waiting", "only if better than your " + v.Lib.Q.String()
+		case v.Bumped:
+			return "Up next", ""
 		}
-		if v.Bumped {
-			return "queued · next up"
-		}
+		return "Waiting", ""
 	}
-	return v.State.String()
+	return capitalized(v.State.String()), ""
 }
 
-func qualityText(v core.JobView) string {
-	switch {
-	case v.State == core.JobDone:
-		return v.Rec.Quality.String()
-	case v.Lib != nil:
-		return "have " + v.Lib.Q.String()
+func capitalized(s string) string {
+	if s == "" {
+		return ""
 	}
-	return ""
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// changed reads every row again when the queue changed: right away for a new filter or order
-// (reset), otherwise at most once a second.
+// --- the list ------------------------------------------------------------------------------------
+
+func (t *queueTab) focus() { t.list.view.SetFocus() }
+
+func (t *queueTab) setFilter(name string) {
+	t.q.Filter = name
+	if name == "all" {
+		t.q.Filter = ""
+	}
+	t.more.SetCurrentIndex(0)
+	t.refresh(true)
+}
+
+func (t *queueTab) clearFilters() {
+	if t.pane.IsVisible() {
+		t.hidePane()
+		return
+	}
+	if t.q.Playlist == "" && t.q.Text == "" && t.q.Filter == "" {
+		return
+	}
+	t.q.Playlist = ""
+	t.find.SetText("")
+	t.chips["all"].SetChecked(true)
+	t.setFilter("all")
+}
+
+// changed reads every row again when the queue changed, at most once a second.
 func (t *queueTab) changed() {
 	if wait := time.Second - time.Since(t.lastFull); wait > 0 {
 		if t.later == nil {
@@ -293,35 +422,77 @@ func (t *queueTab) refresh(reset bool) {
 	sel := t.selected()
 	rows := t.a.m.Queue(t.q)
 	if reset || len(rows) != len(t.rows) {
-		t.model.BeginResetModel()
-		t.rows = rows
-		t.model.EndResetModel()
-	} else {
-		t.rows = rows
-		t.redrawVisible()
-	}
-	if sel != "" {
-		for i, v := range t.rows {
-			if v.Key == sel {
-				t.table.SelectRow(i)
-				break
+		t.list.reset(func() { t.rows = rows })
+		if sel != "" {
+			for i, v := range t.rows {
+				if v.Key == sel {
+					t.list.selectRow(i)
+					break
+				}
 			}
 		}
+	} else {
+		t.rows = rows
+		t.list.redraw()
 	}
 	counts := t.a.m.QueueCounts()
-	for i, f := range core.QueueFilters {
-		t.filter.SetItemText(i, fmt.Sprintf("%s (%d)", f.Label, counts[f.Name]))
+	for name, b := range t.chips {
+		b.SetText(fmt.Sprintf("%s  %d", chipWords[name], counts[name]))
 	}
-	info := fmt.Sprintf("%d tracks shown", len(t.rows))
-	if len(t.a.m.Config().Inputs) == 0 && len(t.rows) == 0 && t.q.Filter == "" && t.q.Text == "" {
-		info = "Nothing queued yet: the Search tab finds music; playlist files are added there too."
+	for i, key := range t.moreKeys {
+		if i > 0 {
+			t.more.SetItemText(i, fmt.Sprintf("%s (%d)", filterWords[key], counts[key]))
+		}
 	}
-	t.info.SetText(info + "   ·   Enter details · C cancel · R restart · N do next · Shift+R retry everything not found")
+	t.retry.SetVisible(counts["failed"] > 0)
+	if t.q.Playlist != "" {
+		t.noticeT.SetText(fmt.Sprintf("Showing the playlist “%s”: %d songs", t.q.Playlist, len(t.rows)))
+		t.notice.Show()
+	} else {
+		t.notice.Hide()
+	}
+	switch {
+	case len(t.rows) > 0:
+		t.stack.SetCurrentIndex(0)
+	case counts["all"] == 0:
+		t.stack.SetCurrentIndex(1)
+	default:
+		t.stack.SetCurrentIndex(2)
+	}
+	if t.pane.IsVisible() {
+		t.fillPane()
+	}
 }
 
-// tick redraws the visible tracks that are in progress (progress moves without events).
-func (t *queueTab) tick() {
-	if t.a.tabs.CurrentIndex() != 0 || len(t.rows) == 0 {
+// tick redraws the page's numbers and the visible tracks in progress.
+func (t *queueTab) tick(o core.Overview) {
+	c := o.Counts
+	done := c[core.JobDone] + c[core.JobInLibrary]
+	if o.Total > 0 {
+		t.progress.SetValue(done * 1000 / o.Total)
+	}
+	t.progress.SetVisible(o.Total > 0)
+	var parts []string
+	switch {
+	case o.Total == 0:
+		parts = append(parts, "Your songs show up here while they download.")
+	default:
+		parts = append(parts, fmt.Sprintf("%d of %d songs are ready", done, o.Total))
+		if c[core.JobFailed] > 0 {
+			parts = append(parts, fmt.Sprintf("%d not found", c[core.JobFailed]))
+		}
+		if o.DlUsed > 0 {
+			parts = append(parts, fmt.Sprintf("%d downloading", o.DlUsed))
+		}
+		if o.SrUsed > 0 {
+			parts = append(parts, fmt.Sprintf("%d being searched for", o.SrUsed))
+		}
+		if o.ToCheck > 0 && o.Checked < o.ToCheck {
+			parts = append(parts, fmt.Sprintf("checking your library, %d of %d", o.Checked, o.ToCheck))
+		}
+	}
+	t.page.sub.SetText(strings.Join(parts, "  ·  "))
+	if t.a.current() != pageDownloads || len(t.rows) == 0 {
 		return
 	}
 	first, last := t.visible()
@@ -332,33 +503,25 @@ func (t *queueTab) tick() {
 			}
 		}
 	}
-	t.redrawVisible()
+	t.list.redraw()
+	if t.pane.IsVisible() && t.paneKey != "" {
+		if v, ok := t.a.m.JobView(t.paneKey); ok && v.State.Active() {
+			t.fillPane()
+		}
+	}
 }
 
 // visible is the range of rows on screen.
 func (t *queueTab) visible() (int, int) {
-	first := max(0, t.table.RowAt(0))
-	last := t.table.RowAt(t.table.Viewport().Height())
-	if last < 0 {
-		last = len(t.rows) - 1
-	}
+	v := t.list.view
+	h := 58
+	first := max(0, v.VerticalScrollBar().Value()/h)
+	last := first + v.Viewport().Height()/h + 1
 	return first, min(last, len(t.rows)-1)
 }
 
-func (t *queueTab) redrawVisible() {
-	if len(t.rows) == 0 {
-		return
-	}
-	first, last := t.visible()
-	t.model.DataChanged(t.model.Index(first, 0, qt.NewQModelIndex()), t.model.Index(last, len(queueColumns)-1, qt.NewQModelIndex()))
-}
-
 func (t *queueTab) selected() string {
-	rows := t.table.SelectionModel().SelectedRows()
-	if len(rows) == 0 {
-		return ""
-	}
-	if r := rows[0].Row(); r >= 0 && r < len(t.rows) {
+	if r := t.list.current(); r >= 0 && r < len(t.rows) {
 		return t.rows[r].Key
 	}
 	return ""
@@ -378,28 +541,16 @@ func (t *queueTab) act(what string) {
 		t.a.m.Prioritize(key)
 	}
 	t.refresh(false)
+	t.fillPane()
 }
 
 func (t *queueTab) retryAll() {
 	n := t.a.m.RetryFailed(false)
-	t.a.message("Retry", fmt.Sprintf("%d tracks that weren't found are queued again.", n))
+	t.a.toast(fmt.Sprintf("%d songs are being searched for again.", n))
+	t.refresh(false)
 }
 
 func (t *queueTab) menu(at *qt.QPoint) {
-	if t.selected() == "" {
-		return
-	}
-	m := qt.NewQMenu2()
-	m.AddActionWithText("Details…").OnTriggered(t.details)
-	m.AddSeparator()
-	m.AddActionWithText("Do next").OnTriggered(func() { t.act("next") })
-	m.AddActionWithText("Restart (search again; download again if done)").OnTriggered(func() { t.act("restart") })
-	m.AddActionWithText("Cancel").OnTriggered(func() { t.act("cancel") })
-	m.ExecWithPos(at)
-}
-
-// details shows everything about the selected track: every source tried and why it didn't work.
-func (t *queueTab) details() {
 	key := t.selected()
 	if key == "" {
 		return
@@ -408,54 +559,137 @@ func (t *queueTab) details() {
 	if !ok {
 		return
 	}
-	tr := v.Track
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n%s", tr.Title, tr.ArtistStr())
-	if tr.Album != "" {
-		fmt.Fprintf(&b, " · %s", tr.Album)
+	m := qt.NewQMenu2()
+	m.AddActionWithText("Details").OnTriggered(t.showPane)
+	m.AddSeparator()
+	m.AddActionWithText("Do next").OnTriggered(func() { t.act("next") })
+	m.AddActionWithText("Try again").OnTriggered(func() { t.act("restart") })
+	m.AddActionWithText("Cancel").OnTriggered(func() { t.act("cancel") })
+	if v.State == core.JobDone && v.Rec.Path != "" {
+		m.AddSeparator()
+		m.AddActionWithText("Show in folder").OnTriggered(t.openFile)
 	}
-	if tr.DurationMs > 0 {
-		fmt.Fprintf(&b, " · %s", core.FmtDuration(tr.Duration()))
-	}
-	fmt.Fprintf(&b, "\nPlaylists: %s\n\n", strings.Join(v.Playlists, ", "))
-	icon, _ := stateIcon(v)
-	fmt.Fprintf(&b, "%s %s\n%s\n", icon, v.State, statusText(v))
-	if v.State == core.JobDone {
-		r := v.Rec
-		fmt.Fprintf(&b, "\nFile: %s\nQuality: %s · from %s %s\n", r.Path, r.Quality, core.SourceLabels[r.Source], r.SourceURL)
-		if r.LibPath != "" {
-			fmt.Fprintf(&b, "Better than your library copy %s (%s), which was left untouched.\n", r.LibPath, r.LibQuality)
+	m.ExecWithPos(at)
+}
+
+func (t *queueTab) openFile() {
+	if v, ok := t.a.m.JobView(t.paneKey); ok {
+		switch {
+		case v.State == core.JobDone && v.Rec.Path != "":
+			openFolder(v.Rec.Path)
+		case v.Lib != nil:
+			openFolder(v.Lib.Path)
 		}
 	}
-	if v.LibCount > 0 && v.Lib != nil {
-		fmt.Fprintf(&b, "\nIn your library (%d): %s · %s\n", v.LibCount, v.Lib.Path, v.Lib.Q)
+}
+
+// --- the details pane ---------------------------------------------------------------------------
+
+func (t *queueTab) showPane() {
+	t.paneKey = t.selected()
+	if t.paneKey == "" {
+		t.pane.Hide()
+		return
+	}
+	t.pane.Show()
+	t.fillPane()
+}
+
+func (t *queueTab) hidePane() {
+	t.pane.Hide()
+	t.paneKey = ""
+	t.list.view.SetCurrentIndex(rootIndex) // so clicking the same song opens it again
+	t.focus()
+}
+
+// fillPane shows everything about a track: every source tried and why it didn't work.
+func (t *queueTab) fillPane() {
+	v, ok := t.a.m.JobView(t.paneKey)
+	if !ok {
+		return
+	}
+	e := html.EscapeString
+	tr := v.Track
+	t.dTitle.SetText(tr.Title)
+	sub := tr.ArtistStr()
+	if tr.Album != "" {
+		sub += " · " + tr.Album
+	}
+	if tr.DurationMs > 0 {
+		sub += " · " + core.FmtDuration(tr.Duration())
+	}
+	t.dArtist.SetText(sub)
+	main, _ := statusLines(v)
+	kind := map[core.JobState]string{core.JobDone: "ok", core.JobFailed: "bad", core.JobWaiting: "warn", core.JobDownloading: "accent", core.JobSearching: "info", core.JobReady: "info", core.JobInLibrary: "info"}[v.State]
+	if kind == "" {
+		kind = "off"
+	}
+	setPill(t.dState, firstWords(main, 26), kind)
+
+	active := v.State == core.JobQueued || v.State == core.JobSearching || v.State == core.JobReady || v.State == core.JobDownloading || v.State == core.JobWaiting
+	t.dNext.SetVisible(active)
+	t.dCancel.SetVisible(active)
+	t.dAgain.SetVisible(!active || v.State == core.JobWaiting)
+	t.dOpen.SetVisible((v.State == core.JobDone && v.Rec.Path != "") || v.Lib != nil)
+
+	var b strings.Builder
+	if len(v.Playlists) > 0 {
+		fmt.Fprintf(&b, "<p><b>From:</b> %s</p>", e(strings.Join(v.Playlists, ", ")))
+	}
+	if v.State == core.JobDone {
+		r := v.Rec
+		fmt.Fprintf(&b, "<p><b>Saved as:</b> %s</p><p><b>Quality:</b> %s<br><b>Came from:</b> %s</p>", e(filepath.Base(r.Path)), e(r.Quality.String()), e(core.SourceLabels[r.Source]))
+		if r.SourceURL != "" && strings.HasPrefix(r.SourceURL, "http") {
+			fmt.Fprintf(&b, "<p><a style='color:%s' href='%s'>Open the source page</a></p>", th.Accent, e(r.SourceURL))
+		}
+		if r.LibPath != "" {
+			fmt.Fprintf(&b, "<p>This copy is better than the %s in your library, which was left as it is.</p>", e(r.LibQuality.String()))
+		}
+	}
+	if v.Lib != nil {
+		s := "copy"
+		if v.LibCount > 1 {
+			s = fmt.Sprintf("%d copies; the best", v.LibCount)
+		}
+		fmt.Fprintf(&b, "<p><b>In your library</b> (%s): %s<br>%s</p>", s, e(v.Lib.Q.String()), e(v.Lib.Path))
+	}
+	if v.State == core.JobWaiting {
+		fmt.Fprintf(&b, "<p>The app will try again at %s by itself.</p>", v.RetryAt.Format("15:04"))
+	}
+	if v.State == core.JobDownloading || v.State == core.JobSearching {
+		if v.Task.Note != "" {
+			fmt.Fprintf(&b, "<p>%s</p>", e(v.Task.Note))
+		}
 	}
 	reasons := v.Reasons
 	if len(reasons) == 0 && v.Reason != "" {
 		reasons = strings.Split(v.Reason, "; ")
 	}
 	if len(reasons) > 0 {
-		b.WriteString("\nSources tried:\n")
+		b.WriteString("<p><b>What the sources said</b></p><ul style='margin-left:-22px'>")
 		for _, r := range reasons {
-			fmt.Fprintf(&b, " • %s\n", r)
+			fmt.Fprintf(&b, "<li>%s</li>", e(r))
 		}
+		b.WriteString("</ul>")
 	}
-	d := qt.NewQDialog(t.a.win.QWidget)
-	d.SetWindowTitle(tr.String())
-	d.Resize(760, 460)
-	l := qt.NewQVBoxLayout(d.QWidget)
-	text := qt.NewQPlainTextEdit3(b.String())
-	text.SetReadOnly(true)
-	l.AddWidget(text.QWidget)
-	buttons := qt.NewQDialogButtonBox4(qt.QDialogButtonBox__Close)
-	buttons.OnRejected(func() { d.Close() })
-	l.AddWidget(buttons.QWidget)
-	d.Exec()
+	t.dBody.SetText(b.String())
+}
+
+func firstWords(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if i := strings.Index(s, "  ·"); i > 0 {
+		return s[:i]
+	}
+	return s[:n] + "…"
 }
 
 // showPlaylist shows one playlist's tracks.
 func (t *queueTab) showPlaylist(name string) {
 	t.q.Playlist = name
+	t.q.Filter = ""
+	t.chips["all"].SetChecked(true)
 	t.refresh(true)
-	t.info.SetText(fmt.Sprintf("Playlist %s: %d tracks   ·   Esc shows every track", name, len(t.rows)))
+	t.a.show(pageDownloads)
 }

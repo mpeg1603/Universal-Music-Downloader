@@ -16,26 +16,22 @@ import (
 // need one (RuTracker.org).
 func (a *app) pickIndexers() {
 	d := qt.NewQDialog(a.win.QWidget)
-	d.SetWindowTitle("Built-in indexers")
+	d.SetWindowTitle("Torrent sites")
 	d.Resize(900, 620)
 	box := qt.NewQVBoxLayout(d.QWidget)
+	box.SetContentsMargins(18, 14, 18, 14)
+	box.SetSpacing(10)
+	box.AddWidget(text("The torrent sites the app searches. The ones marked ★ are on by default. Sites that keep failing are left out for a while by themselves.", "subtitle").QWidget)
 	top := qt.NewQHBoxLayout2()
 	find := qt.NewQLineEdit2()
-	find.SetPlaceholderText("Find an indexer by name or address")
+	find.SetPlaceholderText("Find a site by name or address")
 	find.SetClearButtonEnabled(true)
 	music := qt.NewQCheckBox3("Only those with music")
 	music.SetChecked(true)
 	top.AddWidget2(find.QWidget, 1)
 	top.AddWidget(music.QWidget)
 	box.AddLayout(top.QLayout)
-	table := qt.NewQTableWidget2()
-	heads := []string{"On", "Indexer", "Language", "Music", "Searches", "Last problem"}
-	table.SetColumnCount(len(heads))
-	table.SetHorizontalHeaderLabels(heads)
-	table.SetSelectionBehavior(qt.QAbstractItemView__SelectRows)
-	table.SetSelectionMode(qt.QAbstractItemView__SingleSelection)
-	table.SetEditTriggers(qt.QAbstractItemView__NoEditTriggers)
-	table.VerticalHeader().Hide()
+	table := table("On", "Site", "Language", "Music", "Searches", "Last problem")
 	table.HorizontalHeader().SetSectionResizeMode2(1, qt.QHeaderView__Stretch)
 	table.SetColumnWidth(0, 34)
 	table.SetColumnWidth(5, 220)
@@ -102,7 +98,7 @@ func (a *app) pickIndexers() {
 		if x := selected(); x != nil {
 			text := x.Name + " · " + x.Site + "\n" + x.Description
 			if x.Login {
-				text += "\nNeeds your account on the site: Account… sets it."
+				text += "\nNeeds your account on the site: use Your account."
 			}
 			info.SetText(text)
 		}
@@ -115,7 +111,7 @@ func (a *app) pickIndexers() {
 		if x.Login && !x.On && len(a.m.Config().Indexers.Settings[x.ID]) == 0 {
 			a.indexerAccount(*x)
 		} else if err := a.m.SetIndexer(x.ID, !x.On); err != nil {
-			a.message("Indexers", err.Error())
+			a.message("Torrent sites", err.Error())
 		}
 		fill()
 	}
@@ -125,16 +121,15 @@ func (a *app) pickIndexers() {
 
 	buttons := qt.NewQHBoxLayout2()
 	add := func(text string, do func()) *qt.QPushButton {
-		b := qt.NewQPushButton3(text)
-		b.OnClicked(do)
+		b := button(text, "", do)
 		buttons.AddWidget(b.QWidget)
 		return b
 	}
 	add("On / off", toggle)
-	add("Account…", func() {
+	add("Your account…", func() {
 		if x := selected(); x != nil {
 			if !x.Login {
-				a.message("Indexers", x.Name+" needs no account.")
+				a.message("Torrent sites", x.Name+" needs no account.")
 				return
 			}
 			a.indexerAccount(*x)
@@ -142,9 +137,9 @@ func (a *app) pickIndexers() {
 		}
 	})
 	var update *qt.QPushButton
-	update = add("Update from GitHub", func() {
+	update = add("Get the latest site list", func() {
 		update.SetEnabled(false)
-		info.SetText("Fetching Jackett's definitions from GitHub…")
+		info.SetText("Fetching the latest list of sites…")
 		go func() {
 			ctx, cancel := context.WithTimeout(a.m.Context(), 3*time.Minute)
 			defer cancel()
@@ -154,7 +149,7 @@ func (a *app) pickIndexers() {
 				if err != nil {
 					info.SetText(err.Error())
 				} else {
-					info.SetText(fmt.Sprintf("%d definitions new or changed.", n))
+					info.SetText(fmt.Sprintf("%d sites new or changed.", n))
 				}
 				fill()
 			})
@@ -182,14 +177,10 @@ func (a *app) indexerAccount(x core.IndexerStatus) {
 		form.AddRow3(s.Label, e.QWidget)
 		fields[s.Name] = e
 	}
-	note := qt.NewQLabel3("Your account on " + x.Site + ". Kept in the settings file, readable only by you. The app logs in once and keeps " +
-		"the session; a failed login isn't tried again for 30 minutes (sites lock accounts or ask for captchas after many).")
-	note.SetWordWrap(true)
-	form.AddRowWithWidget(note.QWidget)
+	form.AddRowWithWidget(text("Your account on "+x.Site+". It's kept in the settings file, readable only by you. The app logs in once and keeps "+
+		"the session; a failed login isn't tried again for 30 minutes, because sites lock accounts or ask for captchas after many.", "hint").QWidget)
 	buttons := qt.NewQHBoxLayout2()
-	save := qt.NewQPushButton3("Save and turn on")
-	save.SetDefault(true)
-	save.OnClicked(func() {
+	save := button("Save and turn on", "primary", func() {
 		values := map[string]string{}
 		for k, e := range fields {
 			values[k] = e.Text()
@@ -200,10 +191,10 @@ func (a *app) indexerAccount(x core.IndexerStatus) {
 		}
 		d.Accept()
 	})
+	save.SetDefault(true)
 	buttons.AddWidget(save.QWidget)
 	if len(have) > 0 {
-		forget := qt.NewQPushButton3("Forget the account")
-		forget.OnClicked(func() {
+		forget := button("Forget the account", "danger", func() {
 			if err := a.m.SetIndexerSettings(x.ID, nil); err != nil {
 				a.message(x.Name, err.Error())
 				return
@@ -212,9 +203,7 @@ func (a *app) indexerAccount(x core.IndexerStatus) {
 		})
 		buttons.AddWidget(forget.QWidget)
 	}
-	cancel := qt.NewQPushButton3("Cancel")
-	cancel.OnClicked(func() { d.Reject() })
-	buttons.AddWidget(cancel.QWidget)
+	buttons.AddWidget(button("Cancel", "", func() { d.Reject() }).QWidget)
 	form.AddRowWithLayout(buttons.QLayout)
 	d.Resize(560, 220)
 	d.Exec()

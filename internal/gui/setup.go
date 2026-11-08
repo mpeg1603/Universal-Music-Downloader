@@ -10,24 +10,56 @@ import (
 	qt "github.com/mappu/miqt/qt6"
 )
 
-// The first-run setup (core.SetupSteps): one page per step, filled into a draft of the
-// settings that's saved at the end. Every step can be skipped.
+// The first-time setup: a page per step, filled into a draft of the settings that's saved at
+// the end. Everything can be skipped and changed later. The sources that need nothing share a
+// page, so it's short for most people; every download method gets set up or left off.
+type setupStep struct {
+	id, title, help, more string
+}
+
+var setupSteps = []setupStep{
+	{"welcome", "Welcome", "This app downloads the songs of your playlists, and any music you search for, from many places, and skips what you already have. A few questions and you're ready. Skip anything you like; everything can be changed later.", ""},
+	{"output", "Where should downloads go?", "New files go to this folder, never into your existing music.", ""},
+	{"library", "Do you already have music?", "Add the folders where you keep it, and the app won't download what you already have. They're only ever read, never changed.", ""},
+	{"playlists", "Got any playlists?", "Add playlist files now, or skip this and search for music by name instead.", "playlists"},
+	{"free", "Sources that need no account", "These work right away. Bandcamp and the Internet Archive offer free, often lossless music; YouTube and SoundCloud have almost everything, in lower quality.", "sources"},
+	{"soulseek", "Soulseek", "A community sharing their collections directly with each other, often in lossless. It needs a free account, and you share your music in return.", "soulseek"},
+	{"torrent", "Torrents", "Albums and discographies from torrent sites. The app searches the sites itself and fetches only the files it needs.", ""},
+	{"vk", "VK", "The music library of the VK social network, with your account's token (MP3 up to 320).", ""},
+	{"yandex", "Yandex Music", "Yandex's streaming service, with your account's token (FLAC with Plus).", ""},
+	{"done", "You're all set", "You can turn sources on or off, and change their order, on the Sources page. This setup can be run again from Settings.", ""},
+}
+
 type setupWizard struct {
-	a     *app
-	d     *qt.QDialog
-	draft core.Config
-	step  int
-	body  *qt.QWidget
-	apply []func(*core.Config) error
+	a      *app
+	d      *qt.QDialog
+	draft  core.Config
+	step   int
+	body   *qt.QWidget
+	apply  []func(*core.Config) error
+	bar    *qt.QProgressBar
+	stepOf *qt.QLabel
 }
 
 func (a *app) runSetup() {
+	a.newSetup().d.Exec()
+}
+
+func (a *app) newSetup() *setupWizard {
 	w := &setupWizard{a: a, draft: a.m.Config(), d: qt.NewQDialog(a.win.QWidget)}
-	w.d.SetWindowTitle("Universal Music Downloader: setup")
-	w.d.Resize(760, 560)
-	qt.NewQVBoxLayout(w.d.QWidget)
+	w.d.SetWindowTitle("Set up " + appName)
+	w.d.Resize(760, 600)
+	outer := qt.NewQVBoxLayout(w.d.QWidget)
+	outer.SetContentsMargins(26, 20, 26, 18)
+	outer.SetSpacing(14)
+	w.stepOf = text("", "muted")
+	outer.AddWidget(w.stepOf.QWidget)
+	w.bar = qt.NewQProgressBar2()
+	w.bar.SetTextVisible(false)
+	w.bar.SetRange(0, len(setupSteps)-1)
+	outer.AddWidget(w.bar.QWidget)
 	w.show()
-	w.d.Exec()
+	return w
 }
 
 func (w *setupWizard) on(names ...string) bool {
@@ -39,42 +71,55 @@ func (w *setupWizard) on(names ...string) bool {
 	return false
 }
 
+// setupFree says which sources start on, the first time through.
+func (w *setupWizard) startOn(name string) bool {
+	if w.draft.SetupDone {
+		return w.on(name)
+	}
+	return name == "bandcamp" || name == "archive" || name == "audius" || w.on(name)
+}
+
 func (w *setupWizard) show() {
 	if w.body != nil {
 		w.body.Hide()
 		w.body.DeleteLater()
 	}
 	w.apply = nil
-	st := core.SetupSteps[w.step]
+	st := setupSteps[w.step]
+	w.stepOf.SetText(fmt.Sprintf("Step %d of %d", w.step+1, len(setupSteps)))
+	w.bar.SetValue(w.step)
 	w.body = qt.NewQWidget2()
 	box := qt.NewQVBoxLayout(w.body)
-	title := qt.NewQLabel3(fmt.Sprintf("<h3>%s</h3><span style='color:#888'>Step %d of %d</span>", st.Title, w.step+1, len(core.SetupSteps)))
-	box.AddWidget(title.QWidget)
-	help := qt.NewQLabel3(st.Help)
-	help.SetWordWrap(true)
-	box.AddWidget(help.QWidget)
+	box.SetContentsMargins(0, 0, 0, 0)
+	box.SetSpacing(10)
+	box.AddWidget(text(st.title, "title").QWidget)
+	box.AddWidget(text(st.help, "subtitle").QWidget)
+	box.AddSpacing(8)
 	form := qt.NewQFormLayout2()
 	form.SetFieldGrowthPolicy(qt.QFormLayout__ExpandingFieldsGrow)
+	form.SetVerticalSpacing(10)
+	form.SetHorizontalSpacing(14)
 	box.AddLayout(form.QLayout)
 	d := &w.draft
-	text := func(label, value string, set func(*core.Config, string)) *qt.QLineEdit {
+	field := func(label, value string, set func(*core.Config, string)) *qt.QLineEdit {
 		e := qt.NewQLineEdit3(value)
 		form.AddRow3(label, e.QWidget)
 		w.apply = append(w.apply, func(c *core.Config) error { set(c, strings.TrimSpace(e.Text())); return nil })
 		return e
 	}
 	secret := func(label, value string, set func(*core.Config, string)) {
-		e := text(label, value, set)
+		e := field(label, value, set)
 		e.SetEchoMode(qt.QLineEdit__Password)
 	}
-	check := func(label string, value bool, set func(*core.Config, bool)) {
+	check := func(label string, value bool, set func(*core.Config, bool)) *qt.QCheckBox {
 		b := qt.NewQCheckBox3(label)
 		b.SetChecked(value)
 		form.AddRowWithWidget(b.QWidget)
 		w.apply = append(w.apply, func(c *core.Config) error { set(c, b.IsChecked()); return nil })
+		return b
 	}
 	number := func(label string, value float64, set func(*core.Config, float64)) {
-		e := text(label, strconv.FormatFloat(value, 'f', -1, 64), func(*core.Config, string) {})
+		e := field(label, strconv.FormatFloat(value, 'f', -1, 64), func(*core.Config, string) {})
 		e.SetMaximumWidth(120)
 		w.apply = append(w.apply, func(c *core.Config) error {
 			v, err := strconv.ParseFloat(strings.TrimSpace(e.Text()), 64)
@@ -85,22 +130,36 @@ func (w *setupWizard) show() {
 			return nil
 		})
 	}
-	use := func(names ...string) {
-		on := w.on(names...)
-		if !w.draft.SetupDone && !on && (names[0] == "bandcamp" || names[0] == "archive" || names[0] == "audius") {
-			on = true // the free ones start on
+	use := func(name, label string) {
+		check(label, w.startOn(name), func(c *core.Config, v bool) { c.SetSource(name, v) })
+	}
+	note := func(s string) {
+		l := richText(s, "hint")
+		form.AddRowWithWidget(l.QWidget)
+	}
+	switch st.id {
+	case "welcome":
+		seg, btns := segments([]string{"Match my system", "Light", "Dark"}, func(i int) {
+			w.a.m.UpdateConfig(func(c *core.Config) { c.GUI.Theme = core.Themes[i] })
+			w.draft.GUI.Theme = core.Themes[i]
+			w.a.applyTheme()
+		})
+		for i, m := range core.Themes {
+			if m == w.a.themeMode() {
+				btns[i].SetChecked(true)
+			}
 		}
-		check("Use "+st.Title, on, func(c *core.Config, v bool) {
-			for _, n := range names {
-				c.SetSource(n, v)
+		form.AddRow3("Look", seg.QWidget)
+	case "output":
+		e := field("Downloads folder", d.OutputDir, func(c *core.Config, s string) { c.OutputDir = s })
+		browse := button("Browse…", "", func() {
+			if p := qt.QFileDialog_GetExistingDirectory3(w.d.QWidget, "Downloads folder", e.Text()); p != "" {
+				e.SetText(p)
 			}
 		})
-	}
-	switch st.ID {
-	case "output":
-		text("Downloads folder", d.OutputDir, func(c *core.Config, s string) { c.OutputDir = s })
+		form.AddRowWithWidget(browse.QWidget)
 		cb := qt.NewQComboBox2()
-		cb.AddItems(formatLabels)
+		cb.AddItems(formatWords)
 		for i, f := range core.Formats {
 			if f == d.Format {
 				cb.SetCurrentIndex(i)
@@ -108,18 +167,20 @@ func (w *setupWizard) show() {
 		}
 		form.AddRow3("Format", cb.QWidget)
 		w.apply = append(w.apply, func(c *core.Config) error { c.Format = core.Formats[max(0, cb.CurrentIndex())]; return nil })
+		note("“Keep original” saves files exactly as they came, the best choice for nearly everyone.")
+		number("Speed limit, MB/s (0: none)", d.BandwidthMBps, func(c *core.Config, v float64) { c.BandwidthMBps = v })
+		number("Downloads at once", float64(d.MaxDownloads), func(c *core.Config, v float64) { c.MaxDownloads = int(v) })
 	case "library":
-		lib := text("Library folders (; between them)", strings.Join(d.LibraryDirs, "; "), func(c *core.Config, s string) { c.LibraryDirs = core.SplitBy(s, ";") })
-		browse := qt.NewQPushButton3("Add a folder…")
-		browse.OnClicked(func() {
-			if p := qt.QFileDialog_GetExistingDirectory3(w.d.QWidget, "A library folder (only ever read)", ""); p != "" {
+		lib := field("Music folders (separate with ;)", strings.Join(d.LibraryDirs, "; "), func(c *core.Config, s string) { c.LibraryDirs = core.SplitBy(s, ";") })
+		browse := button("Add a folder…", "", func() {
+			if p := qt.QFileDialog_GetExistingDirectory3(w.d.QWidget, "A music folder (only ever read)", ""); p != "" {
 				lib.SetText(strings.Trim(strings.TrimSpace(lib.Text())+"; "+p, "; "))
 			}
 		})
 		form.AddRowWithWidget(browse.QWidget)
 		cb := qt.NewQComboBox2()
+		cb.AddItems(qualityItems())
 		for i, t := range core.Thresholds {
-			cb.AddItem(fmt.Sprintf("%s — %s", t.Name, t.Label))
 			if string(t.Name) == d.Threshold {
 				cb.SetCurrentIndex(i)
 			}
@@ -134,7 +195,7 @@ func (w *setupWizard) show() {
 		for _, in := range d.Inputs {
 			have = append(have, in.Path)
 		}
-		files := text("Playlist files or links (; between them)", strings.Join(have, "; "), func(c *core.Config, s string) {
+		files := field("Files or links (separate with ;)", strings.Join(have, "; "), func(c *core.Config, s string) {
 			var ins []core.InputCfg
 			for _, p := range core.SplitBy(s, ";") {
 				if !strings.Contains(p, "://") && !strings.HasPrefix(p, "spotify:") {
@@ -144,63 +205,49 @@ func (w *setupWizard) show() {
 			}
 			c.Inputs = ins
 		})
-		browse := qt.NewQPushButton3("Add a file…")
-		browse.OnClicked(func() {
+		browse := button("Add a file…", "", func() {
 			if p := qt.QFileDialog_GetOpenFileName4(w.d.QWidget, "A playlist file", "", "Playlists (*.csv *.zip *.txt *.json);;All files (*)"); p != "" {
 				files.SetText(strings.Trim(strings.TrimSpace(files.Text())+"; "+p, "; "))
 			}
 		})
 		form.AddRowWithWidget(browse.QWidget)
-	case "bandwidth":
-		number("Bandwidth cap, MB/s (0: none)", d.BandwidthMBps, func(c *core.Config, v float64) { c.BandwidthMBps = v })
-		number("Most downloads at once", float64(d.MaxDownloads), func(c *core.Config, v float64) { c.MaxDownloads = int(v) })
-		check("Skip busy sources while bandwidth is to spare", !d.NoQueueJump, func(c *core.Config, v bool) { c.NoQueueJump = !v })
-	case "bandcamp":
-		use("bandcamp")
-		text("Your email address (optional)", d.Bandcamp.Email, func(c *core.Config, s string) { c.Bandcamp.Email = s })
-	case "archive", "audius":
-		use(st.ID)
-	case "vk":
-		use("vk")
-		secret("Token (or log in later: Sources → VK → Settings)", d.VKToken, func(c *core.Config, s string) { c.VKToken = s })
-	case "yandex":
-		use("yandex")
-		secret("OAuth token", d.YandexToken, func(c *core.Config, s string) { c.YandexToken = s })
-		note := qt.NewQLabel3("Open " + core.YandexTokenURL + " in your browser, log in, and copy the access_token=… value.")
-		note.SetWordWrap(true)
-		note.SetTextInteractionFlags(qt.TextSelectableByMouse)
-		form.AddRowWithWidget(note.QWidget)
-	case "youtube":
-		for _, s := range [][2]string{{"youtube_music", "YouTube Music"}, {"youtube", "YouTube"}, {"soundcloud", "SoundCloud"}} {
-			name := s[0]
-			check("Use "+s[1], w.on(name), func(c *core.Config, v bool) { c.SetSource(name, v) })
-		}
+		note("From Spotify: export your playlists at <a style='color:" + th.Accent + "' href='https://exportify.net'>exportify.net</a> and add the file.")
+	case "free":
+		use("bandcamp", "Bandcamp: free and name-your-price music, often lossless")
+		field("Email for Bandcamp (optional)", d.Bandcamp.Email, func(c *core.Config, s string) { c.Bandcamp.Email = s })
+		note("Some artists ask for an email address before giving a free download.")
+		use("archive", "Internet Archive: freely licensed recordings")
+		use("audius", "Audius: independent artists' own uploads, MP3 320")
+		use("youtube_music", "YouTube Music: nearly everything, in lower quality")
+		use("soundcloud", "SoundCloud")
+		use("youtube", "YouTube")
 		cb := qt.NewQComboBox2()
-		cb.AddItems(append([]string{"(none)"}, core.Browsers[1:]...))
+		cb.AddItems(append([]string{"Nowhere"}, browserNames()...))
 		for i, b := range core.Browsers {
 			if b == d.CookiesFromBrowser {
 				cb.SetCurrentIndex(i)
 			}
 		}
-		form.AddRow3("YouTube login from your browser", cb.QWidget)
+		form.AddRow3("Use my YouTube login from", cb.QWidget)
 		w.apply = append(w.apply, func(c *core.Config) error {
 			c.CookiesFromBrowser = core.Browsers[max(0, cb.CurrentIndex())]
 			return nil
 		})
+		note("Only needed if YouTube asks you to sign in. Your browser is only read.")
 	case "soulseek":
-		use("soulseek")
+		use("soulseek", "Use Soulseek")
 		sk := d.Soulseek
-		text("Username", sk.Username, func(c *core.Config, s string) { c.Soulseek.Username = s })
+		field("Username", sk.Username, func(c *core.Config, s string) { c.Soulseek.Username = s })
 		secret("Password", sk.Password, func(c *core.Config, s string) { c.Soulseek.Password = s })
-		check("Share files (your library and downloads)", !sk.NoShare, func(c *core.Config, v bool) { c.Soulseek.NoShare = !v })
-		number("Listening port", float64(sk.ListenPort()), func(c *core.Config, v float64) {
+		note("A name nobody uses yet makes a new account.")
+		check("Share my music with others", !sk.NoShare, func(c *core.Config, v bool) { c.Soulseek.NoShare = !v })
+		number("Port", float64(sk.ListenPort()), func(c *core.Config, v float64) {
 			if c.Soulseek.Port = int(v); c.Soulseek.Port == core.SlskDefaultPort {
 				c.Soulseek.Port = 0
 			}
 		})
-		check("Ask the router to forward the port (UPnP)", !sk.NoUPnP, func(c *core.Config, v bool) { c.Soulseek.NoUPnP = !v })
-		imp := qt.NewQPushButton3("Import from Nicotine+")
-		imp.OnClicked(func() {
+		check("Ask my router to open the port (UPnP)", !sk.NoUPnP, func(c *core.Config, v bool) { c.Soulseek.NoUPnP = !v })
+		imp := button("Import from Nicotine+", "", func() {
 			got, err := core.ImportNicotine(w.draft.Soulseek)
 			if err != nil {
 				w.a.message("Nicotine+", err.Error())
@@ -212,11 +259,20 @@ func (w *setupWizard) show() {
 		})
 		form.AddRowWithWidget(imp.QWidget)
 	case "torrent":
-		use("torrent")
-		check("Built-in indexers (Jackett's public sites)", !d.Indexers.NoBuiltin, func(c *core.Config, v bool) { c.Indexers.NoBuiltin = !v })
-		text("FlareSolverr address (optional)", d.Indexers.FlareSolverr, func(c *core.Config, s string) { c.Indexers.FlareSolverr = s })
-		text("Jackett / Prowlarr address (optional)", strings.Join(d.Torznab.Feeds, ", "), func(c *core.Config, s string) { c.Torznab.Feeds = core.SplitList(s) })
+		use("torrent", "Use torrent sites")
+		check("Search the built-in sites", !d.Indexers.NoBuiltin, func(c *core.Config, v bool) { c.Indexers.NoBuiltin = !v })
+		field("FlareSolverr address (optional)", d.Indexers.FlareSolverr, func(c *core.Config, s string) { c.Indexers.FlareSolverr = s })
+		field("Jackett / Prowlarr address (optional)", strings.Join(d.Torznab.Feeds, ", "), func(c *core.Config, s string) { c.Torznab.Feeds = core.SplitList(s) })
 		secret("Jackett / Prowlarr API key", d.Torznab.Key, func(c *core.Config, s string) { c.Torznab.Key = s })
+		note("These helper programs are optional. FlareSolverr gets past some sites' browser checks; Jackett and Prowlarr add private trackers you have accounts on.")
+	case "vk":
+		use("vk", "Use VK")
+		secret("Token", d.VKToken, func(c *core.Config, s string) { c.VKToken = s })
+		note("Or log in later: Sources → VK → Set up.")
+	case "yandex":
+		use("yandex", "Use Yandex Music")
+		secret("Token", d.YandexToken, func(c *core.Config, s string) { c.YandexToken = s })
+		note("Open <a style='color:" + th.Accent + "' href='" + core.YandexTokenURL + "'>Yandex's token page</a>, log in, and copy the access_token=… value.")
 	case "done":
 		var on []string
 		for _, s := range w.draft.Sources {
@@ -224,25 +280,23 @@ func (w *setupWizard) show() {
 				on = append(on, core.SourceLabels[s.Name])
 			}
 		}
-		l := qt.NewQLabel3("Sources on: " + strings.Join(on, ", "))
-		l.SetWordWrap(true)
-		form.AddRowWithWidget(l.QWidget)
+		form.AddRowWithWidget(text("Sources you're using: "+core.FirstNonEmpty(strings.Join(on, ", "), "none yet"), "").QWidget)
 	}
 	box.AddStretch()
 
-	buttons := qt.NewQHBoxLayout2()
-	button := func(text string, do func()) *qt.QPushButton {
-		b := qt.NewQPushButton3(text)
-		b.OnClicked(do)
+	buttons := hbox()
+	buttons.SetSpacing(8)
+	if st.more != "" {
+		buttons.AddWidget(button("What's this?", "ghost", func() { w.a.showHelp(st.more) }).QWidget)
+	}
+	buttons.AddStretch()
+	add := func(label, kind string, do func()) *qt.QPushButton {
+		b := button(label, kind, do)
 		buttons.AddWidget(b.QWidget)
 		return b
 	}
-	if st.More != "" {
-		button("What's this?", func() { w.a.message(st.Title, st.More) })
-	}
-	buttons.AddStretch()
-	if w.step > 0 {
-		button("Back", func() { w.step--; w.show() })
+	if w.step > 0 && st.id != "done" {
+		add("Back", "ghost", func() { w.step--; w.show() })
 	}
 	next := func() {
 		trial := w.draft
@@ -253,47 +307,42 @@ func (w *setupWizard) show() {
 			}
 		}
 		w.draft = trial
-		if w.step++; w.step >= len(core.SetupSteps) {
+		if w.step++; w.step >= len(setupSteps) {
 			w.finish()
 			return
 		}
 		w.show()
 	}
 	var forward *qt.QPushButton
-	switch st.ID {
+	switch st.id {
 	case "welcome":
-		button("Skip the setup", func() {
+		add("Skip the setup", "ghost", func() {
 			w.a.m.FinishSetup(func(*core.Config) {})
 			w.d.Accept()
 		})
-		forward = button("Start", next)
+		forward = add("Get started", "primary", next)
 	case "done":
-		forward = button("Save and start", next)
+		add("Back", "ghost", func() { w.step--; w.show() })
+		forward = add("Start using the app", "primary", next)
 	default:
-		skip := "Skip"
-		if st.Source {
-			skip = "Skip (leave it off)"
+		isSource := st.id == "soulseek" || st.id == "torrent" || st.id == "vk" || st.id == "yandex"
+		label := "Skip"
+		if isSource {
+			label = "Not for me"
 		}
-		button(skip, func() {
-			if st.Source {
-				names := []string{st.ID}
-				if st.ID == "youtube" {
-					names = []string{"youtube", "youtube_music", "soundcloud"}
-				}
-				for _, n := range names {
-					w.draft.SetSource(n, false)
-				}
+		add(label, "ghost", func() {
+			if isSource {
+				w.draft.SetSource(st.id, false)
 			}
 			w.step++
 			w.show()
 		})
-		forward = button("Next", next)
+		forward = add("Next", "primary", next)
 	}
 	forward.SetDefault(true)
 	box.AddLayout(buttons.QLayout)
 	w.d.Layout().AddWidget(w.body)
-	// Enter goes forward: the first field to fill in has the focus, or else the forward button.
-	if form.RowCount() > 0 {
+	if form.RowCount() > 0 && st.id != "welcome" {
 		w.body.FocusNextChild()
 	} else {
 		forward.SetFocus()
@@ -304,10 +353,11 @@ func (w *setupWizard) finish() {
 	draft := w.draft
 	if err := w.a.m.FinishSetup(func(c *core.Config) { *c = draft }); err != nil {
 		w.a.message("Setup", err.Error())
-		w.step = len(core.SetupSteps) - 1
+		w.step = len(setupSteps) - 1
 		w.show()
 		return
 	}
 	w.d.Accept()
-	w.a.message("Setup", "Saved. The queue starts with your playlists; the Search tab finds more.")
+	w.a.toast("You're set. Find some music, or bring in your playlists.")
+	w.a.show(pageFind)
 }

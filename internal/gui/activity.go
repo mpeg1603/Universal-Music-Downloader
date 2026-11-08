@@ -6,7 +6,7 @@ import (
 	qt "github.com/mappu/miqt/qt6"
 )
 
-// The Log tab: what happened, newest at the bottom.
+// The Activity page: what happened, newest at the bottom.
 type logTab struct {
 	a       *app
 	w       *qt.QWidget
@@ -16,17 +16,18 @@ type logTab struct {
 }
 
 func newLogTab(a *app) *logTab {
-	t := &logTab{a: a, w: qt.NewQWidget2(), seq: -1}
-	box := qt.NewQVBoxLayout(t.w)
-	box.SetContentsMargins(0, 4, 0, 0)
-	t.verbose = qt.NewQCheckBox3("Detailed log")
+	t := &logTab{a: a, seq: -1}
+	p := a.newPage("Activity", "A running record of what the app is doing. Useful when something doesn't work the way you expected.", "")
+	t.w = p.w
+	t.verbose = qt.NewQCheckBox3("Show technical details")
 	t.verbose.OnToggled(func(on bool) { core.SetVerbose(on); t.seq = -1; t.refresh() })
-	box.AddWidget(t.verbose.QWidget)
+	p.actions.AddWidget(t.verbose.QWidget)
 	t.text = qt.NewQPlainTextEdit2()
+	setProp(t.text.QWidget, "role", "log")
 	t.text.SetReadOnly(true)
 	t.text.SetMaximumBlockCount(5000)
 	t.text.SetLineWrapMode(qt.QPlainTextEdit__NoWrap)
-	box.AddWidget2(t.text.QWidget, 1)
+	p.box.AddWidget2(t.text.QWidget, 1)
 	t.refresh()
 	return t
 }

@@ -16,43 +16,85 @@ type form struct {
 	a     *app
 	d     *qt.QDialog
 	f     *qt.QFormLayout
-	box   *qt.QVBoxLayout
+	col   *qt.QVBoxLayout // the column the sections stack in
 	apply []func(*core.Config) error
 	row   *qt.QHBoxLayout // the buttons
 	inner *qt.QWidget
 }
 
-func newForm(a *app, title string, width int) *form {
+func newForm(a *app, title, intro string, width int) *form {
 	f := &form{a: a, d: qt.NewQDialog(a.win.QWidget)}
 	f.d.SetWindowTitle(title)
-	f.d.Resize(width, 200)
-	f.box = qt.NewQVBoxLayout(f.d.QWidget)
-	scroll := qt.NewQScrollArea2()
-	scroll.SetWidgetResizable(true)
-	inner := qt.NewQWidget2()
-	f.f = qt.NewQFormLayout(inner)
-	f.f.SetFieldGrowthPolicy(qt.QFormLayout__ExpandingFieldsGrow)
-	scroll.SetWidget(inner)
-	scroll.SetFrameShape(qt.QFrame__NoFrame)
-	scroll.SetHorizontalScrollBarPolicy(qt.ScrollBarAlwaysOff)
-	f.inner = inner
-	f.box.AddWidget2(scroll.QWidget, 1)
-	f.row = qt.NewQHBoxLayout2()
-	f.box.AddLayout(f.row.QLayout)
+	f.d.Resize(width, 300)
+	outer := qt.NewQVBoxLayout(f.d.QWidget)
+	outer.SetContentsMargins(20, 16, 12, 14)
+	outer.SetSpacing(10)
+	h := qt.NewQLabel3(title)
+	setProp(h.QWidget, "role", "h1")
+	outer.AddWidget(h.QWidget)
+	if intro != "" {
+		outer.AddWidget(richText(intro, "subtitle").QWidget)
+	}
+	scroll, col, inner := scrolling()
+	f.col, f.inner = col, inner
+	f.newSection()
+	outer.AddWidget2(scroll.QWidget, 1)
+	f.row = hbox()
+	f.row.SetContentsMargins(0, 0, 8, 0)
+	f.row.SetSpacing(8)
+	outer.AddLayout(f.row.QLayout)
 	return f
 }
 
-func (f *form) note(text string) {
-	l := qt.NewQLabel3(text)
-	l.SetWordWrap(true)
-	l.SetTextFormat(qt.RichText)
-	l.SetOpenExternalLinks(true)
+// newSection starts a new block of fields.
+func (f *form) newSection() {
+	fl := qt.NewQFormLayout2()
+	fl.SetFieldGrowthPolicy(qt.QFormLayout__ExpandingFieldsGrow)
+	fl.SetHorizontalSpacing(14)
+	fl.SetVerticalSpacing(9)
+	fl.SetContentsMargins(0, 0, 0, 0)
+	f.f = fl
+	f.col.AddLayout(fl.QLayout)
+}
+
+// head starts a titled part of the form.
+func (f *form) head(title string) {
+	h := qt.NewQLabel3(title)
+	setProp(h.QWidget, "role", "h2")
+	h.SetContentsMargins(0, 8, 0, 0)
+	f.col.AddWidget(h.QWidget)
+	f.newSection()
+}
+
+func (f *form) note(s string) {
+	l := richText(s, "hint")
 	f.f.AddRowWithWidget(l.QWidget)
 }
 
-func (f *form) head(text string) {
-	l := qt.NewQLabel3("<b>" + text + "</b>")
-	f.f.AddRowWithWidget(l.QWidget)
+// collapsed starts a part that's hidden until asked for ("Connection", say).
+func (f *form) collapsed(title string, open bool) {
+	body := qt.NewQWidget2()
+	fl := qt.NewQFormLayout(body)
+	fl.SetFieldGrowthPolicy(qt.QFormLayout__ExpandingFieldsGrow)
+	fl.SetHorizontalSpacing(14)
+	fl.SetVerticalSpacing(9)
+	fl.SetContentsMargins(0, 2, 0, 0)
+	var head *qt.QPushButton
+	label := func(on bool) string {
+		if on {
+			return "▾  " + title
+		}
+		return "▸  " + title
+	}
+	head = button(label(open), "link", func() {
+		on := !body.IsVisible()
+		body.SetVisible(on)
+		head.SetText(label(on))
+	})
+	f.col.AddWidget(head.QWidget)
+	f.col.AddWidget(body)
+	body.SetVisible(open)
+	f.f = fl
 }
 
 func (f *form) text(label, value string, set func(*core.Config, string) error) *qt.QLineEdit {
@@ -101,13 +143,14 @@ func (f *form) combo(label string, items []string, cur int, set func(*core.Confi
 	return cb
 }
 
-// route adds the route editor: its type, and for proxies the address, port and login.
+// route adds how a source connects: the same as everything else, direct, or through a proxy.
 func (f *form) route(source, route string) {
 	spec := core.ParseRoute(route)
+	f.collapsed("Connection (most people can leave this alone)", spec.Kind != core.RouteSystem)
 	kind := qt.NewQComboBox2()
 	cur := 0
 	for i, k := range core.RouteKinds {
-		kind.AddItem(core.RouteKindLabels[k])
+		kind.AddItem(core.FirstNonEmpty(routeWords[k], core.RouteKindLabels[k]))
 		if k == spec.Kind {
 			cur = i
 		}
@@ -122,11 +165,12 @@ func (f *form) route(source, route string) {
 	user := qt.NewQLineEdit3(spec.User)
 	pass := qt.NewQLineEdit3(spec.Pass)
 	pass.SetEchoMode(qt.QLineEdit__Password)
-	f.f.AddRow3("Route", kind.QWidget)
-	f.f.AddRow3("   Proxy address (host or IP)", host.QWidget)
-	f.f.AddRow3("   Proxy port", port.QWidget)
-	f.f.AddRow3("   Proxy user (if it needs a login)", user.QWidget)
-	f.f.AddRow3("   Proxy password", pass.QWidget)
+	f.f.AddRow3("Connect", kind.QWidget)
+	f.f.AddRow3("Proxy address", host.QWidget)
+	f.f.AddRow3("Proxy port", port.QWidget)
+	f.f.AddRow3("Proxy user", user.QWidget)
+	f.f.AddRow3("Proxy password", pass.QWidget)
+	f.note("\"Direct\" goes around a VPN, for this source only. Leave the proxy fields empty unless you have a proxy.")
 	enable := func(i int) {
 		on := i >= 0 && i < len(core.RouteKinds) && (core.RouteKinds[i] == "socks5" || core.RouteKinds[i] == "http")
 		for _, w := range []*qt.QLineEdit{host, port, user, pass} {
@@ -147,16 +191,16 @@ func (f *form) route(source, route string) {
 			r = core.RouteSpec{Kind: k, Host: strings.TrimSpace(host.Text()), Port: p, User: strings.TrimSpace(user.Text()), Pass: pass.Text()}
 		}
 		if err := r.Validate(); err != nil {
-			return fmt.Errorf("route: %w", err)
+			return fmt.Errorf("connection: %w", err)
 		}
 		c.SetRoute(source, r.String())
 		return nil
 	})
+	f.newSection()
 }
 
-func (f *form) button(text string, do func()) *qt.QPushButton {
-	b := qt.NewQPushButton3(text)
-	b.OnClicked(do)
+func (f *form) button(label string, do func()) *qt.QPushButton {
+	b := button(label, "", do)
 	f.row.AddWidget(b.QWidget)
 	return b
 }
@@ -166,7 +210,7 @@ func (f *form) save() bool {
 	trial := f.a.m.Config()
 	for _, a := range f.apply {
 		if err := a(&trial); err != nil {
-			f.a.message("Can't save", err.Error())
+			f.a.message("That can't be saved", err.Error())
 			return false
 		}
 	}
@@ -175,7 +219,7 @@ func (f *form) save() bool {
 			a(c)
 		}
 	}); err != nil {
-		f.a.message("Can't save", err.Error())
+		f.a.message("That can't be saved", err.Error())
 		return false
 	}
 	return true
@@ -184,13 +228,16 @@ func (f *form) save() bool {
 // run shows the window with Save and Cancel (after the buttons added before) until closed.
 func (f *form) run() {
 	f.row.AddStretch()
-	save := f.button("Save", func() {
+	f.button("Cancel", func() { f.d.Reject() })
+	save := button("Save", "primary", func() {
 		if f.save() {
 			f.d.Accept()
+			f.a.toast("Saved.")
 		}
 	})
 	save.SetDefault(true)
-	f.button("Cancel", func() { f.d.Reject() })
-	f.d.Resize(f.d.Width(), min(f.inner.SizeHint().Height()+90, 860))
+	f.row.AddWidget(save.QWidget)
+	f.col.AddStretch()
+	f.d.Resize(f.d.Width(), min(f.inner.SizeHint().Height()+140, 760))
 	f.d.Exec()
 }

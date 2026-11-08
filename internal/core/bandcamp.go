@@ -279,7 +279,7 @@ func (b *Bandcamp) emailDownload(ctx context.Context, t *tralbum, pageURL string
 		Logf("Bandcamp: asked for %s to be emailed to %s", pageURL, cfg.Email)
 	}
 	if !canFetch {
-		return "", pendingf(6*time.Hour, "Bandcamp emails the download link to %s: paste it with b in the Sources tab (%s)", cfg.Email, pageURL)
+		return "", pendingf(6*time.Hour, "Bandcamp emails the download link to %s: paste it in Sources → Bandcamp (%s)", cfg.Email, pageURL)
 	}
 	task.setStage("waiting for Bandcamp's email")
 	go mb.poll()
@@ -287,7 +287,7 @@ func (b *Bandcamp) emailDownload(ctx context.Context, t *tralbum, pageURL string
 	case link := <-ch:
 		return link, nil
 	case <-time.After(10 * time.Minute):
-		return "", pendingf(30*time.Minute, "Bandcamp's email to %s hasn't arrived yet; the mailbox is checked again later, or paste the link with b in the Sources tab (%s)", cfg.Email, pageURL)
+		return "", pendingf(30*time.Minute, "Bandcamp's email to %s hasn't arrived yet; the mailbox is checked again later, or paste the link in Sources → Bandcamp (%s)", cfg.Email, pageURL)
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}

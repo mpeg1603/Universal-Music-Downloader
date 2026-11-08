@@ -1,6 +1,6 @@
 # Universal Music Downloader
 
-A terminal app that downloads the songs of your playlists, and the tracks, albums and
+An app that downloads the songs of your playlists, and the tracks, albums and
 discographies you search for, from many sources (Bandcamp, Soulseek, torrents, YouTube…), and
 **skips what your music library already has in good enough quality**. It never downloads from
 Spotify, and never writes to your library: new files go to their own downloads folder.
@@ -8,6 +8,10 @@ Spotify, and never writes to your library: new files go to their own downloads f
 It's self-contained: the Soulseek client, the BitTorrent client and the torrent site search
 (Jackett's public site definitions) are built in, and the programs it uses (ffmpeg, yt-dlp)
 are downloaded by the app when they aren't installed.
+
+It comes in two versions over the same engine: **a window** ([what it looks like](docs/gui-guide.md)),
+plain and explained for everyone, and **a terminal app** for people who'd rather use the keyboard.
+Everything either can do, the other can do too.
 
 Everything is set up and controlled inside the app: playlists, library folders, quality
 threshold, sources and their order, bandwidth, and every track (cancel, restart, do next).
@@ -103,6 +107,22 @@ with the number of transfers each way).
 - Nothing else: Soulseek, BitTorrent and the torrent site search are built in. Optional:
   [FlareSolverr](TORRENTS.md#flaresolverr-sites-behind-cloudflare) for torrent sites behind
   Cloudflare, your own Jackett or Prowlarr.
+
+## The window
+
+![The Downloads page](docs/img/downloads.png)
+
+`universal-music-downloader-gui` is the same app with a desktop interface. The sidebar has the
+things you'd come for: **Downloads**, **Find music**, **Playlists**, **My library**, then
+**Sources** (where music comes from, and in what order), **Soulseek**, **Settings**, **Activity**
+and **Help**. Every page says what it's for, and the small **?** next to its title explains it.
+Light, dark, or following your desktop (Settings → Appearance). [docs/gui-guide.md](docs/gui-guide.md)
+walks through it.
+
+The downloads on the [releases page](../../releases)
+include everything it needs, Qt included: an AppImage or tar.gz on Linux, an installer or a
+portable zip on Windows. The window and the terminal app share settings and state, but can't
+run at the same time.
 
 ## Getting started
 
@@ -477,8 +497,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o universal-music-downloader.e
 go test ./...      # some tests need ffmpeg installed; no network needed
 ```
 
-**The window (in progress).** `universal-music-downloader-gui` is the same app in a Qt window,
-over the same backend; the terminal app stays. It needs Qt 6 to build (`qt6-base` on Arch,
+**The window.** `universal-music-downloader-gui` needs Qt 6 to build (`qt6-base` on Arch,
 `qt6-base-dev` on Debian/Ubuntu) and a C++ compiler; the first build compiles the Qt bindings
 and takes a while:
 
@@ -486,9 +505,12 @@ and takes a while:
 go build -o universal-music-downloader-gui ./cmd/universal-music-downloader-gui
 ```
 
-So far it has every tab but Soulseek (Queue, Search, Library, Sources with every source's
-settings and the indexers, Settings, Log) and the first-run setup; Soulseek follows (see [docs/ROADMAP.md](docs/ROADMAP.md)). Both programs use the same settings and state,
-but not at the same time.
+`packaging/` has what releases are built from (`.github/workflows/release.yml`): the AppImage
+and tar.gz script and the Windows installer.
+
+To see the window without a screen, build with `-tags guishots` and run it with
+`QT_QPA_PLATFORM=offscreen UMD_SHOTS=<folder>`: it walks through every page and dialog in both
+themes, saves a picture of each and checks that the controls work.
 
 The code is in three parts:
 

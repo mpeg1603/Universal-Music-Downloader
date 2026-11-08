@@ -55,6 +55,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
+	gui.Version = version
 	gui.Run(m)
 	m.Stop()
 }

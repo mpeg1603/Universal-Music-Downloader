@@ -111,7 +111,19 @@ type Config struct {
 	YandexToken string         `json:"yandex_token,omitempty"`
 	Bandcamp    BandcampCfg    `json:"bandcamp"`
 	Soulseek    SoulseekConfig `json:"soulseek"`
+
+	GUI GUIConfig `json:"gui,omitzero"`
 }
+
+// GUIConfig holds the window app's own preferences.
+type GUIConfig struct {
+	Theme       string `json:"theme,omitempty"`            // "system" (the default), "light" or "dark"
+	CloseToTray bool   `json:"close_to_tray,omitempty"`    // closing the window keeps the app running
+	NoNotify    bool   `json:"no_notifications,omitempty"` // no desktop notifications
+}
+
+// Themes are the window app's themes.
+var Themes = []string{"system", "light", "dark"}
 
 // Duration is a time.Duration written as "30m" in JSON.
 type Duration time.Duration
@@ -349,6 +361,9 @@ func (c *Config) Validate() error {
 		if err := ValidRoute(s.Route); err != nil {
 			return fmt.Errorf("%s: %w", SourceLabels[s.Name], err)
 		}
+	}
+	if c.GUI.Theme != "" && !ContainsString(Themes, c.GUI.Theme) {
+		return fmt.Errorf("the theme must be one of %s", strings.Join(Themes, ", "))
 	}
 	return c.Soulseek.validate()
 }
