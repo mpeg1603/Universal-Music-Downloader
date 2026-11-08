@@ -93,7 +93,8 @@ type Backend interface {
 	// before Start).
 	Log() ([]LogLine, int64)
 	OnLog(func(LogLine))
-	OnFinish(func(JobView)) // a track reached a final state
+	OnFinish(func(JobView))                // a track reached a final state
+	Watch(f func(EventKind)) (stop func()) // what changed, so a frontend redraws that (events.go)
 }
 
 var _ Backend = (*Manager)(nil)

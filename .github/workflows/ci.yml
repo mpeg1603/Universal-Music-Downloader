@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: ffmpeg (some tests make test tones with it)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: gofmt
+        run: test -z "$(gofmt -l internal cmd)" || (gofmt -l internal cmd; exit 1)
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [linux/amd64, linux/arm64, windows/amd64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build ${{ matrix.target }}
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          export GOOS=${{ matrix.target }} && export GOOS=${GOOS%/*} GOARCH=${{ matrix.target }} && export GOARCH=${GOARCH#*/}
+          ext=""; [ "$GOOS" = windows ] && ext=.exe
+          go build -trimpath -ldflags "-s -w" -o "dist/universal-music-downloader$ext" ./cmd/universal-music-downloader

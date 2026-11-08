@@ -202,6 +202,8 @@ type Manager struct {
 	checkMu               sync.Mutex // one library check at a time
 	checkDone, checkTotal atomic.Int64
 
+	events eventHub  // Watch's subscribers
+	revs   revisions // changes to the queue and the settings, for Watch
 	// onFinish is called when a job reaches a final state (for the headless output).
 	onFinish func(JobView)
 }
@@ -238,6 +240,7 @@ func (m *Manager) Config() Config {
 }
 
 func (m *Manager) wake() {
+	m.revs.queue.Add(1)
 	select {
 	case m.wakeCh <- struct{}{}:
 	default:
@@ -399,6 +402,7 @@ func (m *Manager) UpdateConfig(change func(*Config)) error {
 		return err
 	}
 	m.cfg = c
+	m.revs.config.Add(1)
 	err := SaveConfig(m.cfgPath, c)
 	m.cfgMu.Unlock()
 	if err != nil {
@@ -968,6 +972,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			}
 			m.libMu.Unlock()
 			m.dirty.Store(true)
+			m.revs.queue.Add(1)
 		}
 	}
 	j.mu.Lock()
@@ -1279,6 +1284,7 @@ func (m *Manager) finish(j *Job, gen int, res result) {
 	}
 	m.dropTorrentHint(key)
 	m.dirty.Store(true)
+	m.revs.queue.Add(1)
 	if m.onFinish != nil && !res.aborted {
 		m.onFinish(j.view())
 	}
@@ -1350,6 +1356,7 @@ func (m *Manager) fetchAlong(ts *TorrentSource, self *Job, c Candidate) {
 	if n > 0 {
 		Logf("Torrent “%s” also has %d other tracks to download; they go into the same download", c.Album, n)
 		m.dirty.Store(true)
+		m.revs.queue.Add(1)
 		m.wake()
 	}
 }
@@ -1398,6 +1405,7 @@ func (m *Manager) bandcampLinkArrived() {
 	if n > 0 {
 		debugf("bandcamp: a download link arrived; %d waiting tracks go on", n)
 		m.dirty.Store(true)
+		m.revs.queue.Add(1)
 		m.wake()
 	}
 }

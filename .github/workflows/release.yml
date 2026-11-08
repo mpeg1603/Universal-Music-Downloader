@@ -1,0 +1,47 @@
+name: Release
+
+# A tag like v1.2.3 builds the terminal app for Linux and Windows and publishes them, with
+# their SHA-256 checksums, as a GitHub release (a draft, to be checked and published by hand).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -e
+          version=${GITHUB_REF_NAME}
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            GOOS=${target%/*} GOARCH=${target#*/}
+            ext=""; [ "$GOOS" = windows ] && ext=.exe
+            name=universal-music-downloader-$version-$GOOS-$GOARCH
+            mkdir -p "build/$name"
+            GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags "-s -w -X main.version=$version" -o "build/$name/universal-music-downloader$ext" ./cmd/universal-music-downloader
+            cp README.md TORRENTS.md "build/$name/"
+            cp -r docs "build/$name/"
+            [ -f LICENSE ] && cp LICENSE "build/$name/"
+            if [ "$GOOS" = windows ]; then
+              (cd build && zip -qr "../dist/$name.zip" "$name")
+            else
+              tar -C build -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --title "Universal Music Downloader $GITHUB_REF_NAME" --generate-notes

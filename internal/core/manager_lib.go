@@ -84,6 +84,7 @@ func (m *Manager) rebuildJobs() {
 	m.makeJobs()
 	m.reevaluateLibrary()
 	m.dirty.Store(true)
+	m.revs.queue.Add(1)
 	m.wake()
 }
 

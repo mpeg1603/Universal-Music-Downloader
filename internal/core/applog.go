@@ -54,6 +54,13 @@ func (r *logRing) add(text string, debug bool) {
 	}
 }
 
+// Seq is a counter that changes whenever a line is added.
+func (r *logRing) Seq() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seq
+}
+
 // snapshot returns the lines and a counter that changes whenever a line is added.
 func (r *logRing) Snapshot() ([]LogLine, int64) {
 	r.mu.Lock()

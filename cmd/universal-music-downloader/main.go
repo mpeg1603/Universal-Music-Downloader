@@ -21,6 +21,9 @@ import (
 	"time"
 )
 
+// version is set by release builds (-ldflags "-X main.version=v1.2.3").
+var version = "dev"
+
 type listFlag []string
 
 func (l *listFlag) String() string     { return strings.Join(*l, ", ") }
@@ -43,6 +46,7 @@ Options (all optional; the app saves its settings):
   --headless         no app: work through the queue, print progress, write the reports, exit
   --check-torrents   test the torrent indexers (built-in, Jackett/Prowlarr) with a search, then exit
   -v                 detailed log
+  --version          print the version and exit
 `
 
 func main() {
@@ -63,8 +67,13 @@ func run(args []string) int {
 	check := fs.Bool("check-torrents", false, "")
 	torrentQuery := fs.String("torrent-query", "", "")
 	fs.BoolVar(&core.Verbose, "v", false, "")
+	showVersion := fs.Bool("version", false, "")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *showVersion {
+		fmt.Println("Universal Music Downloader", version)
+		return 0
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "unexpected argument %q (did you mean --add %s?)\n", fs.Arg(0), fs.Arg(0))
