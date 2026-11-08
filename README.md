@@ -486,8 +486,8 @@ and takes a while:
 go build -o universal-music-downloader-gui ./cmd/universal-music-downloader-gui
 ```
 
-So far it has the Queue and Log tabs, the header with the speeds, and pause; the other tabs
-follow (see [docs/ROADMAP.md](docs/ROADMAP.md)). Both programs use the same settings and state,
+So far it has every tab but Soulseek (Queue, Search, Library, Sources with every source's
+settings and the indexers, Settings, Log) and the first-run setup; Soulseek follows (see [docs/ROADMAP.md](docs/ROADMAP.md)). Both programs use the same settings and state,
 but not at the same time.
 
 The code is in three parts:
