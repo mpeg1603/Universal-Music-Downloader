@@ -152,11 +152,13 @@ type Manager struct {
 	full      *Library
 	inputErrs map[string]string
 	importing atomic.Bool
-	importMu  sync.Mutex  // one import at a time
-	importAsk atomic.Bool // one is waiting for its turn
-	imported  atomic.Bool // the playlists have been read since the app started
-	linksOnce atomic.Bool // the next import asks the sites for links again
-	inputsSig string      // what the playlist files looked like when last read (importMu)
+	importMu  sync.Mutex     // one import at a time
+	importAsk atomic.Bool    // one is waiting for its turn
+	rebuildMu sync.Mutex     // one makeJobs at a time: a slower one mustn't put back what a newer one dropped
+	settling  sync.WaitGroup // settings being applied and imports asked for; tests wait for these
+	imported  atomic.Bool    // the playlists have been read since the app started
+	linksOnce atomic.Bool    // the next import asks the sites for links again
+	inputsSig string         // what the playlist files looked like when last read (importMu)
 
 	jobsMu sync.Mutex
 	jobs   map[string]*Job
@@ -427,7 +429,7 @@ func (m *Manager) UpdateConfig(change func(*Config)) error {
 	if err != nil {
 		Logf("Couldn't save the settings: %v", err)
 	}
-	go m.apply(old, c)
+	m.settling.Go(func() { m.apply(old, c) })
 	return nil
 }
 

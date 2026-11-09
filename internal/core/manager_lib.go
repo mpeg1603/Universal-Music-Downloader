@@ -109,6 +109,8 @@ func (m *Manager) rebuildJobs() {
 
 // makeJobs is rebuildJobs without the library check.
 func (m *Manager) makeJobs() {
+	m.rebuildMu.Lock()
+	defer m.rebuildMu.Unlock()
 	cfg := m.Config()
 	lib := m.enabledView(cfg)
 	recs := m.state.all()
@@ -333,7 +335,7 @@ func (m *Manager) askImport() {
 	if m.importAsk.Swap(true) {
 		return
 	}
-	go m.importInputs()
+	m.settling.Go(m.importInputs)
 }
 
 func (ix *LibIndex) restrict(roots []string) {
