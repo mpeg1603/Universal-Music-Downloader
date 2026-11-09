@@ -90,7 +90,7 @@ func newSearchTab(a *app) *searchTab {
 	scroll, box, _ := scrolling()
 	t.results = box
 	box.SetSpacing(2)
-	e := a.newEmpty("search", "What would you like to hear?", "Try an artist, an album, or “artist - song”. Results come from a large music catalog; the music itself comes from your sources.")
+	e := a.newEmpty("search", "What would you like to hear?", "Try an artist, an album, or “artist - song”, in any alphabet; small typos are fine. Results come from Deezer, MusicBrainz, iTunes, YouTube Music, Bandcamp and Yandex Music; the music itself comes from your sources.")
 	e.done()
 	t.stack = qt.NewQStackedWidget2()
 	t.stack.AddWidget(e.w)
@@ -132,7 +132,7 @@ func (t *searchTab) search() {
 			t.found = res
 			t.fill()
 			if len(res) == 0 {
-				t.setNote("Nothing found. Try fewer words, or only the artist's name.")
+				t.setNote("Nothing found in any catalog. Try fewer words, or only the artist's name.")
 			} else {
 				t.setNote("")
 			}
@@ -150,14 +150,6 @@ func (t *searchTab) fill() {
 	box := qt.NewQVBoxLayout(t.content)
 	box.SetContentsMargins(0, 0, 0, 12)
 	box.SetSpacing(2)
-	// The catalog lists artists with nothing released: nothing to add.
-	kept := t.found[:0]
-	for _, r := range t.found {
-		if r.Kind != "artist" || r.Count > 0 {
-			kept = append(kept, r)
-		}
-	}
-	t.found = kept
 	best := map[string]float64{}
 	for _, r := range t.found {
 		if _, ok := best[r.Kind]; !ok {
@@ -206,7 +198,12 @@ func (t *searchTab) resultRow(r core.MusicResult) *qt.QWidget {
 	case "album":
 		bits = []string{r.Artist, r.Year, fmt.Sprintf("%d tracks", r.Count)}
 	case "artist":
-		bits = []string{fmt.Sprintf("%d releases", r.Count)}
+		if r.Count > 1 {
+			bits = []string{fmt.Sprintf("%d releases", r.Count)}
+		}
+		if len(r.Refs) > 1 {
+			bits = append(bits, fmt.Sprintf("found in %d catalogs", len(r.Refs)))
+		}
 	}
 	var keep []string
 	for _, b := range bits {
@@ -217,10 +214,16 @@ func (t *searchTab) resultRow(r core.MusicResult) *qt.QWidget {
 	sub := oneLine(strings.Join(keep, "  ·  "), "hint")
 	col.AddWidget(sub.QWidget)
 	lay.AddLayout2(col.QLayout, 1)
-	label := map[string]string{"track": "Add", "album": "Add album", "artist": "Add everything…"}[r.Kind]
-	var add *qt.QPushButton
-	add = a.iconButton("plus", label, "", "Add to your downloads", func() { t.add(r, add) })
-	lay.AddWidget(add.QWidget)
+	if r.Kind == "artist" {
+		var view *qt.QPushButton
+		view = a.iconButton("album", "See discography…", "", "See everything they've released and pick what to add", func() { t.chooseFrom(r, view) })
+		lay.AddWidget(view.QWidget)
+	} else {
+		label := map[string]string{"track": "Add", "album": "Add album"}[r.Kind]
+		var add *qt.QPushButton
+		add = a.iconButton("plus", label, "", "Add to your downloads", func() { t.add(r, add) })
+		lay.AddWidget(add.QWidget)
+	}
 	box.AddLayout(lay.QLayout)
 	return row.QWidget
 }
@@ -230,10 +233,6 @@ func (t *searchTab) add(r core.MusicResult, b *qt.QPushButton) {
 	a := t.a
 	if t.adding != "" {
 		a.toast("Still adding " + t.adding + ". One moment.")
-		return
-	}
-	if r.Kind == "artist" && !a.confirm("Add everything by "+r.Title+"?",
-		fmt.Sprintf("This adds all of %s's albums, EPs and singles (%d releases), each song once.", r.Title, r.Count)) {
 		return
 	}
 	t.adding = r.String()

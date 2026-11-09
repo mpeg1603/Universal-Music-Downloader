@@ -28,8 +28,9 @@ type Track struct {
 	ArtistURLs      map[string]string `json:"artist_urls,omitempty"` // artist name -> Spotify artist page
 	DeezerArtistURL string            `json:"deezer_artist_url,omitempty"`
 	IsLocal         bool              `json:"is_local,omitempty"`
-	Enriched        bool              `json:"enriched,omitempty"` // Deezer lookup already attempted
-	Also            []string          `json:"also,omitempty"`     // keys of other listings of this song, merged into it
+	SourceURL       string            `json:"source_url,omitempty"` // where it came from, when added as a link
+	Enriched        bool              `json:"enriched,omitempty"`   // Deezer lookup already attempted
+	Also            []string          `json:"also,omitempty"`       // keys of other listings of this song, merged into it
 }
 
 func (t *Track) Duration() float64 { return float64(t.DurationMs) / 1000 }
@@ -70,6 +71,9 @@ func (t *Track) fillFrom(o *Track) {
 	}
 	if t.SpotifyURL == "" {
 		t.SpotifyURL = o.SpotifyURL
+	}
+	if t.SourceURL == "" {
+		t.SourceURL = o.SourceURL
 	}
 	for name, url := range o.ArtistURLs {
 		if t.ArtistURLs == nil {
@@ -118,6 +122,7 @@ type Library struct {
 	alias  map[string]string
 	strs   map[string]string // imported text, kept once
 	merged int               // listings merged into the same song under a different key
+	quiet  bool              // nothing to the log (the playlists are being read again)
 }
 
 // sighting is one listing of a song, as far as recognizing a repeat of it goes.
@@ -171,7 +176,9 @@ func (l *Library) add(playlistName string, t *Track) {
 	if existing, ok := l.Tracks[key]; ok {
 		existing.fillFrom(t)
 	} else if same := l.sameSong(t); same != nil {
-		debugf("%s: %q (%s) is the same song as %q (%s); downloading it once", playlistName, t.String(), t.Key, same.String(), same.Key)
+		if !l.quiet {
+			debugf("%s: %q (%s) is the same song as %q (%s); downloading it once", playlistName, t.String(), t.Key, same.String(), same.Key)
+		}
 		same.fillFrom(t)
 		same.Also = append(same.Also, t.Key)
 		l.alias[t.Key] = same.Key
@@ -193,6 +200,38 @@ func (l *Library) add(playlistName string, t *Track) {
 		p.has[key] = true
 		p.Keys = append(p.Keys, key)
 	}
+}
+
+// withoutRemoved takes out the playlists you've removed; a track that was only in those goes too.
+func (l *Library) withoutRemoved(cfg map[string]PlaylistCfg) {
+	removed := false
+	var keep []*Playlist
+	for _, p := range l.Playlists {
+		if cfg[p.Name].Removed {
+			removed = true
+		} else {
+			keep = append(keep, p)
+		}
+	}
+	if !removed {
+		return
+	}
+	l.Playlists = keep
+	used := make(map[string]bool, len(l.Tracks))
+	for _, p := range keep {
+		for _, k := range p.Keys {
+			used[k] = true
+		}
+	}
+	var order []string
+	for _, k := range l.Order {
+		if used[k] {
+			order = append(order, k)
+		} else {
+			delete(l.Tracks, k)
+		}
+	}
+	l.Order = order
 }
 
 // trim lets go of what only importing needs (it's made again if more is imported).

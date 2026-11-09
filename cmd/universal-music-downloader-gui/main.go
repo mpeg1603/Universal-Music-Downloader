@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -54,8 +54,8 @@ func main() {
 	if f, err := os.Create(filepath.Join(*dataDir, "logs", time.Now().Format("20060102-150405")+"-gui.log")); err == nil {
 		defer f.Close()
 		core.DebugLog = log.New(f, "", log.LstdFlags)
-		debug.SetCrashOutput(f, debug.CrashOptions{}) // should it ever crash, the log says where
 	}
+	defer core.SetupCrashReports(*dataDir)() // should it ever crash, the report says where
 	m := core.NewManager(*configPath, *dataDir, cfg)
 	if err := m.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
@@ -63,6 +63,12 @@ func main() {
 	}
 	gui.Version = version
 	gui.StateFile = filepath.Join(*dataDir, "window.json")
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
+	go func() {
+		<-stop
+		gui.Quit()
+	}()
 	gui.Run(m)
 	m.Stop()
 }

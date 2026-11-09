@@ -71,7 +71,9 @@ func (a *Audius) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 	if err != nil {
 		return nil, err
 	}
-	return searchUntilFound(ctx, t, songQueries(t, 2), func(q string) ([]Candidate, error) {
+	queries := songQueries(t, 2)
+	queries = append(queries, transliteratedQueries(t, queries)...)
+	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) {
 		var res struct {
 			Data []audiusTrack `json:"data"`
 		}

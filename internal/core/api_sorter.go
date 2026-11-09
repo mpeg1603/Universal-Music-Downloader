@@ -427,6 +427,40 @@ func (m *Manager) sortFollow(moved map[string]string) {
 	m.revs.queue.Add(1)
 }
 
+// SortDeletePlans removes plans from the history; an applied plan can't be undone afterwards.
+// The plan being looked at, or anything while Sort & merge is running, stays. It says how many
+// went.
+func (m *Manager) SortDeletePlans(ids []string) (int, error) {
+	s := &m.sort
+	s.mu.Lock()
+	busy := s.view.Busy
+	current := ""
+	if s.view.Plan != nil {
+		current = filepath.Base(s.view.Plan.Dir)
+	}
+	s.mu.Unlock()
+	if busy {
+		return 0, errors.New("Sort & merge is running; try again when it's done")
+	}
+	n := 0
+	for _, id := range ids {
+		id = filepath.Base(id)
+		if id == current || id == "." || id == string(filepath.Separator) {
+			continue
+		}
+		dir := filepath.Join(m.sortDir(), id)
+		if _, err := os.Stat(filepath.Join(dir, "info.json")); err != nil {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return n, err
+		}
+		n++
+	}
+	m.revs.sort.Add(1)
+	return n, nil
+}
+
 // SortHistory lists earlier plans, newest first.
 func (m *Manager) SortHistory() []SortPlanInfo {
 	entries, err := os.ReadDir(m.sortDir())

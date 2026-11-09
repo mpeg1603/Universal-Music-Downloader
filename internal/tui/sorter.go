@@ -122,6 +122,10 @@ func (ui *tui) buildSort() tview.Primitive {
 			ui.refreshSort()
 		case 'u':
 			ui.sortHistoryDo(row, true)
+		case 'e':
+			ui.sortDeletePlan(row)
+		case 'E':
+			ui.sortDeleteOlder()
 		case 'C':
 			ui.sortHistoryDo(row, false)
 		case 'f':
@@ -217,6 +221,47 @@ func (ui *tui) sortConfirmApply() {
 	}
 	ui.confirm(fmt.Sprintf("%s %d files into %s? Downloads pause meanwhile. Nothing is deleted or overwritten, and it can be undone.", verb, total, v.Plan.Options.Dest), "Apply", func() {
 		if err := ui.m.SortApply(""); err != nil {
+			ui.message("Sort & merge", err.Error())
+		}
+	})
+}
+
+func (ui *tui) sortDeletePlan(row int) {
+	s := ui.st
+	if s.rows.mode != "history" || row < 1 || row > len(s.rows.hist) {
+		return
+	}
+	h := s.rows.hist[row-1]
+	text := fmt.Sprintf("Delete the plan of %s? Your music files aren't touched.", h.Created)
+	if h.Applied {
+		text += " It was applied: what it moved can't be put back afterwards."
+	}
+	ui.confirm(text, "Delete", func() {
+		if _, err := ui.m.SortDeletePlans([]string{h.ID}); err != nil {
+			ui.message("Sort & merge", err.Error())
+		}
+	})
+}
+
+func (ui *tui) sortDeleteOlder() {
+	s := ui.st
+	if s.rows.mode != "history" || len(s.rows.hist) < 2 {
+		return
+	}
+	var ids []string
+	applied := 0
+	for _, h := range s.rows.hist[1:] {
+		ids = append(ids, h.ID)
+		if h.Applied {
+			applied++
+		}
+	}
+	text := fmt.Sprintf("Delete %d older plans? The newest stays; your music files aren't touched.", len(ids))
+	if applied > 0 {
+		text += fmt.Sprintf(" %d were applied: what those moved can't be put back afterwards.", applied)
+	}
+	ui.confirm(text, "Delete", func() {
+		if _, err := ui.m.SortDeletePlans(ids); err != nil {
 			ui.message("Sort & merge", err.Error())
 		}
 	})
@@ -338,6 +383,6 @@ func (ui *tui) refreshSort() {
 		s.seen = ""
 		s.rows.mode = "history"
 		s.rows.hist = ui.m.SortHistory()
-		s.table.SetTitle(" Earlier plans (u undoes · C carries on with one) ")
+		s.table.SetTitle(" Earlier plans (u undoes · C carries on with one · e deletes · E deletes all older) ")
 	}
 }

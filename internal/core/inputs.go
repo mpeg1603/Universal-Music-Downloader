@@ -2,8 +2,11 @@ package core
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Playlist files and playlists, changed the same way from every frontend.
@@ -14,7 +17,7 @@ func (m *Manager) AddInput(p string) error {
 	if p == "" {
 		return fmt.Errorf("nothing to add")
 	}
-	if !strings.Contains(p, "://") && !strings.HasPrefix(p, "spotify:") {
+	if !isLink(p) {
 		p = CleanPath(p)
 		if _, err := os.Stat(p); err != nil {
 			return err
@@ -103,4 +106,66 @@ func (m *Manager) RemoveLibraryDir(p string) error {
 		}
 		c.LibraryDirs = keep
 	})
+}
+
+// isLink tells a web address from a file on this computer.
+func isLink(p string) bool { return strings.Contains(p, "://") || strings.HasPrefix(p, "spotify:") }
+
+// inputSignature changes when a playlist file or folder listed in inputs changes: which files
+// there are, their sizes and times. Links never do (see importLink).
+func inputSignature(inputs []InputCfg) string {
+	var b strings.Builder
+	note := func(p string, info fs.FileInfo) {
+		fmt.Fprintf(&b, "%s\x00%d\x00%d\n", p, info.Size(), info.ModTime().UnixNano())
+	}
+	for _, in := range inputs {
+		if !in.Enabled || isLink(in.Path) {
+			continue
+		}
+		root := ExpandHome(in.Path)
+		info, err := os.Stat(root)
+		switch {
+		case err != nil:
+			fmt.Fprintf(&b, "%s\x00gone\n", root)
+		case !info.IsDir():
+			note(root, info)
+		default:
+			filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					if fi, err := d.Info(); err == nil {
+						note(p, fi)
+					}
+				}
+				return nil
+			})
+		}
+	}
+	return b.String()
+}
+
+// watchInputs reads the playlists again once their files have changed and settled: delete a
+// CSV from the folder and its playlist goes, drop one in and it appears.
+func (m *Manager) watchInputs() {
+	tick := time.NewTicker(20 * time.Second)
+	defer tick.Stop()
+	last := ""
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-tick.C:
+		}
+		if !m.ready.Load() || m.importing.Load() {
+			continue
+		}
+		now := inputSignature(m.Config().Inputs)
+		m.importMu.Lock()
+		read := m.inputsSig
+		m.importMu.Unlock()
+		if now != read && now == last { // the same two looks running: finished changing
+			Logf("Your playlist files changed; reading them again")
+			m.askImport()
+		}
+		last = now
+	}
 }

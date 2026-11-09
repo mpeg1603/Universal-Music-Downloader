@@ -22,6 +22,7 @@ type InputCfg struct {
 type PlaylistCfg struct {
 	Disabled bool `json:"disabled,omitempty"`
 	Priority int  `json:"priority,omitempty"` // higher goes first
+	Removed  bool `json:"removed,omitempty"`  // you removed it: left out when its file is read
 }
 
 type SourceCfg struct {

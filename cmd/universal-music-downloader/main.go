@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -136,8 +135,8 @@ func run(args []string) int {
 	if f, err := os.Create(logPath); err == nil {
 		defer f.Close()
 		core.DebugLog = log.New(f, "", log.LstdFlags)
-		debug.SetCrashOutput(f, debug.CrashOptions{}) // should it ever crash, the log says where
 	}
+	defer core.SetupCrashReports(*dataDir)() // should it ever crash, the report says where
 	pruneLogs(filepath.Join(*dataDir, "logs"), 20)
 
 	if *check {

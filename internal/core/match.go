@@ -423,6 +423,10 @@ type Match struct {
 func evaluate(t *Track, c Candidate) Match {
 	ts := titleScore(t, &c)
 	as := artistScore(t, &c)
+	if differentAlphabets(t, &c) {
+		lt, lc := transliteratedPair(t, &c)
+		ts, as = max(ts, titleScore(lt, lc)), max(as, artistScore(lt, lc))
+	}
 	rough := 0.55*ts + 0.45*as
 	if m := versionConflict(t, &c); m != "" {
 		return Match{c, rough, "looks like a " + m}

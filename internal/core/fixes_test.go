@@ -441,7 +441,7 @@ func TestClearCache(t *testing.T) {
 		t.Errorf("cleared Sort & merge's files while it ran: %v", err)
 	}
 	m.sort.view.Busy = false
-	if files, _, err := m.ClearCache(""); err != nil || files != 3 { // torrent, older log, tags
+	if files, _, err := m.ClearCache(""); err != nil || files != 2 { // torrent, tags (the latest few logs stay)
 		t.Errorf("everything: %d, %v", files, err)
 	}
 	if !fileExists(filepath.Join(m.dataDir, "logs/2.log")) {

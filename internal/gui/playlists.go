@@ -23,11 +23,13 @@ type playlistsTab struct {
 	stack  *qt.QStackedWidget
 
 	show, onoff, up, down, remove *qt.QPushButton
-	inToggle, inRemove            *qt.QPushButton
+	selAll                        *qt.QPushButton
+	inToggle, inRemove, restore   *qt.QPushButton
 	segs                          []*qt.QPushButton
 	note                          *qt.QLabel
 	finished                      bool // showing the finished ones
 	loading, again                bool
+	removing                      bool
 	reread                        *throttle
 }
 
@@ -37,7 +39,7 @@ func newPlaylistsTab(a *app) *playlistsTab {
 	t.w = p.w
 	p.actions.AddWidget(a.iconButton("file", "Add a file", "primary", "A CSV from Exportify or a similar tool, a zip of them, Spotify's data export, or a text list", t.addFile).QWidget)
 	p.actions.AddWidget(a.iconButton("folder", "Add a folder", "", "A folder of playlist files", t.addFolder).QWidget)
-	p.actions.AddWidget(a.iconButton("link", "Add a link", "", "A public Spotify playlist or album link (only its first 100 tracks)", t.addLink).QWidget)
+	p.actions.AddWidget(a.iconButton("link", "Add a link", "", "A playlist, album or song on Spotify, Deezer, Apple Music, Bandcamp, YouTube, SoundCloud and many other sites", t.addLink).QWidget)
 
 	e := a.newEmpty("playlist", "No playlists yet", "Export your Spotify playlists with exportify.net and add the file here, or add a public Spotify link. Text files with one song per line work too.")
 	e.row.AddWidget(a.iconButton("external", "Open exportify.net", "primary", "", func() { core.OpenBrowser("https://exportify.net") }).QWidget)
@@ -46,6 +48,7 @@ func newPlaylistsTab(a *app) *playlistsTab {
 
 	t.reread = newThrottle(t.w.QObject, 1500, t.refresh)
 	t.list = newRowList(60, func() int { return len(t.rows) }, t.draw)
+	t.list.view.SetSelectionMode(qt.QAbstractItemView__ExtendedSelection)
 	t.list.onSelect(func(int) { t.updateButtons() })
 	t.list.onActivate(t.showTracks)
 
@@ -80,11 +83,14 @@ func newPlaylistsTab(a *app) *playlistsTab {
 	t.onoff.SetToolTip("A playlist that's off stays here, but its songs leave the line")
 	t.up = a.iconButton("arrow-up", "Higher priority", "", "Goes before other playlists", func() { t.prio(1) })
 	t.down = a.iconButton("arrow-down", "Lower priority", "", "Goes after other playlists", func() { t.prio(-1) })
-	t.remove = a.iconButton("trash", "Remove", "danger", "Remove what you added from Find music; files already downloaded stay", t.removeList)
+	t.selAll = button("Select all", "ghost", func() { t.list.view.SelectAll() })
+	t.selAll.SetToolTip("Ctrl+click or Shift+click picks several")
+	t.remove = a.iconButton("trash", "Remove", "danger", "Take the selected playlists out of the app, and choose what happens to their files", t.removeSelected)
 	for _, b := range []*qt.QPushButton{t.show, t.onoff, t.up, t.down} {
 		acts.AddWidget(b.QWidget)
 	}
 	acts.AddStretch()
+	acts.AddWidget(t.selAll.QWidget)
 	acts.AddWidget(t.remove.QWidget)
 	bb.AddLayout(acts.QLayout)
 
@@ -98,7 +104,10 @@ func newPlaylistsTab(a *app) *playlistsTab {
 	t.inRemove = a.iconButton("trash", "Remove", "danger", "Stop using this file (the file itself isn't touched)", t.removeInput)
 	head.AddWidget(t.inToggle.QWidget)
 	head.AddWidget(t.inRemove.QWidget)
-	head.AddWidget(a.iconButton("refresh", "Read again", "", "Read the files again, after you've changed them", func() {
+	t.restore = button("Bring back removed", "ghost", t.restoreRemoved)
+	t.restore.Hide()
+	head.AddWidget(t.restore.QWidget)
+	head.AddWidget(a.iconButton("refresh", "Read again", "", "Read the files and links now (changed files are noticed by themselves)", func() {
 		a.m.Reimport()
 		a.toast("Reading your playlist files again.")
 	}).QWidget)
@@ -175,8 +184,9 @@ func (t *playlistsTab) addFolder() {
 }
 
 func (t *playlistsTab) addLink() {
-	if p, ok := t.a.ask("Add a link", "A public Spotify playlist or album link:", ""); ok && p != "" {
+	if p, ok := t.a.ask("Add a link", "A playlist, album or song, on Spotify, Deezer, Apple Music, Bandcamp, YouTube, SoundCloud or another site:", ""); ok && p != "" {
 		t.try(t.a.m.AddInput(p))
+		t.a.toast("Reading that link. Its songs appear here in a moment.")
 	}
 }
 
@@ -212,19 +222,137 @@ func (t *playlistsTab) prio(delta int) {
 	}
 }
 
-func (t *playlistsTab) removeList() {
-	p := t.selected()
-	if p == nil {
+// selectedNames are the playlists selected, one or many.
+func (t *playlistsTab) selectedNames() []string {
+	var out []string
+	for _, idx := range t.list.view.SelectionModel().SelectedRows() {
+		if r := idx.Row(); r >= 0 && r < len(t.rows) {
+			out = append(out, t.rows[r].Name)
+		}
+	}
+	return out
+}
+
+// removeSelected asks what should happen to the files, then takes the playlists out.
+func (t *playlistsTab) removeSelected() {
+	names := t.selectedNames()
+	if len(names) == 0 || t.removing {
 		return
 	}
-	if !core.IsAddition(p.Name) {
-		t.a.message("This one can't be removed here", "Only what you added from Find music can be removed. To stop a playlist from a file, turn it off, or remove its file below.")
+	go func() {
+		v := t.a.m.RemovalPreview(names)
+		mainDo(func() { t.askRemoval(names, v) })
+	}()
+}
+
+func (t *playlistsTab) askRemoval(names []string, v core.RemovalPreview) {
+	a := t.a
+	d := qt.NewQDialog(a.win.QWidget)
+	what := names[0]
+	if len(names) > 1 {
+		what = fmt.Sprintf("%d playlists", len(names))
+	}
+	d.SetWindowTitle("Remove " + what)
+	d.Resize(520, 260)
+	box := qt.NewQVBoxLayout(d.QWidget)
+	box.SetContentsMargins(20, 16, 20, 14)
+	box.SetSpacing(10)
+	box.AddWidget(text("Remove "+what+"?", "h1").QWidget)
+	intro := "Their songs leave your downloads. A playlist from a file stays out until you bring it back."
+	if v.Shared > 0 {
+		intro += fmt.Sprintf(" %s files other playlists also use stay where they are.", fmtCount(v.Shared))
+	}
+	box.AddWidget(richText(intro, "subtitle").QWidget)
+	keep := qt.NewQRadioButton3(fmt.Sprintf("Keep the files where they are (%s, %s)", fmtCount(v.Files), core.FmtBytes(v.Bytes)))
+	del := qt.NewQRadioButton3("Delete the files from the disk")
+	mv := qt.NewQRadioButton3("Move the files to another folder:")
+	keep.SetChecked(true)
+	dest := qt.NewQLineEdit2()
+	dest.SetPlaceholderText("Choose a folder")
+	dest.SetEnabled(false)
+	browse := button("Choose…", "", func() {
+		if p := qt.QFileDialog_GetExistingDirectory3(d.QWidget, "Move the files to", dest.Text()); p != "" {
+			dest.SetText(p)
+			mv.SetChecked(true)
+		}
+	})
+	browse.SetEnabled(false)
+	mv.OnToggled(func(on bool) {
+		dest.SetEnabled(on)
+		browse.SetEnabled(on)
+	})
+	if v.Files > 0 {
+		box.AddWidget(keep.QWidget)
+		box.AddWidget(del.QWidget)
+		box.AddWidget(mv.QWidget)
+		row := hbox()
+		row.SetSpacing(6)
+		row.AddWidget2(dest.QWidget, 1)
+		row.AddWidget(browse.QWidget)
+		box.AddLayout(row.QLayout)
+	}
+	box.AddStretch()
+	btns := hbox()
+	btns.SetSpacing(8)
+	btns.AddStretch()
+	btns.AddWidget(button("Cancel", "", func() { d.Reject() }).QWidget)
+	go_ := button("Remove", "danger", func() {
+		if mv.IsChecked() && dest.Text() == "" {
+			a.message("Choose a folder", "Pick where the files should go, or choose another option.")
+			return
+		}
+		d.Accept()
+	})
+	btns.AddWidget(go_.QWidget)
+	box.AddLayout(btns.QLayout)
+	if d.Exec() != int(qt.QDialog__Accepted) {
 		return
 	}
-	if t.a.confirm("Remove "+p.Name+"?", "Its songs leave your downloads. Files already downloaded stay.") {
-		t.a.m.RemoveAddition(p.Name)
-		t.refresh()
+	files, moveTo := "keep", ""
+	switch {
+	case del.IsChecked():
+		if !a.confirm("Delete the files?", fmt.Sprintf("%s files (%s) go for good.", fmtCount(v.Files), core.FmtBytes(v.Bytes))) {
+			return
+		}
+		files = "delete"
+	case mv.IsChecked():
+		files, moveTo = "move", dest.Text()
 	}
+	t.removing = true
+	t.remove.SetEnabled(false)
+	go func() {
+		res, err := a.m.RemovePlaylists(names, files, moveTo)
+		mainDo(func() {
+			t.removing = false
+			t.updateButtons()
+			if err != nil {
+				a.message("That didn't work", err.Error())
+				return
+			}
+			msg := fmt.Sprintf("Removed %d playlists.", res.Playlists)
+			switch {
+			case res.Deleted > 0:
+				msg = fmt.Sprintf("Removed %d playlists and deleted %s files.", res.Playlists, fmtCount(res.Deleted))
+			case res.Moved > 0:
+				msg = fmt.Sprintf("Removed %d playlists and moved %s files.", res.Playlists, fmtCount(res.Moved))
+			}
+			if len(res.Errors) > 0 {
+				a.message("Some files couldn't be handled", fmt.Sprintf("%s\n\n%d files had problems; see Activity.", res.Errors[0], len(res.Errors)))
+			}
+			a.toast(msg)
+			t.refresh()
+		})
+	}()
+}
+
+func (t *playlistsTab) restoreRemoved() {
+	if !t.a.confirm("Bring back removed playlists?", "They appear here again and their songs go back in line. Files you deleted aren't restored; they're downloaded again.") {
+		return
+	}
+	if n := t.a.m.RestorePlaylists(); n > 0 {
+		t.a.toast(fmt.Sprintf("Bringing back %d playlists.", n))
+	}
+	t.refresh()
 }
 
 func (t *playlistsTab) toggleInput() {
@@ -241,13 +369,20 @@ func (t *playlistsTab) removeInput() {
 
 func (t *playlistsTab) updateButtons() {
 	p := t.selected()
-	on := p != nil
+	picked := t.selectedNames()
+	on := p != nil && len(picked) == 1
 	for _, b := range []*qt.QPushButton{t.show, t.onoff, t.up, t.down} {
 		b.SetEnabled(on)
 	}
 	t.up.SetVisible(!t.finished) // nothing left to put first
 	t.down.SetVisible(!t.finished)
-	t.remove.SetEnabled(on && core.IsAddition(p.Name))
+	t.remove.SetEnabled(len(picked) > 0 && !t.removing)
+	if len(picked) > 1 {
+		t.remove.SetText(fmt.Sprintf("Remove %d", len(picked)))
+	} else {
+		t.remove.SetText("Remove")
+	}
+	t.selAll.SetEnabled(len(t.rows) > 0)
 	if on && !p.Enabled {
 		t.onoff.SetText("Turn on")
 	} else {
@@ -315,8 +450,12 @@ func (t *playlistsTab) refresh() {
 	}
 	t.loading = true
 	go func() {
-		rows, inputs := t.a.m.Playlists(), t.a.m.Inputs()
-		mainthread.Start(func() { t.loaded(rows, inputs) })
+		rows, inputs, removed := t.a.m.Playlists(), t.a.m.Inputs(), len(t.a.m.RemovedPlaylists())
+		mainthread.Start(func() {
+			t.restore.SetVisible(removed > 0)
+			t.restore.SetText(fmt.Sprintf("Bring back removed (%d)", removed))
+			t.loaded(rows, inputs)
+		})
 	}()
 }
 

@@ -16,22 +16,40 @@ import (
 
 // importInputs reads every enabled playlist file again and rebuilds the jobs.
 func (m *Manager) importInputs() {
+	m.importMu.Lock()
+	defer m.importMu.Unlock()
+	m.importAsk.Store(false)
 	m.importing.Store(true)
 	defer m.importing.Store(false)
 	cfg := m.Config()
+	m.inputsSig = inputSignature(cfg.Inputs)
+	again := m.imported.Swap(true)
+	refresh := m.linksOnce.Swap(false)
+	logf := debugf
+	if again {
+		logf = func(string, ...any) {} // the same few hundred lines every time say nothing new
+	}
 	lib := newLibrary()
+	lib.quiet = again
 	errs := map[string]string{}
 	for _, in := range cfg.Inputs {
 		lib.Inputs = append(lib.Inputs, in.Path)
 		if !in.Enabled {
 			continue
 		}
-		if err := importInput(m.ctx, lib, in.Path, m.resolver, debugf); err != nil {
+		var err error
+		if isLink(in.Path) {
+			err = m.importLink(m.ctx, lib, in.Path, refresh)
+		} else {
+			err = importInput(m.ctx, lib, in.Path, m.resolver, logf)
+		}
+		if err != nil {
 			errs[in.Path] = err.Error()
 			Logf("Couldn't read %s: %v", in.Path, err)
 		}
 	}
 	m.mergeAdditions(lib)
+	lib.withoutRemoved(cfg.Playlists)
 	lib.trim()
 	m.libMu.Lock()
 	if old := m.full; old != nil {
@@ -306,6 +324,15 @@ func (m *Manager) Rescan() {
 
 // Reimport reads the playlist files again (in the background).
 func (m *Manager) Reimport() {
+	m.linksOnce.Store(true)
+	m.askImport()
+}
+
+// askImport reads the playlists again soon; asking while one is already waiting does nothing.
+func (m *Manager) askImport() {
+	if m.importAsk.Swap(true) {
+		return
+	}
 	go m.importInputs()
 }
 

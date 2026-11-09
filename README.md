@@ -78,7 +78,9 @@ better quality** (never just converted: a source must have a clearly better copy
 downloaded file is measured again). The new files go to the downloads folder, your copies stay
 where they are, and `downloaded.md` says which library file each one improves on. The upgrade
 is a playlist of its own (`Upgrade: below lossless`), so the Search tab can turn it off or
-remove it, and the Queue's filter *library upgrades* shows its tracks.
+remove it, and the Queue's filter *library upgrades* shows its tracks. Each file is looked for
+**once**, through every source: if no source has a better copy it's marked *not found* and isn't
+retried (*retry all failed*, or restarting that track, looks again).
 
 ## Bandwidth
 
@@ -165,7 +167,13 @@ After that:
    - Spotify's own data export (spotify.com → Account → Privacy → Download your data → *Account
      data*), as the zip; it includes Liked Songs;
    - a plain-text list of tracks, albums and artists (see *Finding music* below);
-   - a public Spotify playlist or album link (only its first 100 tracks).
+   - a link to a playlist, album or song: Spotify (only the first 100 tracks), Deezer, Apple
+     Music albums, Bandcamp, YouTube, SoundCloud and the many other sites yt-dlp knows. Songs that
+     came from a link are downloaded from it first; what it held is kept, so the site being down
+     doesn't lose the playlist (*Read again* or `R` asks the site again).
+
+   Playlist files are watched: delete a CSV from a folder you added and its playlist goes, drop one
+   in and it appears.
 2. **Library** tab (`3`): `a` adds your music folders; `t` sets the quality threshold.
 3. **Settings** tab (`6`): the downloads folder (default `~/Music/Universal Music Downloader`),
    format, bandwidth. **Save** applies them.
@@ -180,20 +188,29 @@ In the Search tab, **Find** takes what you'd say: `Artist - Title`, `Title - Art
 them); fill in any of them. Matching is fuzzy: small typos, missing words, *the*, accents and
 punctuation don't stop a match, and exact matches come first.
 
-It's looked up in Deezer's catalog (free, no account). The results come in three sections,
+It's looked up in Deezer, MusicBrainz, the iTunes Store, YouTube Music, Bandcamp and Yandex Music
+(free, no account), in both the Latin and Cyrillic alphabets, and a misspelled artist is found
+through MusicBrainz's fuzzy search. What the catalogs say about the same thing is merged. The
+results come in three sections,
 **Artists**, **Albums** (with year and track count) and **Tracks** (with album, year and
 length), best first. `Enter` on one adds it to the queue, ahead of everything else:
 
 - a **track**: that song;
 - an **album**: all its tracks;
-- an **artist**: the whole discography: albums, EPs and singles, each song once (the album's
-  version rather than the single's or a reissue's; compilations and other artists' songs on
-  splits are left out). You're asked first.
+- an **artist**: opens the discography, from every catalog that knows them, to pick from: whole
+  releases, or single songs of a release you open. Each song is added once (the album's version
+  rather than the single's; other artists' songs on splits are left out). In the terminal app:
+  `space` picks, `Enter` opens a release, `a`/`n`/`A` pick all, none or albums and EPs, `s` adds.
 
 Each addition becomes a playlist of its own (`Search: Artist - Album`) in the Playlists list
 (once every song is downloaded, in your library or not found, it moves to *Finished playlists*),
-so it can be turned off, given a priority, or removed again (`d`; files already downloaded
-stay).
+so it can be turned off, given a priority, or removed again.
+
+**Removing playlists** (Playlists page: select one or several, *Remove*; terminal app: `m` marks,
+`M` marks all finished, `d` removes): you choose whether their files stay, are deleted, or move to
+another folder. Only files the app downloaded into the downloads folder, and that no other playlist
+uses, are ever touched; your library never is. A playlist from a file stays out until you bring it
+back (*Bring back removed*, or `B`).
 
 **Plain-text lists** (`.txt`, added with `a`) take one of those per line: `Artist - Title`,
 `Title - Artist`, `album: Artist - Album`, `Artist` (the discography), or tags
@@ -268,7 +285,7 @@ lossy, then higher quality wins.
 where they are: this app's, and those of browsers, torrent and Soulseek clients (`.part`, `.aria2`,
 `.!qB`, `INCOMPLETE…` and the like, or anything written to in the last two minutes). A file that changed since the
 plan was made is skipped. Each finished move goes straight to a journal, so applying can be
-stopped and continued, and a plan can be undone, even after a restart. Files you downloaded are
+Older plans can be deleted from *Earlier plans* (`e`, or `E` for all but the newest); an applied plan can't be undone once it's gone. stopped and continued, and a plan can be undone, even after a restart. Files you downloaded are
 followed to their new place, so they aren't downloaded again. Playlists (`.m3u`) pointing at the
 old places stop matching. Plans are kept in the data folder under `sort-plans/`.
 

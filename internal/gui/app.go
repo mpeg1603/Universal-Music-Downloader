@@ -24,6 +24,9 @@ import (
 // Version is set by the program that opens the window.
 var Version = "dev"
 
+// current is the running window, for Quit.
+var current *app
+
 // shotsHook takes over after the window is built, in the screenshot tool (build tag guishots).
 var shotsHook func(*app)
 
@@ -92,6 +95,7 @@ type app struct {
 // Run opens the window and returns when it's closed. The backend is started already.
 func Run(m core.Backend) error {
 	a := newApp(m)
+	current = a
 	defer a.close()
 	stop := a.begin()
 	defer stop()
@@ -153,6 +157,9 @@ func (a *app) begin() func() {
 	tick.Start(700)
 	a.watchSystemTheme()
 	a.tick()
+	if crash := a.m.LastCrash(); crash != "" {
+		a.toast(crash)
+	}
 	return stop
 }
 
@@ -306,6 +313,15 @@ func (a *app) shortcuts() {
 		a.show(pageFind)
 		a.search.find.SetFocus()
 		a.search.find.SelectAll()
+	})
+}
+
+// Quit closes the window app from outside its window (a stop signal, the computer shutting down).
+func Quit() {
+	mainthread.Start(func() {
+		if current != nil {
+			current.quit()
+		}
 	})
 }
 

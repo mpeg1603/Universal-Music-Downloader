@@ -34,6 +34,7 @@ type sortTab struct {
 	advB     *qt.QPushButton
 	hist     *dataTable
 	histRows []core.SortPlanInfo
+	histDel  *qt.QPushButton
 	histNote *qt.QLabel
 
 	// working
@@ -222,6 +223,9 @@ func (t *sortTab) buildChoose() *qt.QWidget {
 		}
 	}).QWidget)
 	actions.AddStretch()
+	t.histDel = a.iconButton("trash", "Delete this plan", "danger", "Forget this plan. An applied plan can't be undone afterwards", t.deleteSelected)
+	actions.AddWidget(t.histDel.QWidget)
+	actions.AddWidget(button("Delete all older", "ghost", t.deleteOlder).QWidget)
 	hb.AddLayout(actions.QLayout)
 	body.AddWidget(histCard.QWidget)
 	body.AddStretch()
@@ -463,6 +467,60 @@ func (t *sortTab) undoSelected() {
 		t.lastPlan = t.histRows[r].ID
 		t.try(t.a.m.SortUndo(t.histRows[r].ID))
 	}
+}
+
+func (t *sortTab) deleteSelected() {
+	r := t.hist.current()
+	if r < 0 || r >= len(t.histRows) {
+		t.a.message("Choose a plan", "Pick the plan to delete in the list first.")
+		return
+	}
+	x := t.histRows[r]
+	body := "The plan and its reports go. Your music files aren't touched."
+	if x.Applied {
+		body += "\n\nThis plan was applied: without it, what it moved can't be put back by the app."
+	}
+	if t.a.confirm("Delete the plan of "+x.Created+"?", body) {
+		t.removePlans([]string{x.ID})
+	}
+}
+
+// deleteOlder forgets every plan but the newest.
+func (t *sortTab) deleteOlder() {
+	if len(t.histRows) < 2 {
+		t.a.message("Nothing older", "There's only one plan, or none.")
+		return
+	}
+	var ids []string
+	applied := 0
+	for _, x := range t.histRows[1:] {
+		ids = append(ids, x.ID)
+		if x.Applied {
+			applied++
+		}
+	}
+	body := fmt.Sprintf("%d older plans go; the newest stays. Your music files aren't touched.", len(ids))
+	if applied > 0 {
+		body += fmt.Sprintf("\n\n%d of them were applied: what those moved can't be put back by the app afterwards.", applied)
+	}
+	if t.a.confirm("Delete the older plans?", body) {
+		t.removePlans(ids)
+	}
+}
+
+func (t *sortTab) removePlans(ids []string) {
+	a := t.a
+	go func() {
+		n, err := a.m.SortDeletePlans(ids)
+		mainDo(func() {
+			if err != nil {
+				a.message("That didn't work", err.Error())
+			} else {
+				a.toast(fmt.Sprintf("Deleted %d plans.", n))
+			}
+			t.refresh()
+		})
+	}()
 }
 
 func (t *sortTab) continueSelected() {
