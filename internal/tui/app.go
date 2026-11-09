@@ -656,7 +656,7 @@ func (ui *tui) footerText() string {
 	common := "  [::d]1-9/Alt+1-9/F1-F9 tabs · [ ] bandwidth −/+ · P pause all · q quit[::-]"
 	hints := map[string]string{
 		"queue":     " [::b]Enter[::-] details  [::b]c[::-] cancel  [::b]r[::-] restart  [::b]p[::-] do next  [::b]R[::-] retry all failed  [::b]f[::-] filter  [::b]o[::-] sort  [::b]O[::-] reverse  [::b]/[::-] find in queue  [::b]Esc[::-] show all",
-		"search":    " [::b]/[::-] find music  [::b]Enter[::-] add result / show playlist  [::b]Tab[::-] next list  [::b]a[::-] add file/link  [::b]m[::-] mark  [::b]d[::-] remove  [::b]B[::-] bring back  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]R[::-] re-read",
+		"search":    " [::b]/[::-] find music  [::b]Enter[::-] add result / show playlist  [::b]Tab[::-] next list  [::b]a[::-] add file/link  [::b]m[::-] mark  [::b]d[::-] remove  [::b]B[::-] ignored list  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]R[::-] re-read",
 		"library":   " [::b]a[::-] add folder  [::b]d[::-] remove  [::b]s[::-] rescan  [::b]t[::-] quality threshold  [::b]u[::-] upgrade files below a quality",
 		"sources":   " [::b]space[::-] on/off  [::b]K J[::-] move up/down  [::b]Enter[::-] settings  [::b]e[::-] route  [::b]p[::-] pause/resume  [::b]b[::-] paste Bandcamp links",
 		"soulseek":  " [::b]/[::-] search  [::b]Enter[::-] download  [::b]d[::-] folder  [::b]Tab[::-] next pane  [::b]n[::-] message  [::b]j[::-] join room  [::b]l[::-] leave/close  [::b]m[::-] message user  [::b]x[::-] stop upload  [::b]B[::-] ban  [::b]o[::-] port  [::b]R[::-] reconnect",

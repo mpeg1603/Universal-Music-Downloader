@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"universal-music-downloader/internal/core"
@@ -236,7 +237,7 @@ func (ui *tui) pickDiscography(r core.MusicResult) {
 	}()
 }
 
-// removePlaylists asks what happens to the files, then removes the playlists.
+// removePlaylists asks what happens to the playlist files, then removes the playlists.
 func (ui *tui) removePlaylists(names []string) {
 	const name = "removeplaylists"
 	what := names[0]
@@ -245,16 +246,27 @@ func (ui *tui) removePlaylists(names []string) {
 	}
 	v := ui.m.RemovalPreview(names)
 	f := tview.NewForm()
-	choices := []string{"Keep the files where they are", "Delete the files from the disk", "Move the files to another folder"}
-	values := []string{"keep", "delete", "move"}
+	info := "Takes it out of the app and clears its songs from the Queue, unless another playlist has them. Your music files stay on the disk."
+	if v.Shared > 0 {
+		info += fmt.Sprintf(" Files that also hold other playlists stay: %d.", v.Shared)
+	}
+	f.AddTextView("", tview.Escape(info), 0, 3, true, false)
+	choices := []string{"Ignore it (leave it where it is)", "Move it to another folder", "Delete it"}
+	values := []string{"keep", "move", "delete"}
 	pick := 0
 	moveTo := ""
-	f.AddDropDown(fmt.Sprintf("%d files (%s)", v.Files, core.FmtBytes(v.Bytes)), choices, 0, func(_ string, i int) {
-		if i >= 0 {
-			pick = i
-		}
-	})
-	f.AddInputField("Folder to move them to", "", 60, nil, func(t string) { moveTo = t })
+	fileName := fmt.Sprintf("%d playlist files", len(v.Files))
+	if len(v.Files) == 1 {
+		fileName = filepath.Base(v.Files[0])
+	}
+	if len(v.Files) > 0 {
+		f.AddDropDown(tview.Escape(fileName), choices, 0, func(_ string, i int) {
+			if i >= 0 {
+				pick = i
+			}
+		})
+		f.AddInputField("Folder to move it to", "", 60, nil, func(t string) { moveTo = t })
+	}
 	close := func() { ui.closeModal(name) }
 	run := func() {
 		close()
@@ -266,9 +278,9 @@ func (ui *tui) removePlaylists(names []string) {
 					ui.message("Remove", err.Error())
 					return
 				}
-				ui.addNote = fmt.Sprintf("[green]removed %d playlists: %d files deleted, %d moved, %d left in place[-]", res.Playlists, res.Deleted, res.Moved, res.Kept)
+				ui.addNote = fmt.Sprintf("[green]removed %d playlists: %d playlist files deleted, %d moved; music files untouched[-]", res.Playlists, res.Deleted, res.Moved)
 				if len(res.Errors) > 0 {
-					ui.message("Remove", fmt.Sprintf("%d files had problems; the first: %s", len(res.Errors), res.Errors[0]))
+					ui.message("Remove", fmt.Sprintf("%d playlist files had problems; the first: %s", len(res.Errors), res.Errors[0]))
 				}
 			})
 		}()
@@ -276,19 +288,54 @@ func (ui *tui) removePlaylists(names []string) {
 	f.AddButton("Remove", func() {
 		switch {
 		case values[pick] == "move" && moveTo == "":
-			ui.message("Remove", "Say which folder the files should go to.")
+			ui.message("Remove", "Say which folder the playlist file should go to.")
 		case values[pick] == "delete":
-			ui.confirm(fmt.Sprintf("Delete %d files (%s) for good?", v.Files, core.FmtBytes(v.Bytes)), "Delete", run)
+			ui.confirm(fmt.Sprintf("Delete %s for good? Your music files stay.", tview.Escape(fileName)), "Delete", run)
 		default:
 			run()
 		}
 	})
 	f.AddButton("Cancel", close)
 	f.SetCancelFunc(close)
-	title := " Remove " + tview.Escape(what)
-	if v.Shared > 0 {
-		title += fmt.Sprintf(" (%d files other playlists also use stay)", v.Shared)
+	f.SetBorder(true).SetTitle(" Remove " + tview.Escape(what) + " ")
+	ui.openModal(name, f, 90, 14)
+}
+
+// showIgnored lists the removed playlists whose files are still there, to bring back or clear.
+func (ui *tui) showIgnored() {
+	const name = "ignoredplaylists"
+	if len(ui.m.RemovedPlaylists()) == 0 {
+		return
 	}
-	f.SetBorder(true).SetTitle(title + " ")
-	ui.openModal(name, f, 90, 11)
+	list := tview.NewList().ShowSecondaryText(false)
+	close := func() { ui.closeModal(name) }
+	var fill func()
+	fill = func() {
+		list.Clear()
+		names := ui.m.RemovedPlaylists()
+		if len(names) == 0 {
+			close()
+			return
+		}
+		for _, n := range names {
+			list.AddItem(tview.Escape(n), "", 0, func() {
+				ui.m.RestorePlaylists(n)
+				fill()
+			})
+		}
+	}
+	fill()
+	list.SetDoneFunc(close)
+	list.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		if ev.Rune() == 'c' {
+			ui.confirm(fmt.Sprintf("Clear the list? %d playlists come back.", list.GetItemCount()), "Clear", func() {
+				ui.m.RestorePlaylists()
+				fill()
+			})
+			return nil
+		}
+		return ev
+	})
+	list.SetBorder(true).SetTitle(" Ignored playlists (Enter brings one back · c clears the list · Esc closes) ")
+	ui.openModal(name, list, 90, 20)
 }

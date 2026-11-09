@@ -259,7 +259,7 @@ func (ui *tui) buildPlaylistTables() {
 	ui.inputsTable = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
 	ui.inputsTable.SetBorder(true).SetTitle(" Playlist files (a adds) ")
 	ui.playlistsTable = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
-	ui.playlistsTable.SetBorder(true).SetTitle(" Playlists (Enter shows the tracks · m marks · M marks all finished · d removes · B brings back) ")
+	ui.playlistsTable.SetBorder(true).SetTitle(" Playlists (Enter shows the tracks · m marks · M marks all finished · d removes · B ignored list) ")
 	addInput := func() {
 		ui.askPath("Add playlists", "A CSV (Exportify, TuneMyMusic…), a folder or zip of them, Spotify's data export (zip), a text file (a track, album or artist per line: \"Artist - Title\", \"Artist - Album\", \"Artist\"), or a link to a playlist, album or song on Spotify, Deezer, Apple Music, Bandcamp, YouTube, SoundCloud or another site.",
 			false, []string{".csv", ".zip", ".txt", ".json"}, func(p string) {
@@ -378,9 +378,7 @@ func (ui *tui) buildPlaylistTables() {
 			}
 			return nil
 		case ev.Rune() == 'B':
-			if n := len(ui.m.RemovedPlaylists()); n > 0 {
-				ui.confirm(fmt.Sprintf("Bring back %d removed playlists?", n), "Bring back", func() { ui.m.RestorePlaylists() })
-			}
+			ui.showIgnored()
 			return nil
 		case ev.Rune() == 'a':
 			addInput()

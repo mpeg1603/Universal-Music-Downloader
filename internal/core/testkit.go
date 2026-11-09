@@ -130,6 +130,7 @@ func TestManager(t testing.TB, tools *Tools, sources []Source, lib *Library, mut
 	m.sources = sources
 	m.rebuildJobs()
 	t.Cleanup(func() {
+		m.settling.Wait() // they write into the data folder, which is about to go
 		m.cancel()
 		m.wg.Wait()
 		st.close()
