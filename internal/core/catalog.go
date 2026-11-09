@@ -22,16 +22,19 @@ import (
 
 // MusicResult is something found in the catalog.
 type MusicResult struct {
-	Kind     string  // "track", "album" or "artist"
-	ID       int64   // Deezer's
-	AlbumID  int64   // the album of a track (an album's own ID)
-	Title    string  // the track's or album's title; the artist's name for an artist
-	Artist   string  // for tracks and albums
-	Album    string  // for tracks
-	Year     string  // release year
-	Count    int     // tracks of an album; albums of an artist
-	Duration int     // seconds, for tracks
-	Score    float64 // how well it fits what was typed (0-100)
+	Kind     string       // "track", "album" or "artist"
+	ID       int64        // Deezer's
+	AlbumID  int64        // the album of a track (an album's own ID)
+	Title    string       // the track's or album's title; the artist's name for an artist
+	Artist   string       // for tracks and albums
+	Album    string       // for tracks
+	Year     string       // release year
+	Count    int          // tracks of an album; albums of an artist
+	Duration int          // seconds, for tracks
+	Score    float64      // how well it fits what was typed (0-100)
+	Provider string       // the catalog this came from ("" is Deezer)
+	Ref      string       // its ID there
+	Refs     []CatalogRef // every catalog that has it
 }
 
 func (r MusicResult) String() string {
@@ -525,11 +528,12 @@ func (d *Deezer) discography(ctx context.Context, id int64, name string, progres
 // Resolver turns the lines of a plain-text list into tracks, through the catalog. Answers are
 // kept (a discography takes many requests), and looked up again after a month.
 type Resolver struct {
-	dz    *Deezer
-	path  string
-	mu    sync.Mutex
-	cache map[string]resolved
-	dirty bool
+	dz      *Deezer
+	catalog *Catalog // when set, lines Deezer can't place are looked up in every catalog
+	path    string
+	mu      sync.Mutex
+	cache   map[string]resolved
+	dirty   bool
 }
 
 type resolved struct {
@@ -581,8 +585,16 @@ func (r *Resolver) Resolve(ctx context.Context, line string) (tracks []*Track, l
 		return nil, "", false, err
 	}
 	best, found := pickResult(parseMusicQuery(line), results)
+	expand := r.dz.Expand
+	if !found && r.catalog != nil {
+		if all, err := r.catalog.Search(ctx, line); err == nil {
+			if best, found = pickResult(parseMusicQuery(line), all); found {
+				expand = r.catalog.Expand
+			}
+		}
+	}
 	if found {
-		tracks, label, err = r.dz.Expand(ctx, best, nil)
+		tracks, label, err = expand(ctx, best, nil)
 		if err != nil {
 			return nil, "", false, err
 		}

@@ -94,7 +94,9 @@ func encodingQuality(enc string) Quality {
 func (b *Bandcamp) busy(*Track) time.Duration { return b.http.limiter.backlog() }
 
 func (b *Bandcamp) Search(ctx context.Context, t *Track) ([]Candidate, error) {
-	return searchUntilFound(ctx, t, songQueries(t, 2), func(q string) ([]Candidate, error) {
+	queries := songQueries(t, 2)
+	queries = append(queries, transliteratedQueries(t, queries)...)
+	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) {
 		return bandcampSearches.get(strings.ToLower(q)+"\x00"+b.encodings[0], func() ([]Candidate, error) { return b.search(ctx, q) })
 	})
 }

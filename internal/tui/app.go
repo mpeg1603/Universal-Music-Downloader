@@ -60,7 +60,8 @@ type tui struct {
 	inputsTable, playlistsTable *tview.Table
 	inputs                      []core.InputStatus
 	playlists                   []core.PlaylistStatus
-	playlistsOpen               int // how many of them aren't finished yet (those come first)
+	playlistsOpen               int             // how many of them aren't finished yet (those come first)
+	playlistMarks               map[string]bool // marked for removing several at once
 
 	// library
 	libInfo  *tview.TextView
@@ -117,6 +118,12 @@ func Run(m core.Backend) error {
 		go func() {
 			time.Sleep(200 * time.Millisecond) // after the first drawing, which sizes the window
 			ui.app.QueueUpdateDraw(ui.runSetup)
+		}()
+	}
+	if crash := m.LastCrash(); crash != "" {
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			ui.app.QueueUpdateDraw(func() { ui.message("Last time", crash) })
 		}()
 	}
 	return ui.app.SetRoot(ui.root, true).EnableMouse(true).EnablePaste(true).Run()
@@ -649,13 +656,13 @@ func (ui *tui) footerText() string {
 	common := "  [::d]1-9/Alt+1-9/F1-F9 tabs · [ ] bandwidth −/+ · P pause all · q quit[::-]"
 	hints := map[string]string{
 		"queue":     " [::b]Enter[::-] details  [::b]c[::-] cancel  [::b]r[::-] restart  [::b]p[::-] do next  [::b]R[::-] retry all failed  [::b]f[::-] filter  [::b]o[::-] sort  [::b]O[::-] reverse  [::b]/[::-] find in queue  [::b]Esc[::-] show all",
-		"search":    " [::b]/[::-] find music  [::b]Enter[::-] add result / show playlist  [::b]Tab[::-] next list  [::b]a[::-] add file/link  [::b]d[::-] remove  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]R[::-] re-read",
+		"search":    " [::b]/[::-] find music  [::b]Enter[::-] add result / show playlist  [::b]Tab[::-] next list  [::b]a[::-] add file/link  [::b]m[::-] mark  [::b]d[::-] remove  [::b]B[::-] bring back  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]R[::-] re-read",
 		"library":   " [::b]a[::-] add folder  [::b]d[::-] remove  [::b]s[::-] rescan  [::b]t[::-] quality threshold  [::b]u[::-] upgrade files below a quality",
 		"sources":   " [::b]space[::-] on/off  [::b]K J[::-] move up/down  [::b]Enter[::-] settings  [::b]e[::-] route  [::b]p[::-] pause/resume  [::b]b[::-] paste Bandcamp links",
 		"soulseek":  " [::b]/[::-] search  [::b]Enter[::-] download  [::b]d[::-] folder  [::b]Tab[::-] next pane  [::b]n[::-] message  [::b]j[::-] join room  [::b]l[::-] leave/close  [::b]m[::-] message user  [::b]x[::-] stop upload  [::b]B[::-] ban  [::b]o[::-] port  [::b]R[::-] reconnect",
 		"settings":  " [::b]Tab ↑ ↓[::-] move between fields  [::b]Esc[::-] leave a field  Save applies the changes right away",
 		"dashboard": " speeds, progress and disk use at a glance",
-		"sort":      " [::b]s[::-] make a plan  [::b]a[::-] apply  [::b]d[::-] drop it  [::b]D[::-] moves/duplicates  [::b]f[::-] kind  [::b]/[::-] filter  [::b]x[::-] stop  [::b]u[::-] undo a plan  [::b]C[::-] carry on with one",
+		"sort":      " [::b]s[::-] make a plan  [::b]a[::-] apply  [::b]d[::-] drop it  [::b]D[::-] moves/duplicates  [::b]f[::-] kind  [::b]/[::-] filter  [::b]x[::-] stop  [::b]u[::-] undo a plan  [::b]C[::-] carry on with one  [::b]e E[::-] delete a plan, all older",
 		"log":       " [::b]↑ ↓ PgUp PgDn[::-] scroll  [::b]End[::-] follow  [::b]v[::-] details " + onOff(core.Verbose),
 	}
 	return hints[ui.current] + common

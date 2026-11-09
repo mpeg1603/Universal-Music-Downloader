@@ -196,6 +196,7 @@ func TestAddMusicFromSearch(t *testing.T) {
 	a.Key = "a"
 	m := TestManager(t, tools, []Source{&FakeSource{SrcName: "youtube", T: t, Results: map[string][]Candidate{}}}, TestLibrary(a), nil)
 	m.deezer = testDeezer(t)
+	m.catalog.dz = m.deezer
 	name, n, err := m.AddMusic(context.Background(), MusicResult{Kind: "album", ID: 10}, nil)
 	if err != nil || n != 3 || name != "Search: Daft Punk - Random Access Memories" {
 		t.Fatalf("%q %d %v", name, n, err)

@@ -245,6 +245,7 @@ func (s *YouTubeMusic) Search(ctx context.Context, t *Track) ([]Candidate, error
 		queries = append(queries, t.ISRC)
 	}
 	queries = append(queries, songQueries(t, 3)...)
+	queries = append(queries, transliteratedQueries(t, queries)...)
 	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) {
 		var resp any
 		err := s.http.postJSON(ctx, "https://music.youtube.com/youtubei/v1/search?prettyPrint=false", map[string]any{
@@ -325,6 +326,7 @@ func (s *YouTube) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 		// Uploads are mostly titled "Artist - Title".
 		queries[0] = t.Artists[0] + " - " + strings.TrimSpace(strings.TrimPrefix(queries[0], t.Artists[0]))
 	}
+	queries = append(queries, transliteratedQueries(t, queries)...)
 	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) { return s.search(ctx, q) })
 }
 
@@ -390,7 +392,9 @@ func (s *SoundCloud) Label() string       { return "SoundCloud" }
 func (s *SoundCloud) MaxQuality() Quality { return Quality{Codec: "aac", Kbps: 160} }
 
 func (s *SoundCloud) Search(ctx context.Context, t *Track) ([]Candidate, error) {
-	return searchUntilFound(ctx, t, songQueries(t, 3), func(q string) ([]Candidate, error) { return s.search(ctx, q) })
+	queries := songQueries(t, 3)
+	queries = append(queries, transliteratedQueries(t, queries)...)
+	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) { return s.search(ctx, q) })
 }
 
 func (s *SoundCloud) search(ctx context.Context, query string) ([]Candidate, error) {

@@ -44,8 +44,15 @@ type Backend interface {
 	SetPlaylist(name string, on bool, priorityDelta int) error
 	SearchMusic(ctx context.Context, text string) ([]MusicResult, error)
 	AddMusic(ctx context.Context, r MusicResult, progress func(string)) (playlist string, tracks int, err error)
+	ArtistReleases(ctx context.Context, r MusicResult) ([]Release, error) // the discography, to pick from
+	ReleaseTracks(ctx context.Context, rel Release) ([]*Track, error)
+	AddReleases(ctx context.Context, artist MusicResult, picks []ReleasePick, progress func(string)) (playlist string, tracks int, err error)
 	Additions() []AdditionStatus
 	RemoveAddition(playlist string) bool
+	RemovalPreview(names []string) RemovalPreview
+	RemovePlaylists(names []string, files, moveTo string) (RemovalResult, error) // files: keep, delete or move
+	RemovedPlaylists() []string
+	RestorePlaylists() int
 
 	// Your library.
 	LibraryStatus() LibScanStatus
@@ -84,9 +91,13 @@ type Backend interface {
 	SortSkipLookups()
 	SortDiscard()
 	SortHistory() []SortPlanInfo
+	SortDeletePlans(ids []string) (int, error)
 
 	// At a glance.
 	Dashboard() DashboardView
+
+	// LastCrash says what ended the previous run, when it didn't end by being closed.
+	LastCrash() string
 
 	// Soulseek.
 	SoulseekStatus() SoulseekView

@@ -92,30 +92,71 @@ func (m *Manager) mergeAdditions(lib *Library) {
 
 // SearchMusic looks up what you typed in the music catalog.
 func (m *Manager) SearchMusic(ctx context.Context, text string) ([]MusicResult, error) {
-	return m.deezer.SearchMusic(ctx, text)
+	return m.catalog.Search(ctx, text)
+}
+
+// ArtistReleases lists what an artist has released, so a part of it can be picked.
+func (m *Manager) ArtistReleases(ctx context.Context, r MusicResult) ([]Release, error) {
+	return m.catalog.ArtistReleases(ctx, r)
+}
+
+// ReleaseTracks lists the tracks of a release.
+func (m *Manager) ReleaseTracks(ctx context.Context, rel Release) ([]*Track, error) {
+	return m.catalog.ReleaseTracks(ctx, rel)
+}
+
+// AddReleases adds part of an artist's discography: whole releases, or chosen tracks of them.
+// Adding more of the same artist later joins the same playlist.
+func (m *Manager) AddReleases(ctx context.Context, artist MusicResult, picks []ReleasePick, progress func(string)) (string, int, error) {
+	tracks, err := m.catalog.tracksOf(ctx, artist.Title, picks, progress)
+	if err != nil {
+		return "", 0, err
+	}
+	return m.addTracks("artist:"+foldName(artist.Title), "artist", artist.Title+" (discography)", tracks)
 }
 
 // AddMusic adds a search result to the queue: the track, the whole album, or the artist's
 // whole discography (progress hears how far that is). It returns the new playlist's name and
 // how many tracks it has; its tracks go first.
 func (m *Manager) AddMusic(ctx context.Context, r MusicResult, progress func(string)) (string, int, error) {
-	tracks, name, err := m.deezer.Expand(ctx, r, progress)
+	tracks, name, err := m.catalog.Expand(ctx, r, progress)
 	if err != nil {
 		return "", 0, err
 	}
 	if len(tracks) == 0 {
 		return "", 0, fmt.Errorf("found no tracks for %s", r)
 	}
-	ad := &Addition{ID: fmt.Sprintf("%s:%d", r.Kind, r.ID), Kind: r.Kind, Name: name, Added: time.Now(), Tracks: tracks}
+	id := fmt.Sprintf("%s:%d", r.Kind, r.ID)
+	if r.Provider != "" && r.Provider != provDeezer {
+		id = r.Kind + ":" + r.Provider + ":" + r.Ref
+	}
+	if r.Kind == "artist" {
+		id = "artist:" + foldName(r.Title)
+	}
+	return m.addTracks(id, r.Kind, name, tracks)
+}
+
+// addTracks makes (or adds to) the playlist of a search; its tracks go first in the queue.
+func (m *Manager) addTracks(id, kind, name string, tracks []*Track) (string, int, error) {
+	ad := &Addition{ID: id, Kind: kind, Name: name, Added: time.Now(), Tracks: tracks}
 	m.adds.mu.Lock()
 	for i, x := range m.adds.list {
-		if x.ID == ad.ID { // added again: refreshed
+		if x.ID == ad.ID { // added again: what's there stays, and the new ones join it
+			have := map[string]bool{}
+			for _, t := range tracks {
+				have[t.Key] = true
+			}
+			for _, t := range x.Tracks {
+				if !have[t.Key] {
+					ad.Tracks = append(ad.Tracks, t)
+				}
+			}
 			m.adds.list = append(m.adds.list[:i], m.adds.list[i+1:]...)
 			break
 		}
 	}
 	m.adds.list = append(m.adds.list, ad)
-	err = m.adds.saveLocked()
+	err := m.adds.saveLocked()
 	m.adds.mu.Unlock()
 	if err != nil {
 		return "", 0, err
@@ -167,7 +208,7 @@ func (m *Manager) RemoveAddition(playlist string) bool {
 	}
 	m.adds.mu.Unlock()
 	if found {
-		go m.importInputs()
+		m.askImport()
 	}
 	return found
 }

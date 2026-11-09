@@ -5,7 +5,6 @@ import (
 
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -105,7 +104,7 @@ var resultSections = []struct {
 }{
 	{"track", "♪ Tracks", tcell.ColorAqua},
 	{"album", "◉ Albums", tcell.ColorYellow},
-	{"artist", "★ Artists (Enter: the whole discography)", tcell.ColorFuchsia},
+	{"artist", "★ Artists (Enter: see the discography and pick)", tcell.ColorFuchsia},
 }
 
 func (ui *tui) firstResultRow() int {
@@ -133,12 +132,12 @@ func (ui *tui) findMusic(text string) {
 			ui.finding = false
 			if err != nil {
 				ui.resultsTable.SetTitle(" Results ")
-				ui.message("Search", "The music catalog (Deezer) didn't answer: "+err.Error())
+				ui.message("Search", "None of the music catalogs answered: "+err.Error())
 				return
 			}
 			ui.results = res
 			ui.fillResults()
-			ui.resultsTable.SetTitle(fmt.Sprintf(" %d results for %q (Enter adds: a track, the whole album, or the artist's discography) ", len(res), text))
+			ui.resultsTable.SetTitle(fmt.Sprintf(" %d results for %q (Enter adds a track or album; on an artist, shows the discography to pick from) ", len(res), text))
 			if len(res) > 0 {
 				ui.resultsTable.Select(ui.firstResultRow(), 0)
 				ui.app.SetFocus(ui.resultsTable)
@@ -241,7 +240,7 @@ func (ui *tui) addMusic(r core.MusicResult) {
 		}()
 	}
 	if r.Kind == "artist" {
-		ui.confirm(fmt.Sprintf("Add %s's whole discography (albums, EPs and singles, each song once; %d releases on Deezer)?", r.Title, r.Count), "Add", run)
+		ui.pickDiscography(r)
 		return
 	}
 	run()
@@ -251,7 +250,7 @@ func (ui *tui) refreshSearch() {
 	ui.refreshPlaylistTables()
 	note := ui.addNote
 	if note == "" {
-		note = "[gray]Enter on a result: a track is queued; an album brings all its tracks; an artist the whole discography. They go first.[-]"
+		note = "[gray]Enter on a result: a track is queued; an album brings all its tracks; an artist opens the discography to pick from. They go first. Looks in Deezer, MusicBrainz, iTunes, YouTube Music, Bandcamp and Yandex Music.[-]"
 	}
 	ui.findInfo.SetText(" " + note)
 }
@@ -260,25 +259,13 @@ func (ui *tui) buildPlaylistTables() {
 	ui.inputsTable = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
 	ui.inputsTable.SetBorder(true).SetTitle(" Playlist files (a adds) ")
 	ui.playlistsTable = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0)
-	ui.playlistsTable.SetBorder(true).SetTitle(" Playlists (Enter shows the tracks) ")
+	ui.playlistsTable.SetBorder(true).SetTitle(" Playlists (Enter shows the tracks · m marks · M marks all finished · d removes · B brings back) ")
 	addInput := func() {
-		ui.askPath("Add playlists", "A CSV (Exportify, TuneMyMusic…), a folder or zip of them, Spotify's data export (zip), a text file (a track, album or artist per line: \"Artist - Title\", \"Artist - Album\", \"Artist\"), or a public Spotify playlist/album link.",
+		ui.askPath("Add playlists", "A CSV (Exportify, TuneMyMusic…), a folder or zip of them, Spotify's data export (zip), a text file (a track, album or artist per line: \"Artist - Title\", \"Artist - Album\", \"Artist\"), or a link to a playlist, album or song on Spotify, Deezer, Apple Music, Bandcamp, YouTube, SoundCloud or another site.",
 			false, []string{".csv", ".zip", ".txt", ".json"}, func(p string) {
-				if !strings.Contains(p, "://") && !strings.HasPrefix(p, "spotify:") {
-					p = core.CleanPath(p)
-					if _, err := os.Stat(p); err != nil {
-						ui.message("Can't add that", err.Error())
-						return
-					}
+				if err := ui.m.AddInput(p); err != nil {
+					ui.message("Can't add that", err.Error())
 				}
-				ui.update(func(c *core.Config) {
-					for _, in := range c.Inputs {
-						if in.Path == p {
-							return
-						}
-					}
-					c.Inputs = append(c.Inputs, core.InputCfg{Path: p, Enabled: true})
-				})
 			})
 	}
 	ui.inputsTable.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
@@ -354,11 +341,46 @@ func (ui *tui) buildPlaylistTables() {
 				ui.show("queue")
 			}
 			return nil
-		case ev.Rune() == 'd' && sel != nil && core.IsAddition(sel.Name):
-			name := sel.Name
-			ui.confirm("Remove "+name+" (its tracks leave the queue; files already downloaded stay)?", "Remove", func() {
-				ui.m.RemoveAddition(name)
-			})
+		case ev.Rune() == 'm' && sel != nil:
+			if ui.playlistMarks == nil {
+				ui.playlistMarks = map[string]bool{}
+			}
+			if ui.playlistMarks[sel.Name] {
+				delete(ui.playlistMarks, sel.Name)
+			} else {
+				ui.playlistMarks[sel.Name] = true
+			}
+			ui.refreshPlaylistTables()
+			return nil
+		case ev.Rune() == 'M':
+			if len(ui.playlistMarks) > 0 {
+				ui.playlistMarks = nil
+			} else {
+				ui.playlistMarks = map[string]bool{}
+				for _, p := range ui.playlists[ui.playlistsOpen:] {
+					ui.playlistMarks[p.Name] = true
+				}
+			}
+			ui.refreshPlaylistTables()
+			return nil
+		case ev.Rune() == 'd' || ev.Key() == tcell.KeyDelete:
+			var names []string
+			for _, p := range ui.playlists {
+				if ui.playlistMarks[p.Name] {
+					names = append(names, p.Name)
+				}
+			}
+			if len(names) == 0 && sel != nil {
+				names = []string{sel.Name}
+			}
+			if len(names) > 0 {
+				ui.removePlaylists(names)
+			}
+			return nil
+		case ev.Rune() == 'B':
+			if n := len(ui.m.RemovedPlaylists()); n > 0 {
+				ui.confirm(fmt.Sprintf("Bring back %d removed playlists?", n), "Bring back", func() { ui.m.RestorePlaylists() })
+			}
 			return nil
 		case ev.Rune() == 'a':
 			addInput()
@@ -446,6 +468,9 @@ func (ui *tui) refreshPlaylistTables() {
 		prio := ""
 		if s.Priority != 0 {
 			prio = fmt.Sprintf("%+d", s.Priority)
+		}
+		if ui.playlistMarks[s.Name] {
+			on = "●"
 		}
 		cells := []string{on, prio, tview.Escape(s.Name), fmt.Sprint(s.Tracks), fmt.Sprint(s.Done), fmt.Sprint(s.InLib), fmt.Sprint(s.Todo), fmt.Sprint(s.Failed)}
 		for c, text := range cells {

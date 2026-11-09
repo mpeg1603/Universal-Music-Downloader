@@ -141,6 +141,12 @@ func runShots(a *app) {
 		s.only = strings.Split(o, ",")
 	}
 	a.win.Resize(1240, 800)
+	if size := os.Getenv("UMD_SHOTS_SIZE"); size != "" { // e.g. 1080x1920, a monitor on its side
+		var w, h int
+		if _, err := fmt.Sscanf(size, "%dx%d", &w, &h); err == nil {
+			a.win.Resize(w, h)
+		}
+	}
 	a.win.Show()
 	pump(1500 * time.Millisecond)
 

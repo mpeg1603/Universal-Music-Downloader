@@ -30,7 +30,8 @@ func (m *Manager) pruneRules() []pruneRule {
 		{dir: filepath.Join(cache, "bandcamp"), maxAge: 3 * 24 * time.Hour, maxBytes: 5 << 30},
 		{dir: filepath.Join(cache, "torrents"), maxAge: 14 * 24 * time.Hour, maxBytes: 200 << 20},
 		{dir: filepath.Join(cache, "torrent-searches"), maxAge: 24 * time.Hour}, // answers count for 12 hours at most
-		{dir: filepath.Join(m.dataDir, "logs"), maxAge: 14 * 24 * time.Hour, maxBytes: 100 << 20, keep: 1},
+		{dir: filepath.Join(cache, "links"), maxAge: 180 * 24 * time.Hour},
+		{dir: filepath.Join(m.dataDir, "logs"), maxAge: 14 * 24 * time.Hour, maxBytes: 300 << 20, keep: 4},
 	}
 }
 
@@ -84,7 +85,7 @@ var CacheKinds = []CacheInfo{
 	{Name: "albums", Label: "Bandcamp albums", About: "Whole albums, kept so their other songs don't download them again."},
 	{Name: "torrents", Label: "Torrent files", About: "Small files describing torrents already looked at."},
 	{Name: "searches", Label: "Torrent searches", About: "Answers from torrent sites, kept for half a day."},
-	{Name: "logs", Label: "Logs", About: "What the app did, in case something goes wrong. The current one stays."},
+	{Name: "logs", Label: "Logs", About: "What the app did, in case something goes wrong. The latest few stay."},
 	{Name: "sort-tags", Label: "Sort & merge: details of your files", About: "Without it, the next plan has to read every file again."},
 	{Name: "sort-lookups", Label: "Sort & merge: online answers", About: "Without it, the next plan asks MusicBrainz and Deezer again."},
 }
@@ -110,7 +111,7 @@ func (m *Manager) cacheDir(name string) (string, int) {
 	case "searches":
 		return filepath.Join(m.dataDir, "cache", "torrent-searches"), 0
 	case "logs":
-		return filepath.Join(m.dataDir, "logs"), 1
+		return filepath.Join(m.dataDir, "logs"), 4
 	}
 	return "", 0
 }
@@ -176,6 +177,7 @@ func (m *Manager) housekeeping() {
 		case <-time.After(wait):
 		}
 		wait = time.Hour
+		logHealth()
 		files, freed := 0, int64(0)
 		for _, r := range m.pruneRules() {
 			n, b := pruneDir(r, time.Now())

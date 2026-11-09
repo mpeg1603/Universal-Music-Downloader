@@ -53,6 +53,10 @@ type dashboardTab struct {
 
 	busy  bool
 	ticks int
+
+	tiles    *qt.QGridLayout
+	frames   []*qt.QFrame
+	tileCols int
 }
 
 type diskRow struct {
@@ -70,11 +74,17 @@ func newDashboardTab(a *app) *dashboardTab {
 
 	tiles := qt.NewQGridLayout2()
 	tiles.SetSpacing(12)
+	t.tiles = tiles
 	t.down = t.tile(tiles, 0, "Download speed", true)
 	t.up = t.tile(tiles, 1, "Sharing on Soulseek", true)
 	t.done = t.tile(tiles, 2, "Songs ready", false)
 	t.free = t.tile(tiles, 3, "Free space", false)
 	body.AddLayout(tiles.QLayout)
+	// On a narrow window (a monitor stood on its side) the four tiles go two by two.
+	p.w.OnResizeEvent(func(super func(*qt.QResizeEvent), e *qt.QResizeEvent) {
+		super(e)
+		t.layOutTiles(p.w.Width())
+	})
 
 	// the songs
 	songs, sb := card()
@@ -132,8 +142,38 @@ func newDashboardTab(a *app) *dashboardTab {
 	return t
 }
 
+// tileColumns is how many tiles a row holds at a page width.
+func tileColumns(width int) int {
+	if width < 860 {
+		return 2
+	}
+	return 4
+}
+
+func (t *dashboardTab) layOutTiles(width int) {
+	cols := tileColumns(width)
+	if cols == t.tileCols {
+		return
+	}
+	t.tileCols = cols
+	for i, f := range t.frames {
+		t.tiles.RemoveWidget(f.QWidget)
+		t.tiles.AddWidget2(f.QWidget, i/cols, i%cols)
+	}
+	for c := range 4 {
+		stretch := 0
+		if c < cols {
+			stretch = 1
+		}
+		t.tiles.SetColumnStretch(c, stretch)
+	}
+}
+
 func (t *dashboardTab) tile(grid *qt.QGridLayout, col int, label string, spark bool) *dashTile {
 	f, box := card()
+	// Never taller than what's in it, whatever the height of the window.
+	f.SetSizePolicy2(qt.QSizePolicy__Preferred, qt.QSizePolicy__Maximum)
+	t.frames = append(t.frames, f)
 	box.SetSpacing(2)
 	box.AddWidget(text(label, "hint").QWidget)
 	tile := &dashTile{value: text("…", "stat"), sub: text("", "muted")}

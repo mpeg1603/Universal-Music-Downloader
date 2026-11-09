@@ -146,11 +146,17 @@ type Manager struct {
 	resolver    *Resolver    // plain-text list lines → tracks
 	indexerDefs *indexerDefs // built-in torrent indexers (Jackett's definitions)
 	adds        *additions   // what you added from the Search tab
+	catalog     *Catalog     // where music is looked up by name
 
 	libMu     sync.RWMutex
 	full      *Library
 	inputErrs map[string]string
 	importing atomic.Bool
+	importMu  sync.Mutex  // one import at a time
+	importAsk atomic.Bool // one is waiting for its turn
+	imported  atomic.Bool // the playlists have been read since the app started
+	linksOnce atomic.Bool // the next import asks the sites for links again
+	inputsSig string      // what the playlist files looked like when last read (importMu)
 
 	jobsMu sync.Mutex
 	jobs   map[string]*Job
@@ -206,10 +212,11 @@ type Manager struct {
 	checkMu               sync.Mutex // one library check at a time
 	checkDone, checkTotal atomic.Int64
 
-	sort   sorter    // Sort & merge
-	dash   dashState // the numbers at a glance
-	events eventHub  // Watch's subscribers
-	revs   revisions // changes to the queue and the settings, for Watch
+	sort      sorter    // Sort & merge
+	lastCrash string    // what ended the previous run, when not being closed
+	dash      dashState // the numbers at a glance
+	events    eventHub  // Watch's subscribers
+	revs      revisions // changes to the queue and the settings, for Watch
 	// onFinish is called when a job reaches a final state (for the headless output).
 	onFinish func(JobView)
 }
@@ -222,7 +229,9 @@ func NewManager(cfgPath, dataDir string, cfg Config) *Manager {
 		searchGate: newGate(cfg.SearchWorkers), dlGate: newGate(cfg.MaxDownloads), deezer: newDeezer(),
 		bcMail: newBandcampMail(filepath.Join(dataDir, "bandcamp-emails.json")), shares: newSlskShares()}
 	m.bcMail.onLink = m.bandcampLinkArrived
+	m.catalog = newCatalog(m.deezer, m)
 	m.resolver = newResolver(m.deezer, filepath.Join(dataDir, "cache", "catalog.json"))
+	m.resolver.catalog = m.catalog
 	m.adds = loadAdditions(filepath.Join(dataDir, "added.json"))
 	m.indexerDefs = loadIndexerDefs(filepath.Join(dataDir, "cache", "indexers"))
 	for _, n := range allSources {
@@ -266,6 +275,7 @@ func (m *Manager) Start() error {
 		return err
 	}
 	m.state = st
+	m.noteUncleanExit()
 	if m.proxy, err = startLocalProxy(); err != nil {
 		return fmt.Errorf("starting the local proxy: %w", err)
 	}
@@ -290,10 +300,11 @@ func (m *Manager) Start() error {
 		defer m.wg.Done()
 		m.setup()
 	}()
-	m.wg.Add(3)
+	m.wg.Add(4)
 	go func() { defer m.wg.Done(); m.dispatchLoop() }()
 	go func() { defer m.wg.Done(); m.governor() }()
 	go func() { defer m.wg.Done(); m.housekeeping() }()
+	go func() { defer m.wg.Done(); m.watchInputs() }()
 	return nil
 }
 
@@ -390,6 +401,7 @@ func (m *Manager) Stop() {
 		m.state.close()
 	}
 	os.RemoveAll(filepath.Join(m.dataDir, "tmp"))
+	os.Remove(filepath.Join(m.dataDir, runningMarker))
 }
 
 // --- settings -------------------------------------------------------------------------------
@@ -1010,6 +1022,9 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 	}
 	j.mu.Lock()
 	needBetter := j.needBetter && !j.force
+	// An upgrade looks through every source once and that's that: what wasn't found isn't
+	// searched for again (a source that's off for now is still waited for, once).
+	upgrading := (j.needBetter || j.minQuality != "") && !j.force
 	var libQ Quality
 	if len(j.lib) > 0 {
 		libQ = j.lib[0].Q
@@ -1026,7 +1041,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 		if ctx.Err() != nil {
 			return result{aborted: true}
 		}
-		src := m.nextSource(j, needBetter, libQ, &transient, &retryAt, skipped)
+		src := m.nextSource(j, needBetter, upgrading, libQ, &transient, &retryAt, skipped)
 		if src == nil {
 			break
 		}
@@ -1058,7 +1073,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 		m.recordResult(src, err, true)
 		if err != nil {
 			note(label + ": " + err.Error())
-			if isUnavailable(err) {
+			if isUnavailable(err) && !upgrading {
 				transient, counted = true, true
 				m.markTried(j, name, false)
 			} else {
@@ -1148,7 +1163,9 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			m.recordResult(src, err, false)
 			note(label + ": " + err.Error())
 			if isUnavailable(err) {
-				srcTransient, transient, counted = true, true, true
+				if !upgrading {
+					srcTransient, transient, counted = true, true, true
+				}
 				break
 			}
 			failed[ck] = true
@@ -1170,6 +1187,9 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 	}
 	if transient {
 		return result{state: JobWaiting, reason: reason, transient: true, counted: counted, retryAt: retryAt}
+	}
+	if upgrading {
+		reason = "no better copy found on any source: " + reason
 	}
 	return result{state: JobFailed, reason: reason}
 }
@@ -1213,13 +1233,20 @@ const busyLimit = 20 * time.Second
 
 // nextSource returns the first source in priority order the job hasn't been through yet,
 // noting the ones skipped because they're paused or busy.
-func (m *Manager) nextSource(j *Job, needBetter bool, libQ Quality, transient *bool, retryAt *time.Time, skipped map[string]bool) Source {
+func (m *Manager) nextSource(j *Job, needBetter, upgrading bool, libQ Quality, transient *bool, retryAt *time.Time, skipped map[string]bool) Source {
 	j.mu.Lock()
 	tried := make(map[string]bool, len(j.tried))
 	for k, v := range j.tried {
 		tried[k] = v
 	}
+	track := j.Track
 	j.mu.Unlock()
+	if track.SourceURL != "" && !tried[linkSourceName] {
+		if src := m.linkedSource(track); src != nil {
+			return src
+		}
+		m.markTried(j, linkSourceName, true) // gone from there, or nothing can fetch it: search for it
+	}
 	for _, src := range m.currentSources() {
 		name := src.Name()
 		if tried[name] {
@@ -1244,6 +1271,11 @@ func (m *Manager) nextSource(j *Job, needBetter bool, libQ Quality, transient *b
 			*transient = true
 		}
 		if cool, until, why := m.cooling(name); cool {
+			if upgrading && until.IsZero() { // paused by you: not waited for
+				j.addNote(name, fmt.Sprintf("%s: paused by you, so not looked at", src.Label()), false)
+				m.markTried(j, name, true)
+				continue
+			}
 			if !skipped[src.Label()] {
 				when := "for now"
 				if !until.IsZero() {

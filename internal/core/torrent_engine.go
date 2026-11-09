@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -136,6 +137,7 @@ func (e *btEngine) add(ctx context.Context, data []byte, dir string, files map[i
 		return "", err
 	}
 	st := storage.NewFileOpts(storage.NewFileClientOpts{ClientBaseDir: dir, PieceCompletion: btCompletion{storage.NewMapPieceCompletion()}})
+	spec.Trackers = capTrackers(spec.Trackers)
 	spec.Storage = st
 	e.mu.Lock()
 	cl := e.cl
@@ -331,6 +333,44 @@ func (e *btEngine) close() {
 	}
 }
 
+// maxTrackers: past a handful, each more tracker adds nothing but work: the torrent library
+// spent over half the app's CPU keeping track of the announces of magnets with dozens of them.
+const maxTrackers = 6
+
+// capTrackers keeps the first few trackers of a torrent, the announce list's order being
+// roughly best first.
+func capTrackers(tiers [][]string) [][]string {
+	n := 0
+	var out [][]string
+	for _, tier := range tiers {
+		var keep []string
+		for _, tr := range tier {
+			if n < maxTrackers && tr != "" {
+				keep, n = append(keep, tr), n+1
+			}
+		}
+		if len(keep) > 0 {
+			out = append(out, keep)
+		}
+	}
+	return out
+}
+
+// trimMagnet is a magnet link with at most maxTrackers trackers.
+func trimMagnet(magnet string) string {
+	u, err := url.Parse(magnet)
+	if err != nil {
+		return magnet
+	}
+	q := u.Query()
+	if len(q["tr"]) <= maxTrackers {
+		return magnet
+	}
+	q["tr"] = q["tr"][:maxTrackers]
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // publicTrackers are Jackett's (MagnetUtil.cs), for magnet links made from a hash alone.
 var publicTrackers = []string{
 	"udp://tracker.opentrackr.org:1337/announce",
@@ -372,7 +412,7 @@ func (e *btEngine) metadata(ctx context.Context, magnet string) ([]byte, error) 
 	e.mu.Lock()
 	e.metaUsers[spec.InfoHash]++
 	e.mu.Unlock()
-	t, err := cl.AddMagnet(magnet)
+	t, err := cl.AddMagnet(trimMagnet(magnet))
 	if err != nil {
 		e.mu.Lock()
 		e.metaUsers[spec.InfoHash]--
@@ -394,7 +434,9 @@ func (e *btEngine) metadata(ctx context.Context, magnet string) ([]byte, error) 
 	if !e.downloading(t) { // a download of the same torrent must keep going
 		t.DisallowDataDownload()
 	}
-	t.AddTrackers([][]string{publicTrackers}) // sites often give just the hash
+	if len(spec.Trackers) == 0 || len(spec.Trackers[0]) < 3 { // sites often give just the hash
+		t.AddTrackers([][]string{publicTrackers[:5]})
+	}
 	select {
 	case <-t.GotInfo():
 	case <-t.Closed():

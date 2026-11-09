@@ -336,3 +336,34 @@ func writePlaylists(lib *Library, views map[string]JobView, dir string) (int, er
 	}
 	return len(lib.Playlists), nil
 }
+
+// removePlaylistFiles removes the .m3u8 files this app wrote for the named playlists, the ones
+// you've just removed. A file counts as the app's only if it starts the way writePlaylists
+// starts them; anything else in the folder is left alone.
+func removePlaylistFiles(dir string, names map[string]bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	buf := make([]byte, 4096)
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !strings.EqualFold(filepath.Ext(e.Name()), ".m3u8") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		n, _ := f.Read(buf)
+		f.Close()
+		head, rest, ok := strings.Cut(string(buf[:n]), "\n")
+		if !ok || head != "#EXTM3U" || !strings.HasPrefix(rest, "#PLAYLIST:") {
+			continue
+		}
+		name, _, _ := strings.Cut(strings.TrimPrefix(rest, "#PLAYLIST:"), "\n")
+		if names[name] {
+			os.Remove(p)
+		}
+	}
+}
