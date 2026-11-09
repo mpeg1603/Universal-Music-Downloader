@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"universal-music-downloader/internal/core"
 
@@ -85,7 +86,7 @@ func newPlaylistsTab(a *app) *playlistsTab {
 	t.down = a.iconButton("arrow-down", "Lower priority", "", "Goes after other playlists", func() { t.prio(-1) })
 	t.selAll = button("Select all", "ghost", func() { t.list.view.SelectAll() })
 	t.selAll.SetToolTip("Ctrl+click or Shift+click picks several")
-	t.remove = a.iconButton("trash", "Remove", "danger", "Take the selected playlists out of the app, and choose what happens to their files", t.removeSelected)
+	t.remove = a.iconButton("trash", "Remove", "danger", "Take the selected playlists out of the app and the Downloads tab. Music files are never touched", t.removeSelected)
 	for _, b := range []*qt.QPushButton{t.show, t.onoff, t.up, t.down} {
 		acts.AddWidget(b.QWidget)
 	}
@@ -104,7 +105,7 @@ func newPlaylistsTab(a *app) *playlistsTab {
 	t.inRemove = a.iconButton("trash", "Remove", "danger", "Stop using this file (the file itself isn't touched)", t.removeInput)
 	head.AddWidget(t.inToggle.QWidget)
 	head.AddWidget(t.inRemove.QWidget)
-	t.restore = button("Bring back removed", "ghost", t.restoreRemoved)
+	t.restore = button("Ignored playlists", "ghost", t.showIgnored)
 	t.restore.Hide()
 	head.AddWidget(t.restore.QWidget)
 	head.AddWidget(a.iconButton("refresh", "Read again", "", "Read the files and links now (changed files are noticed by themselves)", func() {
@@ -233,7 +234,7 @@ func (t *playlistsTab) selectedNames() []string {
 	return out
 }
 
-// removeSelected asks what should happen to the files, then takes the playlists out.
+// removeSelected asks what should happen to the playlist files, then takes the playlists out.
 func (t *playlistsTab) removeSelected() {
 	names := t.selectedNames()
 	if len(names) == 0 || t.removing {
@@ -253,25 +254,51 @@ func (t *playlistsTab) askRemoval(names []string, v core.RemovalPreview) {
 		what = fmt.Sprintf("%d playlists", len(names))
 	}
 	d.SetWindowTitle("Remove " + what)
-	d.Resize(520, 260)
+	height := 280
+	if len(v.Files) > 0 {
+		height += 110
+	}
+	if v.Shared > 0 {
+		height += 50
+	}
+	d.Resize(520, height)
 	box := qt.NewQVBoxLayout(d.QWidget)
 	box.SetContentsMargins(20, 16, 20, 14)
 	box.SetSpacing(10)
 	box.AddWidget(text("Remove "+what+"?", "h1").QWidget)
-	intro := "Their songs leave your downloads. A playlist from a file stays out until you bring it back."
-	if v.Shared > 0 {
-		intro += fmt.Sprintf(" %s files other playlists also use stay where they are.", fmtCount(v.Shared))
+	intro := "It leaves the app and its songs leave the Downloads tab, unless another playlist also has them."
+	if len(names) > 1 {
+		intro = "They leave the app and their songs leave the Downloads tab, unless another playlist also has them."
 	}
-	box.AddWidget(richText(intro, "subtitle").QWidget)
-	keep := qt.NewQRadioButton3(fmt.Sprintf("Keep the files where they are (%s, %s)", fmtCount(v.Files), core.FmtBytes(v.Bytes)))
-	del := qt.NewQRadioButton3("Delete the files from the disk")
-	mv := qt.NewQRadioButton3("Move the files to another folder:")
+	box.AddWidget(text(intro, "subtitle").QWidget)
+	box.AddWidget(text("Your music files stay on the disk.", "").QWidget)
+	if v.Shared > 0 {
+		note := fmt.Sprintf("%s also hold other playlists, so they stay as they are.", counted(v.Shared, "playlist file"))
+		if v.Shared == 1 {
+			note = "1 playlist file also holds other playlists, so it stays as it is."
+		}
+		box.AddWidget(text(note, "subtitle").QWidget)
+	}
+	one := len(v.Files) == 1
+	pick := func(single, many string) string {
+		if one {
+			return single
+		}
+		return many
+	}
+	fileName := fmt.Sprintf("%s playlist files", fmtCount(len(v.Files)))
+	if one {
+		fileName = filepath.Base(v.Files[0])
+	}
+	keep := qt.NewQRadioButton3(pick("Ignore it: leave it where it is", "Ignore them: leave them where they are"))
+	mv := qt.NewQRadioButton3(pick("Move it to another folder:", "Move them to another folder:"))
+	del := qt.NewQRadioButton3(pick("Delete it", "Delete them"))
 	keep.SetChecked(true)
 	dest := qt.NewQLineEdit2()
 	dest.SetPlaceholderText("Choose a folder")
 	dest.SetEnabled(false)
 	browse := button("Choose…", "", func() {
-		if p := qt.QFileDialog_GetExistingDirectory3(d.QWidget, "Move the files to", dest.Text()); p != "" {
+		if p := qt.QFileDialog_GetExistingDirectory3(d.QWidget, "Move the playlist files to", dest.Text()); p != "" {
 			dest.SetText(p)
 			mv.SetChecked(true)
 		}
@@ -281,15 +308,16 @@ func (t *playlistsTab) askRemoval(names []string, v core.RemovalPreview) {
 		dest.SetEnabled(on)
 		browse.SetEnabled(on)
 	})
-	if v.Files > 0 {
+	if len(v.Files) > 0 {
+		box.AddWidget(text("What should happen to "+fileName+"?", "").QWidget)
 		box.AddWidget(keep.QWidget)
-		box.AddWidget(del.QWidget)
 		box.AddWidget(mv.QWidget)
 		row := hbox()
 		row.SetSpacing(6)
 		row.AddWidget2(dest.QWidget, 1)
 		row.AddWidget(browse.QWidget)
 		box.AddLayout(row.QLayout)
+		box.AddWidget(del.QWidget)
 	}
 	box.AddStretch()
 	btns := hbox()
@@ -298,7 +326,7 @@ func (t *playlistsTab) askRemoval(names []string, v core.RemovalPreview) {
 	btns.AddWidget(button("Cancel", "", func() { d.Reject() }).QWidget)
 	go_ := button("Remove", "danger", func() {
 		if mv.IsChecked() && dest.Text() == "" {
-			a.message("Choose a folder", "Pick where the files should go, or choose another option.")
+			a.message("Choose a folder", "Pick where the playlist files should go, or choose another option.")
 			return
 		}
 		d.Accept()
@@ -311,7 +339,7 @@ func (t *playlistsTab) askRemoval(names []string, v core.RemovalPreview) {
 	files, moveTo := "keep", ""
 	switch {
 	case del.IsChecked():
-		if !a.confirm("Delete the files?", fmt.Sprintf("%s files (%s) go for good.", fmtCount(v.Files), core.FmtBytes(v.Bytes))) {
+		if !a.confirm("Delete "+fileName+"?", "This can't be undone, and the playlist can't be brought back afterwards. Your music files stay on the disk.") {
 			return
 		}
 		files = "delete"
@@ -329,15 +357,15 @@ func (t *playlistsTab) askRemoval(names []string, v core.RemovalPreview) {
 				a.message("That didn't work", err.Error())
 				return
 			}
-			msg := fmt.Sprintf("Removed %d playlists.", res.Playlists)
+			msg := "Removed " + what + "."
 			switch {
 			case res.Deleted > 0:
-				msg = fmt.Sprintf("Removed %d playlists and deleted %s files.", res.Playlists, fmtCount(res.Deleted))
+				msg = fmt.Sprintf("Removed %s and deleted %s.", what, fileName)
 			case res.Moved > 0:
-				msg = fmt.Sprintf("Removed %d playlists and moved %s files.", res.Playlists, fmtCount(res.Moved))
+				msg = fmt.Sprintf("Removed %s and moved %s.", what, fileName)
 			}
 			if len(res.Errors) > 0 {
-				a.message("Some files couldn't be handled", fmt.Sprintf("%s\n\n%d files had problems; see Activity.", res.Errors[0], len(res.Errors)))
+				a.message("Some playlist files couldn't be handled", fmt.Sprintf("%s\n\n%d files had problems; see Activity.", res.Errors[0], len(res.Errors)))
 			}
 			a.toast(msg)
 			t.refresh()
@@ -345,14 +373,68 @@ func (t *playlistsTab) askRemoval(names []string, v core.RemovalPreview) {
 	}()
 }
 
-func (t *playlistsTab) restoreRemoved() {
-	if !t.a.confirm("Bring back removed playlists?", "They appear here again and their songs go back in line. Files you deleted aren't restored; they're downloaded again.") {
-		return
+// showIgnored lists the removed playlists whose files are still there, to bring back or clear.
+func (t *playlistsTab) showIgnored() {
+	a := t.a
+	d := qt.NewQDialog(a.win.QWidget)
+	d.SetWindowTitle("Ignored playlists")
+	d.Resize(480, 420)
+	box := qt.NewQVBoxLayout(d.QWidget)
+	box.SetContentsMargins(20, 16, 20, 14)
+	box.SetSpacing(10)
+	box.AddWidget(text("Ignored playlists", "h1").QWidget)
+	box.AddWidget(text("You removed these, and the app skips them when it reads their files. Taking one off this list brings it back and puts its songs back in line.", "subtitle").QWidget)
+	list := qt.NewQListWidget2()
+	list.SetSelectionMode(qt.QAbstractItemView__ExtendedSelection)
+	box.AddWidget2(list.QWidget, 1)
+	fill := func() {
+		list.Clear()
+		names := a.m.RemovedPlaylists()
+		for _, n := range names {
+			list.AddItem(n)
+		}
+		if len(names) == 0 {
+			d.Accept()
+		}
 	}
-	if n := t.a.m.RestorePlaylists(); n > 0 {
-		t.a.toast(fmt.Sprintf("Bringing back %d playlists.", n))
-	}
+	btns := hbox()
+	btns.SetSpacing(8)
+	back := button("Bring back selected", "", func() {
+		var names []string
+		for _, it := range list.SelectedItems() {
+			names = append(names, it.Text())
+		}
+		if len(names) > 0 {
+			a.m.RestorePlaylists(names...)
+			a.toast(fmt.Sprintf("Brought back %s.", counted(len(names), "playlist")))
+			fill()
+		}
+	})
+	back.SetEnabled(false)
+	list.OnItemSelectionChanged(func() { back.SetEnabled(len(list.SelectedItems()) > 0) })
+	btns.AddWidget(back.QWidget)
+	btns.AddWidget(button("Clear the list", "", func() {
+		n := list.Count()
+		if a.confirm("Clear the ignored list?", fmt.Sprintf("%s come back and their songs go back in line.", counted(n, "playlist"))) {
+			a.m.RestorePlaylists()
+			a.toast(fmt.Sprintf("Brought back %s.", counted(n, "playlist")))
+			fill()
+		}
+	}).QWidget)
+	btns.AddStretch()
+	btns.AddWidget(button("Close", "", func() { d.Reject() }).QWidget)
+	box.AddLayout(btns.QLayout)
+	fill()
+	d.Exec()
 	t.refresh()
+}
+
+// counted is "1 playlist", "2 playlists".
+func counted(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmtCount(n) + " " + noun + "s"
 }
 
 func (t *playlistsTab) toggleInput() {
@@ -453,7 +535,7 @@ func (t *playlistsTab) refresh() {
 		rows, inputs, removed := t.a.m.Playlists(), t.a.m.Inputs(), len(t.a.m.RemovedPlaylists())
 		mainthread.Start(func() {
 			t.restore.SetVisible(removed > 0)
-			t.restore.SetText(fmt.Sprintf("Bring back removed (%d)", removed))
+			t.restore.SetText(fmt.Sprintf("Ignored playlists (%d)", removed))
 			t.loaded(rows, inputs)
 		})
 	}()

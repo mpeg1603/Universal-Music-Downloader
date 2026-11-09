@@ -50,9 +50,9 @@ type Backend interface {
 	Additions() []AdditionStatus
 	RemoveAddition(playlist string) bool
 	RemovalPreview(names []string) RemovalPreview
-	RemovePlaylists(names []string, files, moveTo string) (RemovalResult, error) // files: keep, delete or move
+	RemovePlaylists(names []string, files, moveTo string) (RemovalResult, error) // files, for the playlist files only: keep, delete or move
 	RemovedPlaylists() []string
-	RestorePlaylists() int
+	RestorePlaylists(names ...string) int // none named: all of them
 
 	// Your library.
 	LibraryStatus() LibScanStatus

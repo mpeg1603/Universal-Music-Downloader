@@ -183,78 +183,179 @@ func TestLinksAreKept(t *testing.T) {
 	}
 }
 
-func removalManager(t *testing.T) (m *Manager, only, shared, outside string) {
+// removalManager has a playlist with songs in the downloads folder and its CSV in an input folder.
+func removalManager(t *testing.T) (m *Manager, csv, other string, music []string) {
 	t.Helper()
 	root := t.TempDir()
-	music := filepath.Join(root, "music")
-	mk := func(p string) string {
+	mk := func(p, data string) string {
 		os.MkdirAll(filepath.Dir(p), 0o755)
-		os.WriteFile(p, []byte("x"), 0o644)
+		os.WriteFile(p, []byte(data), 0o644)
 		return p
 	}
-	only = mk(filepath.Join(music, "A", "only.mp3"))
-	shared = mk(filepath.Join(music, "A", "shared.mp3"))
-	outside = mk(filepath.Join(root, "library", "old.mp3"))
-	lib := newLibrary()
-	lib.add("Gone", &Track{Key: "1", Title: "Only", Artists: []string{"A"}})
-	lib.add("Gone", &Track{Key: "2", Title: "Shared", Artists: []string{"A"}})
-	lib.add("Stays", &Track{Key: "2", Title: "Shared", Artists: []string{"A"}})
-	lib.add("Gone", &Track{Key: "3", Title: "Outside", Artists: []string{"A"}})
-	m = TestManager(t, &Tools{}, nil, lib, func(c *Config) {
-		c.OutputDir = music
-		c.Inputs = nil
+	row := "Track Name,Artist Name(s)\nSong,Band\n"
+	csv = mk(filepath.Join(root, "lists", "Gone.csv"), row)
+	other = mk(filepath.Join(root, "lists", "Stays.csv"), "Track Name,Artist Name(s)\nOther,Group\n")
+	downloads := filepath.Join(root, "music")
+	library := filepath.Join(root, "library")
+	song := mk(filepath.Join(downloads, "Band", "song.mp3"), "x")
+	kept := mk(filepath.Join(library, "Band", "old.mp3"), "x")
+	m = TestManager(t, &Tools{}, nil, newLibrary(), func(c *Config) {
+		c.OutputDir = downloads
+		c.LibraryDirs = []string{library}
+		c.Inputs = []InputCfg{{Path: filepath.Join(root, "lists"), Enabled: true}}
 		c.Playlists = map[string]PlaylistCfg{}
 	})
-	for key, p := range map[string]string{"1": only, "2": shared, "3": outside} {
-		j := m.job(key)
-		j.mu.Lock()
-		j.state, j.rec = JobDone, &Record{Key: key, Status: "downloaded", Path: p}
-		j.mu.Unlock()
-		m.state.put(Record{Key: key, Status: "downloaded", Path: p})
+	m.importInputs()
+	key := m.Playlists()[0].Name
+	if key != "Gone" {
+		t.Fatalf("first playlist is %s", key)
 	}
-	return m, only, shared, outside
+	for _, j := range m.jobList() {
+		j.mu.Lock()
+		if j.Track.Title == "Song" {
+			j.state, j.rec = JobDone, &Record{Key: j.Track.Key, Status: "downloaded", Path: song}
+			m.state.put(*j.rec)
+		}
+		j.mu.Unlock()
+	}
+	return m, csv, other, []string{song, kept}
 }
 
-// Only files the app put in the downloads folder, used by nothing else, are ever touched.
-func TestRemovePlaylistsDeletes(t *testing.T) {
-	m, only, shared, outside := removalManager(t)
-	v := m.RemovalPreview([]string{"Gone"})
-	if v.Files != 1 || v.Shared != 1 {
-		t.Fatalf("preview: %+v", v)
+// Whatever is chosen for the playlist's file, the music stays exactly where it was.
+func TestRemovePlaylistsNeverTouchesMusic(t *testing.T) {
+	for _, how := range []string{"keep", "delete", "move"} {
+		t.Run(how, func(t *testing.T) {
+			m, _, _, music := removalManager(t)
+			if _, err := m.RemovePlaylists([]string{"Gone"}, how, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range music {
+				if _, err := os.Stat(p); err != nil {
+					t.Errorf("%s was touched: %v", p, err)
+				}
+			}
+			for _, p := range m.Playlists() {
+				if p.Name == "Gone" {
+					t.Error("the playlist is still there")
+				}
+			}
+			for _, j := range m.jobList() {
+				if j.Track.Title == "Song" {
+					t.Error("its song is still in the queue")
+				}
+			}
+		})
 	}
-	res, err := m.RemovePlaylists([]string{"Gone"}, "delete", "")
-	if err != nil || res.Deleted != 1 {
+}
+
+func TestRemovePlaylistsKeepsTheFile(t *testing.T) {
+	m, csv, _, _ := removalManager(t)
+	res, err := m.RemovePlaylists([]string{"Gone"}, "keep", "")
+	if err != nil || res.Deleted != 0 || res.Moved != 0 {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if _, err := os.Stat(only); !os.IsNotExist(err) {
-		t.Error("the playlist's own file is still there")
-	}
-	for _, p := range []string{shared, outside} {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("%s was touched", p)
-		}
+	if _, err := os.Stat(csv); err != nil {
+		t.Error(err)
 	}
 	if !m.Config().Playlists["Gone"].Removed {
 		t.Error("it would come back with its file")
 	}
 }
 
-func TestRemovePlaylistsMoves(t *testing.T) {
-	m, only, _, _ := removalManager(t)
+func TestRemovePlaylistsDeletesTheFile(t *testing.T) {
+	m, csv, other, _ := removalManager(t)
+	v := m.RemovalPreview([]string{"Gone"})
+	if len(v.Files) != 1 || v.Files[0] != csv || v.Shared != 0 {
+		t.Fatalf("preview: %+v", v)
+	}
+	res, err := m.RemovePlaylists([]string{"Gone"}, "delete", "")
+	if err != nil || res.Deleted != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if _, err := os.Stat(csv); !os.IsNotExist(err) {
+		t.Error("the CSV is still there")
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Error(err)
+	}
+	if len(m.RemovedPlaylists()) != 0 {
+		t.Errorf("nothing is left to bring back: %v", m.RemovedPlaylists())
+	}
+}
+
+func TestRemovePlaylistsMovesTheFile(t *testing.T) {
+	m, csv, _, _ := removalManager(t)
 	dest := t.TempDir()
+	os.WriteFile(filepath.Join(dest, "Gone.csv"), []byte("already here"), 0o644)
 	res, err := m.RemovePlaylists([]string{"Gone"}, "move", dest)
 	if err != nil || res.Moved != 1 {
 		t.Fatalf("%+v %v", res, err)
 	}
-	moved := filepath.Join(dest, "A", "only.mp3")
-	if _, err := os.Stat(moved); err != nil {
-		t.Error(err)
-	}
-	if _, err := os.Stat(only); !os.IsNotExist(err) {
+	if _, err := os.Stat(csv); !os.IsNotExist(err) {
 		t.Error("the original is still there")
 	}
-	if r := m.state.get("1"); r.Path != moved {
-		t.Errorf("record says %s", r.Path)
+	if b, err := os.ReadFile(filepath.Join(dest, "Gone (2).csv")); err != nil || !strings.Contains(string(b), "Song") {
+		t.Errorf("%q %v", b, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dest, "Gone.csv")); string(b) != "already here" {
+		t.Errorf("the file already there was replaced: %q", b)
+	}
+	if len(m.RemovedPlaylists()) != 0 {
+		t.Errorf("nothing is left to bring back: %v", m.RemovedPlaylists())
+	}
+}
+
+// Moved into a folder the app reads, the playlist would simply be read again.
+func TestRemovePlaylistsWontMoveIntoAnInputFolder(t *testing.T) {
+	m, csv, _, _ := removalManager(t)
+	if _, err := m.RemovePlaylists([]string{"Gone"}, "move", filepath.Join(filepath.Dir(csv), "sub")); err == nil {
+		t.Fatal("no error")
+	}
+	if _, err := os.Stat(csv); err != nil {
+		t.Error(err)
+	}
+	if m.Config().Playlists["Gone"].Removed {
+		t.Error("removed although the move was refused")
+	}
+}
+
+// A file that also holds a playlist staying in the app is left alone.
+func TestRemovePlaylistsLeavesFilesHoldingOthers(t *testing.T) {
+	dir := t.TempDir()
+	both := filepath.Join(dir, "both.csv")
+	os.WriteFile(both, []byte("Playlist Name,Track Name,Artist Name(s)\nOne,Song,Band\nTwo,Other,Group\n"), 0o644)
+	m := TestManager(t, &Tools{}, nil, newLibrary(), func(c *Config) { c.Inputs = []InputCfg{{Path: dir, Enabled: true}} })
+	m.importInputs()
+	v := m.RemovalPreview([]string{"One"})
+	if len(v.Files) != 0 || v.Shared != 1 {
+		t.Fatalf("preview: %+v", v)
+	}
+	if _, err := m.RemovePlaylists([]string{"One"}, "delete", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(both); err != nil {
+		t.Error(err)
+	}
+	if !m.Config().Playlists["One"].Removed {
+		t.Error("it would come back with its file")
+	}
+	if v := m.RemovalPreview([]string{"One", "Two"}); len(v.Files) != 1 || v.Shared != 0 {
+		t.Fatalf("both together: %+v", v)
+	}
+}
+
+// A file added on its own stops being listed once it's gone.
+func TestRemovePlaylistsDropsASingleFileInput(t *testing.T) {
+	dir := t.TempDir()
+	one := filepath.Join(dir, "One.csv")
+	os.WriteFile(one, []byte("Track Name,Artist Name(s)\nSong,Band\n"), 0o644)
+	m := TestManager(t, &Tools{}, nil, newLibrary(), func(c *Config) { c.Inputs = []InputCfg{{Path: one, Enabled: true}} })
+	m.importInputs()
+	if _, err := m.RemovePlaylists([]string{"One"}, "delete", ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(m.Config().Inputs); n != 0 {
+		t.Errorf("%d inputs left", n)
 	}
 }
 
@@ -284,6 +385,34 @@ func TestRemovedPlaylistStaysOutAndComesBack(t *testing.T) {
 	}
 	if len(m.Playlists()) != 2 {
 		t.Fatalf("%+v", m.Playlists())
+	}
+}
+
+// The ignored list can be edited one playlist at a time, or cleared.
+func TestIgnoredListCanBeEdited(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"One", "Two", "Three"} {
+		os.WriteFile(filepath.Join(dir, n+".csv"), []byte("Track Name,Artist Name(s)\n"+n+",Band\n"), 0o644)
+	}
+	m := TestManager(t, &Tools{}, nil, newLibrary(), func(c *Config) { c.Inputs = []InputCfg{{Path: dir, Enabled: true}} })
+	m.importInputs()
+	if _, err := m.RemovePlaylists([]string{"One", "Two", "Three"}, "keep", ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := m.RestorePlaylists("Two"); n != 1 {
+		t.Fatalf("%d came off", n)
+	}
+	if got := m.RemovedPlaylists(); len(got) != 2 || got[0] != "One" || got[1] != "Three" {
+		t.Fatalf("%v", got)
+	}
+	if n := m.RestorePlaylists("Two"); n != 0 {
+		t.Errorf("%d came off a second time", n)
+	}
+	if n := m.RestorePlaylists(); n != 2 {
+		t.Fatalf("%d came off", n)
+	}
+	if got := m.RemovedPlaylists(); len(got) != 0 {
+		t.Fatalf("%v", got)
 	}
 }
 

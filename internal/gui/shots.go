@@ -279,6 +279,26 @@ func (s *shotter) playlists() {
 	a := s.a
 	a.show(pagePlaylists)
 	pump(150 * time.Millisecond)
+	s.dialog("dialog-remove-file", func() {
+		a.lists.askRemoval([]string{"TRST"}, core.RemovalPreview{Playlists: 1, Files: []string{"/home/you/exportify/TRST.csv"}})
+	})
+	s.dialog("dialog-remove-nofile", func() {
+		a.lists.askRemoval([]string{"Search: Band - Album"}, core.RemovalPreview{Playlists: 1})
+	})
+	s.dialog("dialog-remove-many", func() {
+		a.lists.askRemoval([]string{"One", "Two", "Three"}, core.RemovalPreview{Playlists: 3, Files: []string{"/a/One.csv", "/a/Two.csv"}, Shared: 1})
+	})
+	a.m.UpdateConfig(func(c *core.Config) {
+		if c.Playlists == nil {
+			c.Playlists = map[string]core.PlaylistCfg{}
+		}
+		c.Playlists["Ignored one"] = core.PlaylistCfg{Removed: true}
+		c.Playlists["Ignored two"] = core.PlaylistCfg{Removed: true}
+	})
+	pump(60 * time.Millisecond)
+	s.dialog("dialog-ignored", a.lists.showIgnored)
+	a.m.RestorePlaylists()
+	pump(60 * time.Millisecond)
 	// the finished ones are a category of their own
 	t := a.lists
 	real := t.all

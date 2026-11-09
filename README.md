@@ -207,10 +207,12 @@ Each addition becomes a playlist of its own (`Search: Artist - Album`) in the Pl
 so it can be turned off, given a priority, or removed again.
 
 **Removing playlists** (Playlists page: select one or several, *Remove*; terminal app: `m` marks,
-`M` marks all finished, `d` removes): you choose whether their files stay, are deleted, or move to
-another folder. Only files the app downloaded into the downloads folder, and that no other playlist
-uses, are ever touched; your library never is. A playlist from a file stays out until you bring it
-back (*Bring back removed*, or `B`).
+`M` marks all finished, `d` removes): the playlists leave the app and their songs leave the
+Downloads tab, unless another playlist also has them. **Music files are never touched**, neither
+downloads nor your library. You choose what happens to the CSV or text file each playlist came from:
+ignore it, move it to another folder, or delete it. A file that also holds other playlists stays as
+it is. An ignored playlist stays out until you bring it back: *Ignored playlists* (or `B`) lists
+them, to bring back one by one or clear the whole list.
 
 **Plain-text lists** (`.txt`, added with `a`) take one of those per line: `Artist - Title`,
 `Title - Artist`, `album: Artist - Album`, `Artist` (the discography), or tags
