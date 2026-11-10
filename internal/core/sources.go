@@ -223,6 +223,7 @@ func (y *YtDlp) download(ctx context.Context, u, workdir string) (string, error)
 type YouTubeMusic struct {
 	ytdlp *YtDlp
 	http  *HTTP
+	hits  albumHits // what album searches found
 }
 
 func (s *YouTubeMusic) Name() string        { return "youtube_music" }
@@ -239,6 +240,9 @@ func (s *YouTubeMusic) Download(ctx context.Context, c Candidate, t *Track, work
 }
 
 func (s *YouTubeMusic) Search(ctx context.Context, t *Track) ([]Candidate, error) {
+	if c, ok := s.hits.take(t.Key); ok {
+		return c, nil
+	}
 	// Searching by ISRC often lands exactly on the official upload; the matcher still checks it.
 	var queries []string
 	if t.ISRC != "" {

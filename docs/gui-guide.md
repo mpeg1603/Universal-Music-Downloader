@@ -34,7 +34,17 @@ Turn a playlist off to take its songs out of the line; **Higher priority** moves
 **Downloads** shows everything, with a filter for each state. Click a song to see its details
 on the right: where it came from, its quality, and, if it wasn't found, what each source said.
 From there you can move it to the front (**Do next**), try it again, or cancel it. **Try again**
-above the list has another go at every song that wasn't found.
+above the list has another go at every song that wasn't found. Select several songs with Shift or
+Ctrl and a click (Ctrl+A for all shown) to do any of these to all of them at once.
+
+A song that isn't found may be listed elsewhere under another name: the artist in another
+alphabet ("Alyans" is "Альянс"), the real artist instead of "Various Artists", the words in
+brackets as the artist. **Find under other names…** suggests such names and takes your own; the
+file found is still saved and tagged with the song's own names.
+
+When several songs of an album are to be downloaded, the album is looked for first, once for all
+of them; only the songs it doesn't have are searched for one by one. A song added as a YouTube,
+SoundCloud or Bandcamp link is downloaded from that link, and that site isn't searched for it.
 
 You can close the app at any time. It remembers where it stopped.
 

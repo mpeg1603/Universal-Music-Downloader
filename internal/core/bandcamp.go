@@ -42,6 +42,7 @@ type Bandcamp struct {
 	mu        sync.Mutex
 	locks     map[string]*sync.Mutex
 	mail      *bandcampMail // nil: no email address set
+	hits      albumHits     // what album searches found
 }
 
 // Bandcamp answers HTTP 429 to a steady request every half second within minutes, and then
@@ -94,6 +95,9 @@ func encodingQuality(enc string) Quality {
 func (b *Bandcamp) busy(*Track) time.Duration { return b.http.limiter.backlog() }
 
 func (b *Bandcamp) Search(ctx context.Context, t *Track) ([]Candidate, error) {
+	if c, ok := b.hits.take(t.Key); ok {
+		return c, nil
+	}
 	queries := songQueries(t, 2)
 	queries = append(queries, transliteratedQueries(t, queries)...)
 	return searchUntilFound(ctx, t, queries, func(q string) ([]Candidate, error) {

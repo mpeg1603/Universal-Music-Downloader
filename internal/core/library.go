@@ -31,6 +31,8 @@ type Track struct {
 	SourceURL       string            `json:"source_url,omitempty"` // where it came from, when added as a link
 	Enriched        bool              `json:"enriched,omitempty"`   // Deezer lookup already attempted
 	Also            []string          `json:"also,omitempty"`       // keys of other listings of this song, merged into it
+
+	anyArtist bool // searched for under another name, by title alone (see NameVariant)
 }
 
 func (t *Track) Duration() float64 { return float64(t.DurationMs) / 1000 }

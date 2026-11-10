@@ -151,6 +151,31 @@ func cleanTitle(title string, candidate bool) string {
 	return text
 }
 
+// symbolTitle is the form a title made only of symbols ("*", "...", "?!") is compared in,
+// since normalize leaves nothing of it: lowercase, featured artists and spacing left out. ""
+// when the title has a letter or digit (it's compared normally then).
+func symbolTitle(title string) string {
+	title = strings.TrimSpace(reFeatTail.ReplaceAllString(reFeatBracket.ReplaceAllString(title, " "), ""))
+	if title == "" || normalize(title) != "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(title), "")
+}
+
+// symbolScore compares a symbol title (see symbolTitle) with a result's title, or each side of
+// an "Artist - Title" upload: 100 when one is the same symbols, else 0.
+func symbolScore(symbol, title string) float64 {
+	parts := append([]string{title}, reTitleParts.Split(title, -1)...)
+	for _, p := range parts {
+		for _, v := range []string{p, reBrackets.ReplaceAllString(p, " ")} {
+			if strings.TrimSpace(v) != "" && strings.Join(strings.Fields(v), "") == symbol {
+				return 100
+			}
+		}
+	}
+	return 0
+}
+
 func FmtDuration(seconds float64) string {
 	if seconds <= 0 {
 		return "?:??"
@@ -192,10 +217,11 @@ type trackForm struct {
 	ours    string // normalized title, album and artists; made when first needed
 	marks   uint32
 	marked  bool
+	symbol  string // a title of symbols only (see symbolTitle)
 }
 
 func newTrackForm(t *Track) *trackForm {
-	f := &trackForm{t: t, artists: normalizedArtists(t)}
+	f := &trackForm{t: t, artists: normalizedArtists(t), symbol: symbolTitle(t.Title)}
 	a, b := cleanTitle(t.Title, false), cleanTitle(baseTitle(t.Title), false)
 	for _, s := range []string{a, b} {
 		if s != "" && (len(f.targets) == 0 || s != string(f.targets[0])) {
@@ -234,10 +260,11 @@ type titleVariant struct {
 type fileForm struct {
 	variants []titleVariant
 	marks    uint32
+	raw      string // the title as it is, for symbol titles (see symbolTitle)
 }
 
 func newFileForm(title string) *fileForm {
-	f := &fileForm{marks: versionMarks(normalize(title))}
+	f := &fileForm{marks: versionMarks(normalize(title)), raw: title}
 	parts := []string{title}
 	if reTitleParts.MatchString(title) {
 		parts = append(parts, reTitleParts.Split(title, -1)...)
@@ -266,6 +293,9 @@ func runesRatio(a, b []rune) float64 {
 
 // titleFits tells whether titleScore would reach minTitle.
 func titleFits(t *trackForm, f *fileForm) bool {
+	if t.symbol != "" {
+		return symbolScore(t.symbol, f.raw) >= minTitle
+	}
 	if len(t.targets) == 0 {
 		return false
 	}
@@ -349,6 +379,9 @@ func normalizedArtists(t *Track) []string {
 }
 
 func titleScore(t *Track, c *Candidate) float64 {
+	if sym := symbolTitle(t.Title); sym != "" {
+		return symbolScore(sym, c.Title)
+	}
 	targets := map[string]bool{cleanTitle(t.Title, false): true, cleanTitle(baseTitle(t.Title), false): true}
 	artists := normalizedArtists(t)
 	parts := []string{c.Title}
@@ -418,6 +451,7 @@ type Match struct {
 	Cand   Candidate
 	Score  float64
 	Reject string // why it was rejected; empty when accepted
+	form   *Track // the name it was found under, when searched for under other names
 }
 
 func evaluate(t *Track, c Candidate) Match {
@@ -429,24 +463,33 @@ func evaluate(t *Track, c Candidate) Match {
 	}
 	rough := 0.55*ts + 0.45*as
 	if m := versionConflict(t, &c); m != "" {
-		return Match{c, rough, "looks like a " + m}
+		return Match{Cand: c, Score: rough, Reject: "looks like a " + m}
 	}
 	if ts < minTitle {
-		return Match{c, rough, "different title"}
+		return Match{Cand: c, Score: rough, Reject: "different title"}
+	}
+	if t.anyArtist { // anyone's song by that name: only a close title (and length) will do
+		need := 90.0
+		if c.Duration <= 0 || t.DurationMs <= 0 {
+			need = 97
+		}
+		if ts < need {
+			return Match{Cand: c, Score: rough, Reject: "title not close enough to take it from any artist"}
+		}
 	}
 	if as < minArtist {
 		who := c.Artist
 		if who == "" {
 			who = "unknown uploader"
 		}
-		return Match{c, rough, "different artist (" + who + ")"}
+		return Match{Cand: c, Score: rough, Reject: "different artist (" + who + ")"}
 	}
 	d := 50.0
 	if c.Duration > 0 && t.DurationMs > 0 {
 		diff := math.Abs(c.Duration - t.Duration())
 		tol := durationTolerance(t.Duration())
 		if diff > tol {
-			return Match{c, rough, fmt.Sprintf("length %s vs %s expected", FmtDuration(c.Duration), FmtDuration(t.Duration()))}
+			return Match{Cand: c, Score: rough, Reject: fmt.Sprintf("length %s vs %s expected", FmtDuration(c.Duration), FmtDuration(t.Duration()))}
 		}
 		d = 100 * (1 - diff/tol)
 	}
@@ -454,7 +497,7 @@ func evaluate(t *Track, c Candidate) Match {
 	if c.Album != "" && t.Album != "" && tokenSetRatio(cleanTitle(t.Album, false), cleanTitle(c.Album, false)) >= 90 {
 		score += 3
 	}
-	return Match{c, math.Round(score*10) / 10, ""}
+	return Match{Cand: c, Score: math.Round(score*10) / 10}
 }
 
 // rank splits candidates into accepted (best first) and rejected (closest first).

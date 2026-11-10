@@ -339,8 +339,26 @@ func (s *ytdlpFetcher) Download(ctx context.Context, c Candidate, t *Track, work
 	return s.y.download(ctx, c.URL, workdir)
 }
 
-// linkedSource is what to fetch a link's song with, or nil when nothing can right now.
-func (m *Manager) linkedSource(t *Track) Source {
+// linkSites are the sources a link's own site is searched through: a song added as a YouTube
+// link isn't looked for on YouTube or YouTube Music, a SoundCloud link's on SoundCloud, and so
+// on. The link is the copy you chose; searching its site would only turn up others.
+func linkSites(link string) []string {
+	switch {
+	case link == "":
+		return nil
+	case isYouTubeLink(link):
+		return []string{"youtube", "youtube_music"}
+	case strings.Contains(link, "soundcloud.com/"):
+		return []string{"soundcloud"}
+	case strings.Contains(link, ".bandcamp.com/"):
+		return []string{"bandcamp"}
+	}
+	return nil
+}
+
+// linkedSource is what to fetch a link's song with, or nil when nothing can right now; wait
+// says the link's site is only paused for now (it's tried again later, not given up on).
+func (m *Manager) linkedSource(t *Track) (src Source, wait bool) {
 	link := t.SourceURL
 	cand := Candidate{URL: link, Title: t.Title, Artist: t.ArtistStr(), Album: t.Album, Duration: t.Duration(), ArtistIsCredit: true}
 	var base Source
@@ -362,14 +380,17 @@ func (m *Manager) linkedSource(t *Track) Source {
 		cand.Source = "link"
 	}
 	if cool, _, _ := m.cooling(cand.Source); cool && cand.Source != "link" {
-		return nil
+		return nil, true
 	}
 	if base == nil {
 		y := m.linkYtDlp(link)
 		if y == nil {
-			return nil
+			return nil, false
 		}
 		base = &ytdlpFetcher{y, "link"}
 	}
-	return &linkedSrc{base, cand, "the link you added (" + label + ")"}
+	return &linkedSrc{base, cand, linkLabelPrefix + label + ")"}, false
 }
+
+// linkLabelPrefix starts the name the link goes by in a track's report.
+const linkLabelPrefix = "the link you added ("

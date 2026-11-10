@@ -31,6 +31,10 @@ type Backend interface {
 	Restart(key string)
 	Prioritize(key string)
 	RetryFailed(includeCancelled bool) int
+	// Other names: a song the sources know under another name (another alphabet, the real
+	// artist of a "Various Artists" listing, …). Suggestions, and the names chosen before.
+	NameSuggestions(key string) (suggested, chosen []NameVariant)
+	SearchUnderOtherNames(key string, names []NameVariant) error // none: by its own name again
 	SetPaused(paused bool)
 	Paused() bool
 

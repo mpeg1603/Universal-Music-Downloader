@@ -600,3 +600,44 @@ func TestFinishedPlaylistsHeading(t *testing.T) {
 		t.Error("the list of temporary files didn't open")
 	}
 }
+
+// Space marks tracks, c works on all of them, Esc unmarks; a opens Find under other names.
+func TestQueueMarksAndOtherNames(t *testing.T) {
+	tools := core.NeedFFmpeg(t)
+	var tracks []*core.Track
+	for i, title := range []string{"Uno", "Dos", "Tres"} {
+		tr := core.MakeTrack(title, []string{"Various Artists"}, "", 100)
+		tr.Key = fmt.Sprint("t", i)
+		tracks = append(tracks, tr)
+	}
+	src := &core.FakeSource{SrcName: "youtube", T: t, Results: map[string][]core.Candidate{}}
+	m := core.TestManager(t, tools, []core.Source{src}, core.TestLibrary(tracks...), nil)
+	core.RunManager(t, m)
+	d := startUI(t, m)
+	d.typeText("1")
+	d.onUI("selecting the first track", func() { d.ui.queueTable.Select(1, 0) })
+	d.typeText("  ")
+	if s := d.text(); !strings.Contains(s, "2 marked") {
+		t.Fatalf("no marks shown:\n%s", s)
+	}
+	d.typeText("c")
+	states := map[core.JobState]int{}
+	for _, v := range m.Jobs() {
+		states[v.State]++
+	}
+	if states[core.JobCancelled] != 2 || states[core.JobFailed] != 1 {
+		t.Errorf("after c on two marked: %v", states)
+	}
+	d.press(tcell.KeyEscape, "Esc")
+	if s := d.text(); strings.Contains(s, "marked") {
+		t.Errorf("Esc didn't unmark:\n%s", s)
+	}
+	d.typeText("a")
+	if !d.ui.hasModal("othernames") || !strings.Contains(d.text(), "by any artist") {
+		t.Fatalf("no other names window:\n%s", d.text())
+	}
+	d.press(tcell.KeyEscape, "Esc")
+	if d.ui.hasModal("othernames") {
+		t.Error("Esc didn't close it")
+	}
+}
