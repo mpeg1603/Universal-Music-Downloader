@@ -128,18 +128,28 @@ func (m *Manager) makeJobs() {
 	}
 	m.jobsMu.Lock()
 	jobs := make(map[string]*Job, len(lib.Tracks))
+	byAlbum := map[string][]*Job{}
 	order := make([]*Job, 0, len(lib.Tracks))
 	for i, t := range lib.Ordered() {
 		j := m.jobs[t.Key]
 		if j == nil {
-			j = &Job{Track: t}
+			j = &Job{Track: t, alt: m.names.get(t.Key)}
 			m.initJob(j, recordFor(recs, t))
 		}
 		j.mu.Lock()
 		if !j.state.Active() {
+			if t.SourceURL != "" && t.SourceURL != j.Track.SourceURL {
+				j.linkArrived()
+			}
 			j.Track = t
 		}
 		j.idx, j.playlists, j.prio = i, members[t.Key], prio[t.Key]
+		if j.albumOf != j.Track { // worked out once per track: this runs over the whole list
+			j.album, j.albumOf = albumKey(j.Track), j.Track
+		}
+		if j.album != "" {
+			byAlbum[j.album] = append(byAlbum[j.album], j)
+		}
 		j.minQuality = ""
 		for _, p := range j.playlists {
 			if th, ok := upTh[p]; ok && (j.minQuality == "" || th.min() > j.minQuality.min()) {
@@ -161,7 +171,7 @@ func (m *Manager) makeJobs() {
 			j.mu.Unlock()
 		}
 	}
-	m.jobs, m.order = jobs, order
+	m.jobs, m.order, m.byAlbum = jobs, order, byAlbum
 	m.jobsMu.Unlock()
 }
 
@@ -192,10 +202,22 @@ func (m *Manager) initJob(j *Job, rec Record) {
 		j.state = JobQueued
 	case "failed":
 		j.state, j.lastErr = JobFailed, rec.Reason
+		if j.Track.SourceURL != "" && !strings.Contains(rec.Reason, linkLabelPrefix) {
+			j.linkArrived() // added as a link after it wasn't found
+		}
 	case "cancelled":
 		j.state, j.lastErr = JobCancelled, rec.Reason
 	default: // new, or a source was unreachable last time
 		j.state = JobQueued
+	}
+}
+
+// linkArrived queues a track that wasn't found again when a link for it was added: the link
+// is tried first (j.mu held, or j not shared yet).
+func (j *Job) linkArrived() {
+	if j.state == JobFailed || j.state == JobWaiting && j.pendingOn == "" {
+		j.state, j.retryAt, j.rounds = JobQueued, time.Time{}, 0
+		delete(j.tried, linkSourceName)
 	}
 }
 

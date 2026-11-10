@@ -252,6 +252,20 @@ func (s *shotter) queue() {
 		s.fail("selecting a track didn't open its details")
 	}
 	s.grab("flow-queue-details", a.win.QWidget)
+	s.dialog("dialog-other-names", t.otherNames)
+	if len(t.keys) >= 3 {
+		t.list.selectRows([]int{0, 1, 2}, 0)
+		pump(150 * time.Millisecond)
+		if got := t.selectedKeys(); len(got) != 3 || len(t.paneKeys) != 3 {
+			s.fail("selecting three songs: %d selected, the pane shows %d", len(got), len(t.paneKeys))
+		}
+		s.grab("flow-queue-selection", a.win.QWidget)
+		t.refresh(false) // a reread keeps the selection
+		pump(300 * time.Millisecond)
+		if got := t.selectedKeys(); len(got) != 3 {
+			s.fail("the selection didn't survive a reread: %d", len(got))
+		}
+	}
 	t.hidePane()
 	pump(80 * time.Millisecond)
 	if t.pane.IsVisible() {

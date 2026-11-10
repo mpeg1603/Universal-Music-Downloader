@@ -1331,7 +1331,11 @@ func (s *TorrentSource) considers(t *Track, title string) bool {
 }
 
 // hint hands track key the candidate c found along with another track (see alongside).
-func (s *TorrentSource) hint(key string, c Candidate) {
+func (s *TorrentSource) hint(key string, c Candidate) { s.hintFor(key, c, true) }
+
+// hintFor is hint; coming says the download is to wait a little for the track (expect): not
+// for the track that asks right away.
+func (s *TorrentSource) hintFor(key string, c Candidate, coming bool) {
 	now := time.Now()
 	s.hintMu.Lock()
 	if s.hints == nil {
@@ -1344,7 +1348,9 @@ func (s *TorrentSource) hint(key string, c Candidate) {
 	}
 	s.hints[key] = torrentHint{c, now}
 	s.hintMu.Unlock()
-	s.expect(c, true)
+	if coming {
+		s.expect(c, true)
+	}
 }
 
 func (s *TorrentSource) hinted(key string) bool {

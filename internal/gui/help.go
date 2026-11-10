@@ -39,7 +39,10 @@ var helpTopics = map[string]helpTopic{
 <li><b>In your library</b>: you already have it, so nothing was downloaded.</li>
 <li><b>Not found</b>: no source had it. Click the song to see what each source said; <b>Try not-found again</b> gives them all another go later.</li>
 </ul>
-<p>Click a song for its details and what you can do with it. <b>Do next</b> moves it to the front of the line.</p>`},
+<p>Click a song for its details and what you can do with it. <b>Do next</b> moves it to the front of the line.</p>
+<p>To work on several songs at once, select them with Shift or Ctrl and a click (Ctrl+A selects every song shown): <b>Do next</b>, <b>Try again</b> and <b>Cancel</b> then work on all of them.</p>
+<p>A song that isn't found may be listed elsewhere under another name: the artist in another alphabet (“Alyans” is “Альянс”), the real artist instead of “Various Artists”, the words in brackets as the artist. <b>Find under other names…</b> searches for it by names you pick; the file is still saved and tagged with the song's own names.</p>
+<p>When several songs of one album are to be downloaded, the album is looked for first, once for all of them (on torrents, Soulseek, YouTube Music and Bandcamp); only the songs it doesn't have are searched for one by one. A song added as a YouTube, SoundCloud or Bandcamp link is downloaded from the link, and that site isn't searched for it.</p>`},
 	"find": {"Find music", `
 <p>Type a song, an album or an artist, in any way that comes to mind, and pick from the results.</p>
 <ul>

@@ -1,6 +1,8 @@
 package gui
 
 import (
+	"slices"
+
 	qt "github.com/mappu/miqt/qt6"
 )
 
@@ -79,6 +81,38 @@ func (l *rowList) current() int {
 		return -1
 	}
 	return idx.Row()
+}
+
+// multi lets rows be selected together: Shift and Ctrl with a click or the arrow keys, Ctrl+A.
+func (l *rowList) multi() { l.view.SetSelectionMode(qt.QAbstractItemView__ExtendedSelection) }
+
+// selectedRows are the rows selected, in order.
+func (l *rowList) selectedRows() []int {
+	idx := l.view.SelectionModel().SelectedRows()
+	rows := make([]int, 0, len(idx))
+	for i := range idx {
+		rows = append(rows, idx[i].Row())
+	}
+	slices.Sort(rows)
+	return rows
+}
+
+// selectRows selects rows (in order) and makes current the current row, without scrolling.
+func (l *rowList) selectRows(rows []int, current int) {
+	sm := l.view.SelectionModel()
+	sel := qt.NewQItemSelection2()
+	for i := 0; i < len(rows); {
+		k := i
+		for k+1 < len(rows) && rows[k+1] == rows[k]+1 {
+			k++
+		}
+		sel.Select(l.model.Index(rows[i], 0, rootIndex), l.model.Index(rows[k], 0, rootIndex))
+		i = k + 1
+	}
+	if current >= 0 && current < l.count() {
+		sm.SetCurrentIndex(l.model.Index(current, 0, rootIndex), qt.QItemSelectionModel__NoUpdate)
+	}
+	sm.Select2(sel, qt.QItemSelectionModel__ClearAndSelect|qt.QItemSelectionModel__Rows)
 }
 
 func (l *rowList) selectRow(row int) {

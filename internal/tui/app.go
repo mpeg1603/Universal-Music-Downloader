@@ -46,6 +46,7 @@ type tui struct {
 	searchField *tview.InputField
 	q           core.QueueQuery // what the queue shows
 	selected    string
+	marked      map[string]bool // tracks marked (space) for c, r and p to work on together
 
 	// search
 	findField                   *tview.InputField
@@ -655,7 +656,7 @@ func (ui *tui) refresh() {
 func (ui *tui) footerText() string {
 	common := "  [::d]1-9/Alt+1-9/F1-F9 tabs · [ ] bandwidth −/+ · P pause all · q quit[::-]"
 	hints := map[string]string{
-		"queue":     " [::b]Enter[::-] details  [::b]c[::-] cancel  [::b]r[::-] restart  [::b]p[::-] do next  [::b]R[::-] retry all failed  [::b]f[::-] filter  [::b]o[::-] sort  [::b]O[::-] reverse  [::b]/[::-] find in queue  [::b]Esc[::-] show all",
+		"queue":     " [::b]Enter[::-] details  [::b]space[::-] mark  [::b]A[::-] mark all  [::b]c[::-] cancel  [::b]r[::-] restart  [::b]p[::-] do next  [::b]a[::-] other names  [::b]R[::-] retry all failed  [::b]f[::-] filter  [::b]o[::-] sort  [::b]O[::-] reverse  [::b]/[::-] find in queue  [::b]Esc[::-] show all",
 		"search":    " [::b]/[::-] find music  [::b]Enter[::-] add result / show playlist  [::b]Tab[::-] next list  [::b]a[::-] add file/link  [::b]m[::-] mark  [::b]d[::-] remove  [::b]B[::-] ignored list  [::b]space[::-] on/off  [::b]+ -[::-] priority  [::b]R[::-] re-read",
 		"library":   " [::b]a[::-] add folder  [::b]d[::-] remove  [::b]s[::-] rescan  [::b]t[::-] quality threshold  [::b]u[::-] upgrade files below a quality",
 		"sources":   " [::b]space[::-] on/off  [::b]K J[::-] move up/down  [::b]Enter[::-] settings  [::b]e[::-] route  [::b]p[::-] pause/resume  [::b]b[::-] paste Bandcamp links",

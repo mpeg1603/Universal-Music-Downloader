@@ -13,7 +13,8 @@ import (
 )
 
 // The Downloads page: every track, with what's happening to it. The list reads its rows from
-// a slice kept here and draws only what's visible, so even 70,000 tracks are instant.
+// a slice kept here and draws only what's visible, so even 70,000 tracks are instant. Several
+// songs can be selected at once (Shift, Ctrl, Ctrl+A); the actions work on all of them.
 
 // The filters with a button of their own; the rest are under "More".
 var mainFilters = []string{"all", "active", "downloading", "searching", "waiting", "queued", "done", "library", "failed"}
@@ -51,8 +52,9 @@ type queueTab struct {
 	dTitle, dArtist, dBody *qt.QLabel
 	dState                 *qt.QLabel
 	dNext, dAgain, dCancel *qt.QPushButton
-	dOpen                  *qt.QPushButton
-	paneKey                string
+	dOpen, dOther          *qt.QPushButton
+	paneKey                string   // the song shown…
+	paneKeys               []string // …or the songs, when several are selected
 
 	q     core.QueueQuery
 	keys  []string             // the tracks shown, in order
@@ -174,6 +176,7 @@ func newQueueTab(a *app) *queueTab {
 	t.views = map[int]core.JobView{}
 	t.reread = newThrottle(t.w.QObject, 1000, func() { t.refresh(false) })
 	t.list = newRowList(queueRowHeight, func() int { return len(t.keys) }, t.draw)
+	t.list.multi()
 	t.list.onSelect(func(int) { t.showPane() })
 	t.list.onActivate(t.showPane)
 	t.list.onMenu(t.menu)
@@ -193,6 +196,7 @@ func newQueueTab(a *app) *queueTab {
 	keys := map[string]func(){
 		"Return": t.showPane, "C": func() { t.act("cancel") }, "R": func() { t.act("restart") },
 		"N": func() { t.act("next") }, "P": func() { t.act("next") }, "Shift+R": t.retryAll, "/": func() { t.find.SetFocus() },
+		"A": t.otherNames,
 		"F": func() { t.more.ShowPopup() }, "O": func() { t.sort.ShowPopup() },
 		"Shift+O": func() { t.reverse.Click() }, "Escape": t.clearFilters,
 	}
@@ -252,6 +256,8 @@ func (t *queueTab) buildPane() *qt.QWidget {
 	row.AddWidget2(t.dCancel.QWidget, 1, 0)
 	row.AddWidget2(t.dOpen.QWidget, 1, 1)
 	box.AddLayout(row.QLayout)
+	t.dOther = a.iconButton("search", "Find under other names…", "", "Search for it as another artist or title: the artist in another alphabet, the real artist of a “Various Artists” listing, … (A)", t.otherNames)
+	box.AddWidget(t.dOther.QWidget)
 	box.AddWidget(rule().QWidget)
 
 	t.dBody = richText("", "hint")
@@ -500,6 +506,7 @@ func (t *queueTab) loaded(keys []string, counts map[string]int) {
 		return
 	}
 	sel := t.selected()
+	many := t.selectedKeys()
 	clear(t.views)
 	if t.wantReset || len(keys) != len(t.keys) {
 		bar := t.list.view.VerticalScrollBar().Value()
@@ -508,12 +515,20 @@ func (t *queueTab) loaded(keys []string, counts map[string]int) {
 			t.list.view.VerticalScrollBar().SetValue(bar)
 		}
 		t.wantReset = false
-		t.reselect(sel)
+		t.reselect(sel, many)
 	} else {
+		old := t.keys
 		t.keys = keys
 		t.list.redraw()
-		if r := t.list.current(); sel != "" && r >= 0 && r < len(keys) && keys[r] != sel {
-			t.reselect(sel)
+		moved := false
+		for _, r := range t.list.selectedRows() {
+			if r >= len(keys) || old[r] != keys[r] {
+				moved = true
+				break
+			}
+		}
+		if moved {
+			t.reselect(sel, many)
 		}
 	}
 	for name, b := range t.chips {
@@ -541,14 +556,30 @@ func (t *queueTab) loaded(keys []string, counts map[string]int) {
 	}
 }
 
-// reselect finds the track that was selected, after the list changed under it.
-func (t *queueTab) reselect(key string) {
-	if key == "" {
+// reselect finds the tracks that were selected (key the current one), after the list changed
+// under them.
+func (t *queueTab) reselect(key string, keys []string) {
+	if len(keys) <= 1 {
+		if i := slices.Index(t.keys, key); key != "" && i >= 0 {
+			t.list.selectRow(i)
+		}
 		return
 	}
-	if i := slices.Index(t.keys, key); i >= 0 {
-		t.list.selectRow(i)
+	want := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		want[k] = true
 	}
+	var rows []int
+	cur := -1
+	for i, k := range t.keys {
+		if want[k] {
+			rows = append(rows, i)
+		}
+		if k == key {
+			cur = i
+		}
+	}
+	t.list.selectRows(rows, cur)
 }
 
 // updateMore keeps the numbers under More, and offers each source tracks came from.
@@ -643,18 +674,41 @@ func (t *queueTab) selected() string {
 	return ""
 }
 
+// selectedKeys are the songs selected, in the list's order.
+func (t *queueTab) selectedKeys() []string {
+	rows := t.list.selectedRows()
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r < len(t.keys) {
+			out = append(out, t.keys[r])
+		}
+	}
+	return out
+}
+
+// act does what to every song selected.
 func (t *queueTab) act(what string) {
-	key := t.selected()
-	if key == "" {
+	keys := t.selectedKeys()
+	if len(keys) == 0 {
 		return
 	}
 	switch what {
 	case "cancel":
-		t.a.m.Cancel(key)
+		for _, k := range keys {
+			t.a.m.Cancel(k)
+		}
 	case "restart":
-		t.a.m.Restart(key)
-	case "next":
-		t.a.m.Prioritize(key)
+		for _, k := range keys {
+			t.a.m.Restart(k)
+		}
+	case "next": // the last one moved up goes first: backwards keeps their order
+		for i := len(keys) - 1; i >= 0; i-- {
+			t.a.m.Prioritize(keys[i])
+		}
+	}
+	if len(keys) > 1 {
+		verb := map[string]string{"cancel": "cancelled", "restart": "searched for again", "next": "moved to the front"}[what]
+		t.a.toast(fmt.Sprintf("%d songs %s.", len(keys), verb))
 	}
 	t.refresh(false)
 	t.fillPane()
@@ -676,10 +730,18 @@ func (t *queueTab) menu(at *qt.QPoint) {
 		return
 	}
 	m := qt.NewQMenu2()
+	if n := len(t.selectedKeys()); n > 1 {
+		m.AddActionWithText(fmt.Sprintf("Do next (%d songs)", n)).OnTriggered(func() { t.act("next") })
+		m.AddActionWithText(fmt.Sprintf("Try again (%d songs)", n)).OnTriggered(func() { t.act("restart") })
+		m.AddActionWithText(fmt.Sprintf("Cancel (%d songs)", n)).OnTriggered(func() { t.act("cancel") })
+		m.ExecWithPos(at)
+		return
+	}
 	m.AddActionWithText("Details").OnTriggered(t.showPane)
 	m.AddSeparator()
 	m.AddActionWithText("Do next").OnTriggered(func() { t.act("next") })
 	m.AddActionWithText("Try again").OnTriggered(func() { t.act("restart") })
+	m.AddActionWithText("Find under other names…").OnTriggered(t.otherNames)
 	m.AddActionWithText("Cancel").OnTriggered(func() { t.act("cancel") })
 	if v.State == core.JobDone && v.Rec.Path != "" {
 		m.AddSeparator()
@@ -702,8 +764,11 @@ func (t *queueTab) openFile() {
 // --- the details pane ---------------------------------------------------------------------------
 
 func (t *queueTab) showPane() {
-	t.paneKey = t.selected()
-	if t.paneKey == "" {
+	t.paneKey, t.paneKeys = t.selected(), nil
+	if keys := t.selectedKeys(); len(keys) > 1 {
+		t.paneKey, t.paneKeys = "", keys
+	}
+	if t.paneKey == "" && t.paneKeys == nil {
 		t.pane.Hide()
 		return
 	}
@@ -713,13 +778,60 @@ func (t *queueTab) showPane() {
 
 func (t *queueTab) hidePane() {
 	t.pane.Hide()
-	t.paneKey = ""
+	t.paneKey, t.paneKeys = "", nil
+	t.list.view.SelectionModel().ClearSelection()
 	t.list.view.SetCurrentIndex(rootIndex) // so clicking the same song opens it again
 	t.focus()
 }
 
+// fillMulti shows the songs selected, when there are several.
+func (t *queueTab) fillMulti() {
+	e := html.EscapeString
+	keys := t.paneKeys
+	t.dTitle.SetText(fmt.Sprintf("%d songs selected", len(keys)))
+	counts := map[core.JobState]int{}
+	var b strings.Builder
+	b.WriteString("<ul style='margin-left:-22px'>")
+	counted := min(len(keys), 3000) // read again every second while shown: not all of 70,000
+	for i, k := range keys[:counted] {
+		v, ok := t.a.m.JobView(k)
+		if !ok {
+			continue
+		}
+		counts[v.State]++
+		if i < 40 {
+			fmt.Fprintf(&b, "<li>%s – %s</li>", e(v.Track.ArtistStr()), e(v.Track.Title))
+		}
+	}
+	if len(keys) > 40 {
+		fmt.Fprintf(&b, "<li>and %d more</li>", len(keys)-40)
+	}
+	b.WriteString("</ul><p>Do next, Try again and Cancel work on all of them. Shift or Ctrl with a click changes the selection; Ctrl+A selects every song shown.</p>")
+	var parts []string
+	for _, s := range []core.JobState{core.JobDownloading, core.JobSearching, core.JobReady, core.JobWaiting, core.JobQueued, core.JobDone, core.JobInLibrary, core.JobFailed, core.JobCancelled} {
+		if counts[s] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[s], s))
+		}
+	}
+	if counted < len(keys) {
+		parts = append(parts, fmt.Sprintf("(of the first %d)", counted))
+	}
+	t.dArtist.SetText(strings.Join(parts, " · "))
+	setPill(t.dState, "Selection", "info")
+	t.dNext.SetVisible(true)
+	t.dAgain.SetVisible(true)
+	t.dCancel.SetVisible(true)
+	t.dOpen.SetVisible(false)
+	t.dOther.SetVisible(false)
+	t.dBody.SetText(b.String())
+}
+
 // fillPane shows everything about a track: every source tried and why it didn't work.
 func (t *queueTab) fillPane() {
+	if len(t.paneKeys) > 1 {
+		t.fillMulti()
+		return
+	}
 	v, ok := t.a.m.JobView(t.paneKey)
 	if !ok {
 		return
@@ -750,6 +862,7 @@ func (t *queueTab) fillPane() {
 	t.dCancel.SetVisible(active)
 	t.dAgain.SetVisible(!active || v.State == core.JobWaiting)
 	t.dOpen.SetVisible((v.State == core.JobDone && v.Rec.Path != "") || v.Lib != nil)
+	t.dOther.SetVisible(true)
 
 	var b strings.Builder
 	if len(v.Playlists) > 0 {
@@ -785,6 +898,13 @@ func (t *queueTab) fillPane() {
 		if v.Task.Note != "" {
 			fmt.Fprintf(&b, "<p>%s</p>", e(v.Task.Note))
 		}
+	}
+	if len(v.OtherNames) > 0 {
+		var names []string
+		for _, n := range v.OtherNames {
+			names = append(names, e(n.String()))
+		}
+		fmt.Fprintf(&b, "<p><b>Searched for as:</b> %s (Find under other names changes this)</p>", strings.Join(names, "; "))
 	}
 	reasons := v.Reasons
 	if len(reasons) == 0 && v.Reason != "" {

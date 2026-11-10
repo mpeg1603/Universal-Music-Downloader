@@ -59,6 +59,10 @@ func songQueries(t *Track, max int) []string {
 		add(artist, v)
 	}
 	add(artist, title)
+	if symbolTitle(t.Title) != "" && t.Album != "" {
+		// Search engines drop "*" or "...": the album narrows "M83 *" down to the song.
+		add(artist, baseAlbum(t.Album), title)
+	}
 	if aa := t.AlbumArtist; aa != "" && !strings.EqualFold(aa, artist) && !variousArtists(aa) {
 		add(aa, title)
 	}

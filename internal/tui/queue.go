@@ -15,9 +15,10 @@ import (
 
 type queueContent struct {
 	tview.TableContentReadOnly
-	m     core.Backend
-	keys  []string
-	views map[int]core.JobView // the rows drawn lately; the others aren't read at all
+	m      core.Backend
+	keys   []string
+	views  map[int]core.JobView // the rows drawn lately; the others aren't read at all
+	marked map[string]bool      // the tracks marked to work on together
 }
 
 // view reads a row's track when it's first drawn.
@@ -62,6 +63,9 @@ func (q *queueContent) GetCell(row, col int) *tview.TableCell {
 		}
 		if v.State == core.JobDownloading && v.Task.Waiting { // no data yet: a queue, peers
 			icon, color = "⟳", tcell.ColorOrange
+		}
+		if q.marked[v.Key] {
+			return tview.NewTableCell("●" + icon).SetTextColor(tcell.ColorFuchsia)
 		}
 		return tview.NewTableCell(icon).SetTextColor(color)
 	case 1:
@@ -172,8 +176,49 @@ func qualityText(v core.JobView) string {
 	return ""
 }
 
+// targets are the tracks c, r and p work on: the ones marked (in the list's order), or else
+// the one selected.
+func (ui *tui) targets() []string {
+	if len(ui.marked) == 0 {
+		if ui.selected == "" {
+			return nil
+		}
+		return []string{ui.selected}
+	}
+	var out []string
+	for _, k := range ui.queueRows.keys {
+		if ui.marked[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// queueAct does what to the targets.
+func (ui *tui) queueAct(what string) {
+	keys := ui.targets()
+	switch what {
+	case "cancel":
+		for _, k := range keys {
+			ui.m.Cancel(k)
+		}
+	case "restart":
+		for _, k := range keys {
+			ui.m.Restart(k)
+		}
+	case "next": // the last one moved up goes first: backwards keeps their order
+		for i := len(keys) - 1; i >= 0; i-- {
+			ui.m.Prioritize(keys[i])
+		}
+	}
+	if len(keys) > 1 {
+		core.Logf("%d marked tracks: %s", len(keys), map[string]string{"cancel": "cancelled", "restart": "searched for again", "next": "moved to the front"}[what])
+	}
+}
+
 func (ui *tui) buildQueue() tview.Primitive {
-	ui.queueRows = &queueContent{m: ui.m}
+	ui.marked = map[string]bool{}
+	ui.queueRows = &queueContent{m: ui.m, marked: ui.marked}
 	ui.queueTable = tview.NewTable().SetSelectable(true, false).SetFixed(1, 0).SetContent(ui.queueRows)
 	ui.queueTable.SetSelectionChangedFunc(func(row, col int) {
 		if row >= 1 && row-1 < len(ui.queueRows.keys) {
@@ -183,6 +228,11 @@ func (ui *tui) buildQueue() tview.Primitive {
 	ui.queueTable.SetSelectedFunc(func(row, col int) { ui.showDetails() })
 	ui.queueTable.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Key() == tcell.KeyEscape {
+			if len(ui.marked) > 0 { // the marks go first, then the filters
+				clear(ui.marked)
+				ui.refresh()
+				return nil
+			}
 			if ui.q.Text != "" || ui.q.Playlist != "" || ui.q.Filter != "" || ui.q.Source != "" {
 				ui.q = core.QueueQuery{Sort: ui.q.Sort, Reverse: ui.q.Reverse}
 				ui.searchField.SetText("")
@@ -194,17 +244,37 @@ func (ui *tui) buildQueue() tview.Primitive {
 			return ev
 		}
 		switch ev.Rune() {
+		case ' ':
+			if ui.selected != "" {
+				if ui.marked[ui.selected] {
+					delete(ui.marked, ui.selected)
+				} else {
+					ui.marked[ui.selected] = true
+				}
+				if row, _ := ui.queueTable.GetSelection(); row < len(ui.queueRows.keys) {
+					ui.queueTable.Select(row+1, 0)
+				}
+			}
+		case 'A': // every track shown; again: none
+			all := len(ui.queueRows.keys) > 0
+			for _, k := range ui.queueRows.keys {
+				all = all && ui.marked[k]
+			}
+			clear(ui.marked)
+			if !all {
+				for _, k := range ui.queueRows.keys {
+					ui.marked[k] = true
+				}
+			}
 		case 'c':
-			if ui.selected != "" {
-				ui.m.Cancel(ui.selected)
-			}
+			ui.queueAct("cancel")
 		case 'r':
-			if ui.selected != "" {
-				ui.m.Restart(ui.selected)
-			}
+			ui.queueAct("restart")
 		case 'p':
+			ui.queueAct("next")
+		case 'a':
 			if ui.selected != "" {
-				ui.m.Prioritize(ui.selected)
+				ui.otherNames(ui.selected)
 			}
 		case 'R':
 			ui.confirm("Search again for every track that wasn't found (and those waiting to be retried)?", "Retry", func() {
@@ -266,7 +336,9 @@ func (ui *tui) refreshQueue() {
 	if ui.q.Playlist != "" {
 		info += " · playlist [::b]" + tview.Escape(ui.q.Playlist) + "[::-]"
 	}
-	if ui.q.Filter != "" || ui.q.Source != "" || ui.q.Playlist != "" || ui.q.Text != "" {
+	if n := len(ui.marked); n > 0 {
+		info += fmt.Sprintf(" · [fuchsia]%d marked[-] (c r p act on them, Esc unmarks)", n)
+	} else if ui.q.Filter != "" || ui.q.Source != "" || ui.q.Playlist != "" || ui.q.Text != "" {
 		info += " · Esc shows all"
 	}
 	if len(ui.m.Config().Inputs) == 0 && ui.queueCounts["all"] == 0 {
@@ -305,7 +377,7 @@ func (ui *tui) showDetails() {
 	}
 	render()
 	name := "details"
-	view.SetBorder(true).SetTitle(" Track (c cancel · r restart · p do next · Esc close) ")
+	view.SetBorder(true).SetTitle(" Track (c cancel · r restart · p do next · a other names · Esc close) ")
 	view.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyEnter {
 			ui.closeModal(name)
@@ -318,6 +390,9 @@ func (ui *tui) showDetails() {
 			ui.m.Restart(key)
 		case 'p':
 			ui.m.Prioritize(key)
+		case 'a':
+			ui.otherNames(key)
+			return nil
 		case 'q':
 			ui.closeModal(name)
 			return nil
@@ -364,6 +439,13 @@ func detailsText(v core.JobView) string {
 	}
 	if v.State == core.JobWaiting {
 		fmt.Fprintf(&b, "Trying again at %s\n", v.RetryAt.Format("15:04"))
+	}
+	if len(v.OtherNames) > 0 {
+		var names []string
+		for _, n := range v.OtherNames {
+			names = append(names, n.String())
+		}
+		fmt.Fprintf(&b, "Searched for as: %s (a changes this)\n", e(strings.Join(names, "; ")))
 	}
 	if v.LibCount > 0 && v.Lib != nil {
 		fmt.Fprintf(&b, "\n[dodgerblue]In your library[-] (%d cop%s): %s · %s\n", v.LibCount, map[bool]string{true: "y", false: "ies"}[v.LibCount == 1], e(v.Lib.Path), v.Lib.Q)

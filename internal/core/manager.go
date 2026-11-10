@@ -70,8 +70,11 @@ type Job struct {
 	rounds     int
 	pendingOn  string // Waiting for something from you for this source (Bandcamp's emailed link)
 	started    time.Time
-	converting bool      // downloaded, being converted and tagged: a pause lets it finish
-	minQuality Threshold // a library upgrade's level, when stricter than your threshold
+	converting bool          // downloaded, being converted and tagged: a pause lets it finish
+	minQuality Threshold     // a library upgrade's level, when stricter than your threshold
+	album      string        // albumKey of the track (see albumfirst.go)…
+	albumOf    *Track        // …worked out for this one
+	alt        []NameVariant // the names it's searched for under instead of its own
 }
 
 // jobNote is one source's answer for a job. Skips (paused or busy sources) only matter for
@@ -99,6 +102,7 @@ type JobView struct {
 	Bumped     bool
 	RetryAt    time.Time
 	Started    time.Time
+	OtherNames []NameVariant // searched for under these instead of its own names
 	idx        int
 }
 
@@ -107,7 +111,7 @@ func (j *Job) view() JobView {
 	defer j.mu.Unlock()
 	v := JobView{Key: j.Track.Key, Track: j.Track, Playlists: j.playlists, State: j.state, Source: j.source,
 		Reason: j.lastErr, Reasons: append([]string(nil), j.reasons...), LibCount: len(j.lib), NeedBetter: j.needBetter,
-		Prio: j.prio, Bumped: j.bump > 0, RetryAt: j.retryAt, Started: j.started, idx: j.idx}
+		Prio: j.prio, Bumped: j.bump > 0, RetryAt: j.retryAt, Started: j.started, OtherNames: j.alt, idx: j.idx}
 	if j.rec != nil {
 		v.Rec = *j.rec
 	}
@@ -160,9 +164,12 @@ type Manager struct {
 	linksOnce atomic.Bool    // the next import asks the sites for links again
 	inputsSig string         // what the playlist files looked like when last read (importMu)
 
-	jobsMu sync.Mutex
-	jobs   map[string]*Job
-	order  []*Job
+	jobsMu  sync.Mutex
+	jobs    map[string]*Job
+	order   []*Job
+	byAlbum map[string][]*Job // the jobs of each album (albumKey), for album searches
+	albums  albumSearches
+	names   otherNames // the names songs are searched for under instead of their own
 
 	srcMu    sync.RWMutex
 	sources  []Source
@@ -235,6 +242,7 @@ func NewManager(cfgPath, dataDir string, cfg Config) *Manager {
 	m.resolver = newResolver(m.deezer, filepath.Join(dataDir, "cache", "catalog.json"))
 	m.resolver.catalog = m.catalog
 	m.adds = loadAdditions(filepath.Join(dataDir, "added.json"))
+	m.names.path = filepath.Join(dataDir, "other-names.json")
 	m.indexerDefs = loadIndexerDefs(filepath.Join(dataDir, "cache", "indexers"))
 	for _, n := range allSources {
 		m.health[healthKey(n)] = &sourceHealth{}
@@ -1033,18 +1041,54 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 	}
 	j.mu.Unlock()
 
+	// The names to search under: its own, or the ones you chose (see othernames.go).
+	j.mu.Lock()
+	alt := j.alt
+	j.mu.Unlock()
+	forms := []*Track{t}
+	if len(alt) > 0 {
+		forms = forms[:0]
+		for _, v := range alt {
+			forms = append(forms, v.track(t))
+		}
+	}
+	// Album first: the album's searches, for all of its tracks still to do, before the track's
+	// own (see albumfirst.go).
+	j.mu.Lock()
+	albumPhase := len(alt) == 0 && t.SourceURL == "" && j.album != ""
+	j.mu.Unlock()
+	albumLooked := map[string]bool{}
+
 	transient, counted := false, false
 	var retryAt time.Time
 	skipped := map[string]bool{}
 	failed := map[string]bool{} // candidates that didn't work out, not to be tried again in this run
 	var name string
 	note := func(r string) { j.addNote(name, r, false) }
+	// What the album phase finds is a shortcut: a source it didn't work out on is still
+	// searched properly afterwards.
+	markTried := func(name string, done bool) {
+		if !albumPhase {
+			m.markTried(j, name, done)
+		}
+	}
 	for {
 		if ctx.Err() != nil {
 			return result{aborted: true}
 		}
-		src := m.nextSource(j, needBetter, upgrading, libQ, &transient, &retryAt, skipped)
-		if src == nil {
+		var src Source
+		if albumPhase {
+			as := m.nextAlbumSource(j, needBetter, libQ, albumLooked)
+			if as == nil {
+				albumPhase = false
+				continue
+			}
+			j.setState(gen, JobSearching, as.Name())
+			if !m.albumFirst(ctx, j, as, task) {
+				continue
+			}
+			src = as
+		} else if src = m.nextSource(j, needBetter, upgrading, libQ, &transient, &retryAt, skipped); src == nil {
 			break
 		}
 		var label string
@@ -1059,7 +1103,11 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			continue
 		}
 		task.setStage("searching " + label)
-		cands, err := src.Search(ctx, t)
+		searchAs := forms
+		if name == linkSourceName {
+			searchAs = []*Track{t} // the link is the song itself
+		}
+		accepted, rejected, err := searchUnder(ctx, src, searchAs)
 		m.searchGate.release()
 		if ctx.Err() != nil {
 			return result{aborted: true}
@@ -1077,13 +1125,12 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			note(label + ": " + err.Error())
 			if isUnavailable(err) && !upgrading {
 				transient, counted = true, true
-				m.markTried(j, name, false)
+				markTried(name, false)
 			} else {
-				m.markTried(j, name, true)
+				markTried(name, true)
 			}
 			continue
 		}
-		accepted, rejected := rank(t, cands)
 		if needBetter {
 			var keep []Match
 			for _, mt := range accepted {
@@ -1093,7 +1140,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			}
 			if len(keep) == 0 && len(accepted) > 0 {
 				note(fmt.Sprintf("%s: only %s, not better than your library copy (%s)", label, accepted[0].Cand.Quality, libQ))
-				m.markTried(j, name, true)
+				markTried(name, true)
 				continue
 			}
 			accepted = keep
@@ -1105,8 +1152,10 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 		}
 		debugf("%s / %s: %d accepted, %d rejected", t, name, len(accepted), len(rejected))
 		if len(accepted) == 0 {
-			note(label + ": " + describeRejection(rejected))
-			m.markTried(j, name, true)
+			if !albumPhase {
+				note(label + ": " + describeRejection(rejected))
+			}
+			markTried(name, true)
 			continue
 		}
 		m.srcMu.Lock()
@@ -1134,7 +1183,11 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			if ts, ok := src.(*TorrentSource); ok {
 				m.fetchAlong(ts, j, mt.Cand)
 			}
-			raw, err := src.Download(ctx, mt.Cand, t, workdir)
+			as := t
+			if mt.form != nil {
+				as = mt.form
+			}
+			raw, err := src.Download(ctx, mt.Cand, as, workdir)
 			release()
 			m.wake()
 			var rec Record
@@ -1177,7 +1230,7 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 			}
 		}
 		if !again && !srcBusy {
-			m.markTried(j, name, !srcTransient)
+			markTried(name, !srcTransient)
 		}
 	}
 	reason := j.noteText()
@@ -1194,6 +1247,41 @@ func (m *Manager) process(ctx context.Context, j *Job, task *Task, gen int) resu
 		reason = "no better copy found on any source: " + reason
 	}
 	return result{state: JobFailed, reason: reason}
+}
+
+// searchUnder searches src for the track under each of its names in turn (forms: usually just
+// its own), until one finds something that fits, and returns what fits (best first) and what
+// doesn't. An error on the first name is returned; on a later one, what was found before is.
+func searchUnder(ctx context.Context, src Source, forms []*Track) (accepted, rejected []Match, err error) {
+	seen := map[string]bool{}
+	for i, f := range forms {
+		cands, err := src.Search(ctx, f)
+		if err != nil {
+			if i == 0 || isBlocked(err) || isBusy(err) || ctx.Err() != nil {
+				return nil, nil, err
+			}
+			break
+		}
+		var fresh []Candidate
+		for _, c := range cands {
+			if k := c.Source + "\x00" + c.URL + "\x00" + c.Ref; !seen[k] {
+				seen[k] = true
+				fresh = append(fresh, c)
+			}
+		}
+		acc, rej := rank(f, fresh)
+		if len(forms) > 1 {
+			for k := range acc {
+				acc[k].form = f
+			}
+		}
+		accepted, rejected = append(accepted, acc...), append(rejected, rej...)
+		if len(accepted) > 0 {
+			break
+		}
+	}
+	sort.SliceStable(rejected, func(i, j int) bool { return rejected[i].Score > rejected[j].Score })
+	return accepted, rejected, nil
 }
 
 func (j *Job) setConverting(v bool) {
@@ -1243,15 +1331,22 @@ func (m *Manager) nextSource(j *Job, needBetter, upgrading bool, libQ Quality, t
 	}
 	track := j.Track
 	j.mu.Unlock()
-	if track.SourceURL != "" && !tried[linkSourceName] {
-		if src := m.linkedSource(track); src != nil {
+	if track.SourceURL != "" && !tried[linkSourceName] && !skipped[linkSourceName] {
+		src, wait := m.linkedSource(track)
+		switch {
+		case src != nil:
 			return src
+		case wait: // its site is paused: the link is tried when it's back, the other sources meanwhile
+			skipped[linkSourceName], *transient = true, true
+		default: // nothing can fetch it: search for it
+			j.addNote(linkSourceName, linkLabelPrefix+hostOf(track.SourceURL)+"): yt-dlp, needed to download from there, isn't available", false)
+			m.markTried(j, linkSourceName, true)
 		}
-		m.markTried(j, linkSourceName, true) // gone from there, or nothing can fetch it: search for it
 	}
+	sameSite := linkSites(track.SourceURL)
 	for _, src := range m.currentSources() {
 		name := src.Name()
-		if tried[name] {
+		if tried[name] || ContainsString(sameSite, name) {
 			continue
 		}
 		if skipped[src.Label()] { // busy or paused this round: later

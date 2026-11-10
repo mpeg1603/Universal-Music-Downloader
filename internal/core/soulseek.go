@@ -257,15 +257,8 @@ func (s *Soulseek) Search(ctx context.Context, t *Track) ([]Candidate, error) {
 // own. Then the song itself. Soulseek matches every word against file paths, so plain words.
 func slskQueries(t *Track) []string {
 	var queries []string
-	album := baseAlbum(t.Album)
-	if album != "" && !strings.EqualFold(normalize(album), normalize(searchTitle(t.Title))) {
-		artist := t.AlbumArtistStr()
-		if variousArtists(artist) {
-			artist = ""
-		}
-		if q := queryText(artist + " " + album); len(strings.Fields(q)) >= 2 {
-			queries = append(queries, q)
-		}
+	if q := slskAlbumQuery(t); q != "" {
+		queries = append(queries, q)
 	}
 	for _, q := range songQueries(t, 1) {
 		if q = queryText(q); !ContainsFold(queries, q) {
@@ -273,6 +266,23 @@ func slskQueries(t *Track) []string {
 		}
 	}
 	return queries
+}
+
+// slskAlbumQuery is the search for a track's album, or "" when it has none worth searching
+// for (a single, or a name of one word).
+func slskAlbumQuery(t *Track) string {
+	album := baseAlbum(t.Album)
+	if album == "" || len(t.Artists) == 0 || strings.EqualFold(normalize(album), normalize(searchTitle(t.Title))) {
+		return ""
+	}
+	artist := t.AlbumArtistStr()
+	if variousArtists(artist) {
+		artist = ""
+	}
+	if q := queryText(artist + " " + album); len(strings.Fields(q)) >= 2 {
+		return q
+	}
+	return ""
 }
 
 // candidates picks, from each user's answer, the file that fits the track best. Users who
